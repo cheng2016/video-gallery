@@ -1,0 +1,7 @@
+.venv/
+.cache/
+.vgdata/
+preview_cache/
+__pycache__/
+*.pyc
+.video_gallery_cache/

@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本地视频库（静态）</title>
+  <style>
+    :root {
+      --bg: #0e1116; --bg2: #151a22; --bg3: #1c2330; --border: #2a3344;
+      --text: #e8edf5; --muted: #8b97ab; --accent: #00c8d4; --radius: 10px;
+      --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; }
+    header {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 12px 18px; border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #141920, var(--bg));
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand { font-weight: 700; font-size: 1.1rem; white-space: nowrap; }
+    .brand span { color: var(--accent); }
+    .badge {
+      font-size: 0.75rem; color: var(--muted); border: 1px solid var(--border);
+      padding: 2px 8px; border-radius: 999px;
+    }
+    input[type=search] {
+      flex: 1; min-width: 160px; max-width: 360px;
+      padding: 8px 12px; border-radius: 999px; border: 1px solid var(--border);
+      background: var(--bg2); color: var(--text); outline: none;
+    }
+    .hint { font-size: 0.78rem; color: var(--muted); max-width: 420px; }
+    .layout { display: flex; min-height: calc(100vh - 58px); }
+    aside {
+      width: 220px; flex-shrink: 0; border-right: 1px solid var(--border);
+      background: var(--bg2); overflow: auto; padding: 10px;
+    }
+    .ch {
+      display: flex; justify-content: space-between; gap: 8px;
+      padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 2px;
+    }
+    .ch:hover { background: #243044; }
+    .ch.active { background: rgba(0,200,212,.12); color: var(--accent); font-weight: 600; }
+    .ch .n { color: var(--muted); font-size: 0.75rem; }
+    main { flex: 1; overflow: auto; padding: 14px 18px 40px; }
+    .filters { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+    .filter-row { display: flex; align-items: flex-start; gap: 10px; }
+    .filter-label {
+      flex: 0 0 42px; padding-top: 6px; font-size: 0.78rem; color: var(--muted); white-space: nowrap;
+    }
+    .filter-tags { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+    .tag {
+      border: 1px solid transparent; background: var(--bg3); color: var(--text);
+      padding: 5px 11px; border-radius: 999px; cursor: pointer; font-size: 0.84rem;
+    }
+    .tag .tag-n { margin-left: 6px; color: var(--muted); font-size: 0.72rem; }
+    .tag.active { background: rgba(0,200,212,.15); color: var(--accent); border-color: rgba(0,200,212,.35); }
+    .grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px;
+    }
+    .card {
+      background: var(--bg2); border-radius: var(--radius); overflow: hidden;
+      border: 1px solid transparent; cursor: pointer;
+    }
+    .card:hover { border-color: #009aa3; transform: translateY(-1px); }
+    .thumb { aspect-ratio: 16/9; background: #0a0c10; position: relative; }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .thumb .mark {
+      position: absolute; right: 8px; bottom: 8px; background: rgba(0,0,0,.75);
+      color: #fff; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px;
+    }
+    .body { padding: 10px 12px 12px; }
+    .title {
+      font-size: 0.9rem; line-height: 1.35; margin-bottom: 6px;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .meta { font-size: 0.75rem; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
+    .empty { text-align: center; color: var(--muted); padding: 60px 20px; }
+    .modal {
+      display: none; position: fixed; inset: 0; z-index: 50;
+      background: rgba(0,0,0,.88); flex-direction: column;
+    }
+    .modal.open { display: flex; }
+    .mbar {
+      display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: #0a0c10;
+    }
+    .mbar .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mbar button, .ma button {
+      border: 1px solid var(--border); background: var(--bg3); color: var(--text);
+      padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 0.82rem;
+    }
+    .mbar button.primary, .ma button.primary {
+      background: var(--accent); border-color: var(--accent); color: #041016; font-weight: 600;
+    }
+    .player { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 8px; }
+    .player video { width: 100%; max-width: 1200px; max-height: calc(100vh - 140px); background: #000; }
+    .ma { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 14px; }
+    .mi { padding: 0 16px 10px; color: var(--muted); font-size: 0.82rem; word-break: break-all; }
+    @media (max-width: 800px) {
+      aside { display: none; }
+      .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">本地<span>视频库</span></div>
+    <span class="badge">静态离线版</span>
+    <input type="search" id="q" placeholder="搜索片名…" />
+    <div class="hint" id="topHint">双击「打开图库.bat」或 index.html 即可浏览。</div>
+    <div class="hint" id="fileWarn" style="display:none;color:#ffb4a2"></div>
+  </header>
+  <div class="layout">
+    <aside id="channels"></aside>
+    <main>
+      <div class="filters" id="filters">
+        <div class="filter-row">
+          <div class="filter-label">排序</div>
+          <div class="filter-tags" id="sortTags"></div>
+        </div>
+        <div class="filter-row" id="genreRow" style="display:none">
+          <div class="filter-label">类型</div>
+          <div class="filter-tags" id="genreTags"></div>
+        </div>
+        <div class="filter-row">
+          <div class="filter-label">格式</div>
+          <div class="filter-tags" id="extTags"></div>
+        </div>
+        <div id="subFolderRows"></div>
+      </div>
+      <div class="grid" id="grid"></div>
+      <div class="empty" id="empty" style="display:none">没有视频</div>
+    </main>
+  </div>
+  <div class="modal" id="modal">
+    <div class="mbar">
+      <div class="t" id="mtitle"></div>
+      <button type="button" id="btnClose" title="关闭">关闭</button>
+    </div>
+    <div class="player"><video id="player" controls playsinline></video></div>
+    <div class="mi" id="minfo"></div>
+    <div class="ma">
+      <button type="button" class="primary" id="btnLocalOpen" title="在新标签打开视频文件">打开视频</button>
+      <button type="button" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
+      <button type="button" id="btnReveal" title="打开视频所在文件夹">打开位置</button>
+    </div>
+  </div>
+  <script src="_cache/hls.min.js"></script>
+  <script src="data.js"></script>
+  <script>
+    const DATA = window.__VG_DATA__ || { videos: [], root: "", exported_at: "" };
+    const state = { cat: "", folder: "", genre: "", ext: "", q: "", sort: "mtime_desc", cur: null };
+    let hls = null;
+
+    const SORTS = [
+      { id: "mtime_desc", label: "最新" },
+      { id: "mtime_asc", label: "最早" },
+      { id: "name", label: "名称" },
+      { id: "size_desc", label: "最大" },
+    ];
+    const GENRE_ORDER = [
+      "动作","喜剧","爱情","剧情","科幻","恐怖","悬疑","犯罪","警匪","枪战","战争","冒险","奇幻","玄幻","仙侠","武侠","功夫","动画","灾难","青春","古装","历史","宫廷","家庭","儿童","运动","音乐","西部","黑色","纪录片","短片","同性","医疗","律政","职场","都市","农村","谍战","僵尸","超级英雄","机器人","公路","美食","旅行","自然","神话","童话","励志","治愈","惊悚","恐怖喜剧","动作喜剧","爱情喜剧","犯罪悬疑","科幻动作","武侠仙侠","戏曲","脱口秀","真人秀","晚会"
+    ];
+
+    function $(id) { return document.getElementById(id); }
+    function esc(s) {
+      return String(s || "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      })[c]);
+    }
+    function normFolder(f) {
+      return String(f || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    }
+    function videoCat(v) {
+      const f = normFolder(v.folder);
+      return f ? f.split("/")[0] : "";
+    }
+    function videoGenres(v) {
+      return Array.isArray(v.genres) ? v.genres : [];
+    }
+
+    function cats() {
+      const map = {};
+      for (const v of DATA.videos) {
+        const c = v.category || videoCat(v) || "";
+        map[c] = (map[c] || 0) + 1;
+      }
+      return map;
+    }
+
+    function inCategory(v) {
+      if (state.cat === "__root__") return !normFolder(v.folder);
+      if (!state.cat) return true;
+      return (v.category || videoCat(v)) === state.cat;
+    }
+
+    function categoryVideos() {
+      return DATA.videos.filter(inCategory);
+    }
+
+    function baseScoped() {
+      let list = categoryVideos();
+      const folder = normFolder(state.folder);
+      if (folder) {
+        list = list.filter((v) => {
+          const f = normFolder(v.folder);
+          return f === folder || f.startsWith(folder + "/");
+        });
+      }
+      if (state.ext) {
+        const ext = state.ext.startsWith(".") ? state.ext : ("." + state.ext);
+        list = list.filter((v) => (v.ext || "").toLowerCase() === ext.toLowerCase());
+      }
+      if (state.q) {
+        const q = state.q.toLowerCase();
+        list = list.filter((v) => (v.name + " " + (v.folder || "")).toLowerCase().includes(q));
+      }
+      return list;
+    }
+
+    function filtered() {
+      let list = baseScoped();
+      if (state.genre) {
+        list = list.filter((v) => videoGenres(v).includes(state.genre));
+      }
+      const rev = state.sort !== "mtime_asc" && state.sort !== "name";
+      list.sort((a, b) => {
+        if (state.sort === "name") return (a.name || "").localeCompare(b.name || "", "zh");
+        if (state.sort.startsWith("size")) return (a.size || 0) - (b.size || 0);
+        return (a.mtime || 0) - (b.mtime || 0);
+      });
+      if (rev) list.reverse();
+      return list;
+    }
+
+    function genreFacets(list) {
+      const map = {};
+      for (const v of list) {
+        for (const g of videoGenres(v)) map[g] = (map[g] || 0) + 1;
+      }
+      return Object.keys(map)
+        .map((name) => ({ name, count: map[name] }))
+        .sort((a, b) => {
+          const ia = GENRE_ORDER.indexOf(a.name);
+          const ib = GENRE_ORDER.indexOf(b.name);
+          return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || b.count - a.count || a.name.localeCompare(b.name, "zh");
+        });
+    }
+
+    function extFacets(list) {
+      const map = {};
+      for (const v of list) {
+        const ext = (v.ext || "").toLowerCase() || "unknown";
+        map[ext] = (map[ext] || 0) + 1;
+      }
+      return Object.keys(map)
+        .map((ext) => ({
+          ext,
+          count: map[ext],
+          label: ext === "unknown" ? "未知" : ext.replace(".", "").toUpperCase(),
+        }))
+        .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
+    }
+
+    function subfolderFacets(list, prefix) {
+      prefix = normFolder(prefix);
+      const counts = {};
+      for (const v of list) {
+        const f = normFolder(v.folder);
+        if (!f) continue;
+        let rest;
+        if (prefix) {
+          if (f === prefix) continue;
+          if (!f.startsWith(prefix + "/")) continue;
+          rest = f.slice(prefix.length + 1);
+        } else {
+          rest = f;
+        }
+        const nxt = rest.split("/")[0];
+        if (!nxt) continue;
+        const full = prefix ? (prefix + "/" + nxt) : nxt;
+        if (f === full || f.startsWith(full + "/")) {
+          counts[nxt] = (counts[nxt] || 0) + 1;
+        }
+      }
+      return Object.keys(counts)
+        .map((name) => ({
+          id: prefix ? (prefix + "/" + name) : name,
+          name,
+          count: counts[name],
+        }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "zh"));
+    }
+
+    function subfolderLevels(catVideos) {
+      const cat = state.cat;
+      if (!cat || cat === "__root__") return [];
+      let folder = normFolder(state.folder);
+      if (folder === cat) folder = "";
+      if (folder && folder !== cat && !folder.startsWith(cat + "/")) {
+        folder = cat + "/" + folder;
+      }
+      const prefixes = [cat];
+      if (folder.startsWith(cat + "/")) {
+        let acc = cat;
+        for (const part of folder.slice(cat.length + 1).split("/")) {
+          if (!part) continue;
+          acc = acc + "/" + part;
+          prefixes.push(acc);
+        }
+      }
+      const levels = [];
+      for (let i = 0; i < prefixes.length; i++) {
+        const prefix = prefixes[i];
+        const items = subfolderFacets(catVideos, prefix);
+        if (!items.length) break;
+        let selected = "";
+        if (folder.startsWith(prefix + "/")) {
+          selected = prefix + "/" + folder.slice(prefix.length + 1).split("/")[0];
+        }
+        levels.push({
+          label: i === 0 ? "子类" : prefix.split("/").pop(),
+          selected,
+          all_id: prefix === cat ? "" : prefix,
+          items,
+        });
+      }
+      return levels;
+    }
+
+    function renderChannels() {
+      const map = cats();
+      const total = DATA.videos.length;
+      let html = `<div class="ch ${!state.cat ? "active" : ""}" data-cat=""><span>全部</span><span class="n">${total}</span></div>`;
+      const prefer = ["电影", "电视剧", "综艺", "动漫", "少儿", "纪录片", "短剧", "体育", "音乐", "教育", "其他", ""];
+      const keys = Object.keys(map).sort((a, b) => {
+        const ia = prefer.indexOf(a); const ib = prefer.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || map[b] - map[a];
+      });
+      for (const k of keys) {
+        const id = k === "" ? "__root__" : k;
+        const label = k === "" ? "未分类" : k;
+        html += `<div class="ch ${state.cat === id ? "active" : ""}" data-cat="${esc(id)}"><span>${esc(label)}</span><span class="n">${map[k]}</span></div>`;
+      }
+      $("channels").innerHTML = html;
+    }
+
+    function renderSorts() {
+      $("sortTags").innerHTML = SORTS.map((s) =>
+        `<button type="button" class="tag ${state.sort === s.id ? "active" : ""}" data-sort="${s.id}">${s.label}</button>`
+      ).join("");
+    }
+
+    function renderGenreTags(list) {
+      const genres = genreFacets(list);
+      const row = $("genreRow");
+      if (!genres.length) {
+        row.style.display = "none";
+        $("genreTags").innerHTML = "";
+        if (state.genre) state.genre = "";
+        return;
+      }
+      if (state.genre && !genres.some((g) => g.name === state.genre)) state.genre = "";
+      row.style.display = "flex";
+      let html = `<button type="button" class="tag ${!state.genre ? "active" : ""}" data-genre="">全部</button>`;
+      for (const g of genres) {
+        html += `<button type="button" class="tag ${state.genre === g.name ? "active" : ""}" data-genre="${esc(g.name)}">${esc(g.name)}<span class="tag-n">${g.count}</span></button>`;
+      }
+      $("genreTags").innerHTML = html;
+    }
+
+    function renderExtTags(list) {
+      const types = extFacets(list);
+      let html = `<button type="button" class="tag ${!state.ext ? "active" : ""}" data-ext="">全部</button>`;
+      for (const t of types) {
+        html += `<button type="button" class="tag ${state.ext === t.ext ? "active" : ""}" data-ext="${esc(t.ext)}">${esc(t.label)}<span class="tag-n">${t.count}</span></button>`;
+      }
+      $("extTags").innerHTML = html;
+    }
+
+    function renderSubTags(catVideos) {
+      const box = $("subFolderRows");
+      const rows = subfolderLevels(catVideos);
+      if (!state.cat || state.cat === "__root__" || !rows.length) {
+        box.innerHTML = "";
+        return;
+      }
+      box.innerHTML = rows.map((lv, idx) => {
+        const selected = lv.selected || "";
+        const allId = lv.all_id || "";
+        const allActive = !selected;
+        let tags = `<button type="button" class="tag ${allActive ? "active" : ""}" data-folder="${esc(allId)}" data-level="${idx}">全部</button>`;
+        for (const c of lv.items || []) {
+          const active = selected === c.id;
+          tags += `<button type="button" class="tag ${active ? "active" : ""}" data-folder="${esc(c.id)}" data-level="${idx}">${esc(c.name)}<span class="tag-n">${c.count}</span></button>`;
+        }
+        return `<div class="filter-row" data-sub-level="${idx}">
+          <div class="filter-label">${esc(lv.label || "子类")}</div>
+          <div class="filter-tags">${tags}</div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderGrid() {
+      const list = filtered();
+      $("empty").style.display = list.length ? "none" : "block";
+      $("grid").innerHTML = list.map((v) => {
+        const mark = v.kind === "m3u8" ? "HLS" : (v.seg_count ? (v.seg_count + "段") : (v.ext || "").replace(".", "").toUpperCase());
+        const gtxt = videoGenres(v).slice(0, 2).join("·");
+        const thumb = v.thumb
+          ? `<img src="${esc(v.thumb)}" alt="" loading="lazy" onerror="this.style.opacity=.2" />`
+          : `<img alt="" style="opacity:.2" />`;
+        return `<div class="card" data-id="${esc(v.id)}">
+          <div class="thumb">
+            ${thumb}
+            <span class="mark">${esc(mark)}</span>
+          </div>
+          <div class="body">
+            <div class="title">${esc(v.name)}</div>
+            <div class="meta">
+              <span>${esc(v.size_h)}</span>
+              <span>${esc(v.folder || "根目录")}</span>
+              ${gtxt ? `<span>${esc(gtxt)}</span>` : ""}
+            </div>
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    function destroyHls() {
+      if (hls) { try { hls.destroy(); } catch (_) {} hls = null; }
+    }
+
+    const BRIDGE_PORT = Number((DATA && DATA.bridge_port) || 8767);
+    const BRIDGE_ORIGIN = `http://127.0.0.1:${BRIDGE_PORT}`;
+    const ON_HTTP = location.protocol === "http:" || location.protocol === "https:";
+    let closingFromPop = false;
+    let bridgeReady = ON_HTTP && location.hostname === "127.0.0.1";
+
+    async function tryBridgePost(action, path, vid) {
+      const payload = JSON.stringify({ action, path, id: vid || "" });
+      const urls = [];
+      if (ON_HTTP) urls.push("/api/local");
+      urls.push(`${BRIDGE_ORIGIN}/api/local`);
+      let lastErr = "无法连接本地助手";
+      for (const url of urls) {
+        try {
+          const r = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+          });
+          const data = await r.json();
+          if (data && data.ok) return data;
+          lastErr = (data && data.msg) || ("HTTP " + r.status);
+        } catch (e) {
+          lastErr = String(e && e.message ? e.message : e);
+        }
+      }
+      throw new Error(lastErr);
+    }
+
+    async function pingBridge() {
+      try {
+        const r = await fetch(`${BRIDGE_ORIGIN}/api/ping`, { cache: "no-store" });
+        const data = await r.json();
+        bridgeReady = !!(data && data.ok);
+        return bridgeReady;
+      } catch (_) {
+        bridgeReady = ON_HTTP && location.hostname === "127.0.0.1";
+        return bridgeReady;
+      }
+    }
+
+    async function ensureHttpGallery() {
+      if (ON_HTTP) return;
+      const ok = await pingBridge();
+      if (!ok) return;
+      const file = location.pathname.split("/").pop() || "index.html";
+      location.replace(`${BRIDGE_ORIGIN}/${file}${location.search || ""}${location.hash || ""}`);
+    }
+
+    function closePlayer() {
+      destroyHls();
+      const video = $("player");
+      video.onended = null;
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      $("modal").classList.remove("open");
+      state.cur = null;
+      if (!closingFromPop && location.hash === "#play") {
+        history.back();
+      }
+    }
+
+    function openItem(v) {
+      state.cur = v;
+      destroyHls();
+      $("mtitle").textContent = v.name;
+      let tip = v.path || v.src || "";
+      if (v.note) tip += (tip ? " · " : "") + v.note;
+      $("minfo").textContent = tip;
+      const video = $("player");
+      video.removeAttribute("src");
+      video.load();
+      $("modal").classList.add("open");
+      const file = (location.pathname.split("/").pop() || "index.html") + (location.search || "");
+      const st = {
+        vgPlayer: v.id,
+        vgFilter: true,
+        cat: state.cat,
+        folder: state.folder,
+        genre: state.genre,
+        ext: state.ext,
+        sort: state.sort,
+        q: state.q,
+      };
+      if (location.hash !== "#play") {
+        history.pushState(st, "", file + "#play");
+      } else {
+        history.replaceState(st, "", file + "#play");
+      }
+
+      if (v.playlist && window.Hls && Hls.isSupported()) {
+        hls = new Hls();
+        hls.loadSource(v.playlist);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+        hls.on(Hls.Events.ERROR, (_, d) => {
+          if (d && d.fatal) {
+            destroyHls();
+            $("minfo").textContent = "浏览器 HLS 失败，请点「系统播放器」。\n" + (v.path || v.src || "");
+          }
+        });
+        return;
+      }
+      if (v.playlist && video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = v.playlist;
+        video.play().catch(() => {});
+        return;
+      }
+      if (v.src) {
+        video.src = v.src;
+        video.play().catch(() => {
+          $("minfo").textContent = "浏览器内嵌播放失败，请用「系统播放器」。\n" + (v.path || v.src);
+        });
+      }
+    }
+
+    function toFileUrl(absPath) {
+      if (!absPath) return "";
+      let p = String(absPath).replace(/\\/g, "/");
+      // D:/a/b -> file:///D:/a/b
+      if (/^[a-zA-Z]:\//.test(p)) return "file:///" + p;
+      if (p.startsWith("/")) return "file://" + p;
+      return "file:///" + p;
+    }
+
+    function folderFileUrl(absPath) {
+      if (!absPath) return "";
+      let p = String(absPath).replace(/\\/g, "/");
+      const i = p.lastIndexOf("/");
+      if (i <= 0) return toFileUrl(p);
+      return toFileUrl(p.slice(0, i + 1));
+    }
+
+    function openInBrowser(url) {
+      if (!url) return false;
+      const a = document.createElement("a");
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return true;
+    }
+
+    async function localAction(action) {
+      const v = state.cur;
+      if (!v) return;
+      const path = v.path || "";
+      const fileUrl = v.file_url || toFileUrl(path) || v.src || "";
+
+      if (action === "path") {
+        if (!path && !fileUrl) {
+          alert("没有本地路径");
+          return;
+        }
+        const text = path || fileUrl;
+        try {
+          await navigator.clipboard.writeText(text);
+          $("minfo").textContent = "已复制路径：\n" + text;
+        } catch (_) {
+          prompt("复制路径：", text);
+        }
+        return;
+      }
+
+      if (action === "reveal") {
+        // 优先用相对目录（http / file 都能打开所在文件夹页）
+        let url = "";
+        if (v.src) {
+          const rel = String(v.src).replace(/\\/g, "/");
+          const i = rel.lastIndexOf("/");
+          url = i >= 0 ? rel.slice(0, i + 1) : "./";
+        }
+        if (!url) url = folderFileUrl(path);
+        if (!openInBrowser(url)) {
+          alert("无法打开位置");
+          return;
+        }
+        $("minfo").textContent = "已打开所在文件夹\n" + (path || url);
+        return;
+      }
+
+      // 系统播放器：浏览器新标签打开视频文件
+      if (action === "open") {
+        // http 下优先相对路径；file:// 下优先 file:/// 绝对路径
+        const url = (ON_HTTP && v.src) ? v.src : (fileUrl || v.src || "");
+        if (!openInBrowser(url)) {
+          alert("没有可打开的视频路径");
+          return;
+        }
+        $("minfo").textContent = "已在新标签打开视频\n" + (path || url);
+      }
+    }
+
+    function pushFilterHistory() {
+      const st = {
+        vgFilter: true,
+        cat: state.cat,
+        folder: state.folder,
+        genre: state.genre,
+        ext: state.ext,
+        sort: state.sort,
+        q: state.q,
+      };
+      const q = new URLSearchParams();
+      if (state.cat) q.set("c", state.cat);
+      if (state.folder) q.set("f", state.folder);
+      if (state.genre) q.set("g", state.genre);
+      if (state.ext) q.set("e", state.ext);
+      if (state.sort && state.sort !== "mtime_desc") q.set("s", state.sort);
+      if (state.q) q.set("q", state.q);
+      const qs = q.toString();
+      const file = (location.pathname.split("/").pop() || "index.html");
+      try {
+        history.pushState(st, "", qs ? (file + "?" + qs) : file);
+      } catch (_) {}
+    }
+
+    function applyFilterState(st) {
+      if (!st || !st.vgFilter) return;
+      state.cat = st.cat || "";
+      state.folder = st.folder || "";
+      state.genre = st.genre || "";
+      state.ext = st.ext || "";
+      state.sort = st.sort || "mtime_desc";
+      state.q = st.q || "";
+      if ($("q")) $("q").value = state.q;
+      refresh();
+    }
+
+    function readFiltersFromUrl() {
+      try {
+        const q = new URLSearchParams(location.search);
+        if (q.has("c")) state.cat = q.get("c") || "";
+        if (q.has("f")) state.folder = q.get("f") || "";
+        if (q.has("g")) state.genre = q.get("g") || "";
+        if (q.has("e")) state.ext = q.get("e") || "";
+        if (q.has("s")) state.sort = q.get("s") || "mtime_desc";
+        if (q.has("q")) state.q = q.get("q") || "";
+        if ($("q") && state.q) $("q").value = state.q;
+      } catch (_) {}
+    }
+
+    function refresh() {
+      let catList = categoryVideos();
+      if (state.ext) {
+        const ext = state.ext.startsWith(".") ? state.ext : ("." + state.ext);
+        catList = catList.filter((v) => (v.ext || "").toLowerCase() === ext.toLowerCase());
+      }
+      if (state.q) {
+        const q = state.q.toLowerCase();
+        catList = catList.filter((v) => (v.name + " " + (v.folder || "")).toLowerCase().includes(q));
+      }
+      const scoped = baseScoped();
+      renderChannels();
+      renderSorts();
+      renderGenreTags(scoped);
+      renderExtTags(categoryVideos());
+      renderSubTags(catList);
+      renderGrid();
+      $("topHint").textContent = `共 ${DATA.videos.length} 个 · 当前 ${filtered().length} · 导出自 ${DATA.root || ""} · ${DATA.exported_at || ""}`;
+    }
+
+    function onFilterChange(push) {
+      refresh();
+      if (push) pushFilterHistory();
+    }
+
+    $("channels").addEventListener("click", (e) => {
+      const el = e.target.closest("[data-cat]");
+      if (!el) return;
+      state.cat = el.dataset.cat || "";
+      state.folder = "";
+      state.genre = "";
+      onFilterChange(true);
+    });
+    $("sortTags").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-sort]");
+      if (!b) return;
+      state.sort = b.dataset.sort;
+      onFilterChange(true);
+    });
+    $("genreTags").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-genre]");
+      if (!b) return;
+      state.genre = b.dataset.genre || "";
+      onFilterChange(true);
+    });
+    $("extTags").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-ext]");
+      if (!b) return;
+      state.ext = b.dataset.ext || "";
+      onFilterChange(true);
+    });
+    $("subFolderRows").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-folder]");
+      if (!btn) return;
+      let folder = btn.getAttribute("data-folder");
+      if (folder == null) return;
+      folder = normFolder(folder);
+      if (folder && folder === state.cat) folder = "";
+      state.folder = folder;
+      onFilterChange(true);
+    });
+    let qTimer = 0;
+    $("q").addEventListener("input", (e) => {
+      state.q = e.target.value.trim();
+      refresh();
+      clearTimeout(qTimer);
+      qTimer = setTimeout(() => pushFilterHistory(), 400);
+    });
+    $("grid").addEventListener("click", (e) => {
+      const card = e.target.closest(".card");
+      if (!card) return;
+      const v = DATA.videos.find((x) => x.id === card.dataset.id);
+      if (v) openItem(v);
+    });
+    $("btnClose").addEventListener("click", closePlayer);
+    $("btnLocalOpen").addEventListener("click", () => localAction("open"));
+    $("btnCopyPath").addEventListener("click", () => localAction("path"));
+    $("btnReveal").addEventListener("click", () => localAction("reveal"));
+    $("modal").addEventListener("click", (e) => {
+      if (e.target === $("modal")) closePlayer();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && $("modal").classList.contains("open")) closePlayer();
+    });
+    window.addEventListener("popstate", (e) => {
+      if ($("modal").classList.contains("open") || location.hash === "#play") {
+        // 从播放页返回：只关播放器
+        if ($("modal").classList.contains("open")) {
+          closingFromPop = true;
+          destroyHls();
+          const video = $("player");
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+          $("modal").classList.remove("open");
+          state.cur = null;
+          closingFromPop = false;
+        }
+        if (e.state && e.state.vgFilter) applyFilterState(e.state);
+        return;
+      }
+      if (e.state && e.state.vgFilter) applyFilterState(e.state);
+      else if (!e.state) {
+        // 回到最初
+        readFiltersFromUrl();
+        refresh();
+      }
+    });
+
+    if (!DATA.videos || !DATA.videos.length) {
+      $("empty").style.display = "block";
+      $("empty").textContent = "data.js 无数据。请先在服务版里扫描并点「导出静态站」。";
+    } else {
+      for (const v of DATA.videos) {
+        if (!v.category) v.category = videoCat(v);
+        if (!Array.isArray(v.genres)) v.genres = [];
+      }
+      readFiltersFromUrl();
+      if (location.hash === "#play") {
+        history.replaceState(null, "", location.pathname + location.search);
+      }
+      if (!ON_HTTP) {
+        // file:// 也可浏览；打开视频/位置走浏览器链接
+      }
+      refresh();
+    }
+  </script>
+</body>
+</html>

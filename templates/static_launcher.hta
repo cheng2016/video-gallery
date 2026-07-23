@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>本地视频库</title>
+  <HTA:APPLICATION
+    ID="vgApp"
+    APPLICATIONNAME="本地视频库"
+    BORDER="thick"
+    SCROLL="yes"
+    SINGLEINSTANCE="yes"
+    SHOWINTASKBAR="yes"
+  />
+  <script language="JScript">
+    function vgOpen(path) {
+      if (!path) return false;
+      try {
+        new ActiveXObject("WScript.Shell").Run('"' + String(path).replace(/"/g, "") + '"', 1, false);
+        return true;
+      } catch (e) {
+        alert("打开失败: " + e.message);
+        return false;
+      }
+    }
+    function vgReveal(path) {
+      if (!path) return false;
+      try {
+        new ActiveXObject("WScript.Shell").Run(
+          'explorer /select,"' + String(path).replace(/"/g, "") + '"',
+          1,
+          false
+        );
+        return true;
+      } catch (e) {
+        alert("定位失败: " + e.message);
+        return false;
+      }
+    }
+    window.vgLocal = { open: vgOpen, reveal: vgReveal };
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+    iframe { border: 0; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <iframe src="index.html" application="yes"></iframe>
+</body>
+</html>
