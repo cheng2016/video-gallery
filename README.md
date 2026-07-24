@@ -20,7 +20,7 @@
 | **安装极简** | Windows 双击 `start.bat`，自动建虚拟环境装依赖，不用会命令行 |
 
 一句话：**把「文件夹」升级成「片库」**，隐私、速度、可控，全在你手上。
-<img width="2880" height="1530" alt="4f512cb27e80d68a1b5d5f6daf8f9b1d" src="https://github.com/user-attachments/assets/6024ae51-4bc0-4313-8ad5-0e9d2ebec75a" />
+
 ---
 
 ## 适合谁
@@ -40,6 +40,8 @@
 | 预览图墙 | `preview_cache\` 里自动截帧；文件名混淆（`.vgj`），不污染视频盘目录 |
 | 持久索引 | 再次打开同一盘：优先读缓存，增量更新，少等冤枉时间 |
 | 离线静态站（可选） | 视频盘下 `_video_gallery_static\`，双击 `index.html` 就能逛 |
+
+<img width="2880" height="1530" alt="4f512cb27e80d68a1b5d5f6daf8f9b1d" src="https://github.com/user-attachments/assets/6024ae51-4bc0-4313-8ad5-0e9d2ebec75a" />
 
 ---
 
