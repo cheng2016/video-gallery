@@ -2,6 +2,8 @@
 
 扫描本地硬盘视频，按文件夹/类型分类，生成加密预览图，浏览器浏览播放。
 
+<img width="2880" height="1530" alt="4f512cb27e80d68a1b5d5f6daf8f9b1d" src="https://github.com/user-attachments/assets/6024ae51-4bc0-4313-8ad5-0e9d2ebec75a" />
+
 ## 快速开始
 
 1. 安装 [Python 3.10+](https://www.python.org/downloads/)（勾选 Add to PATH）
