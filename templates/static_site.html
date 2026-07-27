@@ -25,15 +25,41 @@
       padding: 2px 8px; border-radius: 999px;
     }
     input[type=search] {
-      flex: 1; min-width: 160px; max-width: 360px;
+      flex: 0 1 360px;
+      width: 360px;
+      min-width: 160px;
+      max-width: 50vw;
       padding: 8px 12px; border-radius: 999px; border: 1px solid var(--border);
       background: var(--bg2); color: var(--text); outline: none;
+      transition: width 0.22s ease, flex-basis 0.22s ease, max-width 0.22s ease,
+        border-color 0.15s ease, box-shadow 0.22s ease, background 0.15s ease;
+    }
+    input[type=search]:focus {
+      flex-basis: 820px;
+      width: 820px;
+      max-width: min(920px, 78vw);
+      border-color: var(--accent);
+      background: #18202b;
+      box-shadow: 0 0 0 3px rgba(0, 200, 212, 0.12);
     }
     .hint { font-size: 0.78rem; color: var(--muted); max-width: 420px; }
+    .export-tip {
+      display: none; align-items: center; gap: 8px;
+      margin: 0 18px; padding: 6px 10px;
+      font-size: 0.78rem; color: var(--muted);
+      background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    }
+    .export-tip.show { display: inline-flex; }
+    .export-tip .tip-x {
+      border: none; background: transparent; color: var(--muted);
+      cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 2px;
+    }
+    .export-tip .tip-x:hover { color: var(--text); }
     .layout { display: flex; min-height: calc(100vh - 58px); }
     aside {
       width: 220px; flex-shrink: 0; border-right: 1px solid var(--border);
       background: var(--bg2); overflow: auto; padding: 10px;
+      position: relative; z-index: 20;
     }
     .ch {
       display: flex; justify-content: space-between; gap: 8px;
@@ -42,19 +68,111 @@
     .ch:hover { background: #243044; }
     .ch.active { background: rgba(0,200,212,.12); color: var(--accent); font-weight: 600; }
     .ch .n { color: var(--muted); font-size: 0.75rem; }
-    main { flex: 1; overflow: auto; padding: 14px 18px 40px; }
-    .filters { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
-    .filter-row { display: flex; align-items: flex-start; gap: 10px; }
-    .filter-label {
-      flex: 0 0 42px; padding-top: 6px; font-size: 0.78rem; color: var(--muted); white-space: nowrap;
+    main {
+      flex: 1; min-width: 0; overflow: auto;
+      display: flex; flex-direction: column;
     }
-    .filter-tags { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+    /* 完整筛选不吸顶，滚走后把内容区让出来 */
+    .filters {
+      display: flex; flex-direction: column; gap: 0;
+      padding: 12px 18px 4px;
+      margin: 0;
+      background: linear-gradient(180deg, #12161d 0%, var(--bg) 100%);
+      flex-shrink: 0;
+    }
+    .filter-row {
+      display: flex; align-items: flex-start; gap: 10px;
+      margin-bottom: 10px;
+    }
+    .filter-label {
+      flex: 0 0 42px; max-width: 72px; padding-top: 6px;
+      font-size: 0.82rem; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .filter-tags { display: flex; flex-wrap: wrap; gap: 8px; flex: 1; min-width: 0; }
+    #subFolderRows {
+      max-height: min(36vh, 280px);
+      overflow-x: hidden;
+      overflow-y: auto;
+      margin-bottom: 4px;
+    }
+    #subFolderRows:empty { display: none; margin: 0; }
     .tag {
       border: 1px solid transparent; background: var(--bg3); color: var(--text);
-      padding: 5px 11px; border-radius: 999px; cursor: pointer; font-size: 0.84rem;
+      padding: 5px 11px; border-radius: 999px; cursor: pointer; font-size: 0.86rem;
+      font-family: inherit; line-height: 1.35;
+      display: inline-flex; align-items: baseline; gap: 5px;
     }
-    .tag .tag-n { margin-left: 6px; color: var(--muted); font-size: 0.72rem; }
-    .tag.active { background: rgba(0,200,212,.15); color: var(--accent); border-color: rgba(0,200,212,.35); }
+    .tag:hover { background: #243044; border-color: var(--border); }
+    .tag .tag-n {
+      color: var(--muted); font-size: 0.72em; font-weight: 500; opacity: 0.85;
+    }
+    .tag.active {
+      background: rgba(0,200,212,.15); color: var(--accent);
+      border-color: rgba(0,200,212,.35); font-weight: 600;
+    }
+    .tag.active .tag-n { color: var(--accent); opacity: 0.7; }
+    /* 完整筛选不吸顶；滑动后吸顶显示当前选中的那一行筛选标签 */
+    .scope-sticky {
+      position: sticky; top: 0; z-index: 5;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 10px;
+      min-height: 48px;
+      padding: 8px 18px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(14, 17, 22, 0.96);
+      backdrop-filter: blur(8px);
+      flex-shrink: 0;
+    }
+    .scope-bar,
+    .sticky-filter-row {
+      grid-column: 1;
+      grid-row: 1;
+      min-width: 0;
+    }
+    .scope-bar {
+      font-size: 0.82rem; color: var(--muted);
+      display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
+    }
+    .scope-bar .sep { opacity: 0.4; }
+    .scope-bar .count { color: var(--text); }
+    .sticky-filter-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .scope-sticky.is-stuck.has-filter-row .scope-bar {
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .scope-sticky.is-stuck.has-filter-row .sticky-filter-row {
+      visibility: visible;
+      pointer-events: auto;
+    }
+    .sticky-filter-row .filter-label {
+      flex: 0 0 42px; max-width: 72px;
+      font-size: 0.82rem; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sticky-filter-row .filter-tags {
+      display: flex; flex-wrap: nowrap; gap: 8px; flex: 1; min-width: 0;
+      overflow-x: auto; padding-bottom: 2px;
+    }
+    .scope-filter-btn {
+      grid-column: 2;
+      grid-row: 1;
+      flex-shrink: 0;
+      border: 1px solid var(--border); background: var(--bg3); color: var(--text);
+      padding: 4px 10px; border-radius: 999px; cursor: pointer;
+      font-size: 0.78rem; font-family: inherit; white-space: nowrap;
+    }
+    .scope-filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .scope-sticky.is-stuck .scope-filter-btn { border-color: rgba(0,200,212,.35); color: var(--accent); }
+    .content-body { padding: 14px 18px 40px; flex: 1; }
     .grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px;
     }
@@ -107,12 +225,15 @@
     <div class="brand">本地<span>视频库</span></div>
     <span class="badge">静态离线版</span>
     <input type="search" id="q" placeholder="搜索片名…" />
-    <div class="hint" id="topHint">双击「打开图库.bat」或 index.html 即可浏览。</div>
+    <div class="export-tip" id="exportTip">
+      <span>双击「打开图库.bat」或 index.html 即可浏览。</span>
+      <button type="button" class="tip-x" id="tipDismiss" title="不再显示">×</button>
+    </div>
     <div class="hint" id="fileWarn" style="display:none;color:#ffb4a2"></div>
   </header>
   <div class="layout">
     <aside id="channels"></aside>
-    <main>
+    <main id="mainScroll">
       <div class="filters" id="filters">
         <div class="filter-row">
           <div class="filter-label">排序</div>
@@ -128,8 +249,15 @@
         </div>
         <div id="subFolderRows"></div>
       </div>
-      <div class="grid" id="grid"></div>
-      <div class="empty" id="empty" style="display:none">没有视频</div>
+      <div class="scope-sticky" id="scopeSticky">
+        <div class="sticky-filter-row" id="stickyFilterRow"></div>
+        <div class="scope-bar" id="scopeBar"></div>
+        <button type="button" class="scope-filter-btn" id="scopeFilterBtn" title="回到筛选栏">筛选</button>
+      </div>
+      <div class="content-body">
+        <div class="grid" id="grid"></div>
+        <div class="empty" id="empty" style="display:none">没有视频</div>
+      </div>
     </main>
   </div>
   <div class="modal" id="modal">
@@ -386,6 +514,7 @@
       const rows = subfolderLevels(catVideos);
       if (!state.cat || state.cat === "__root__" || !rows.length) {
         box.innerHTML = "";
+        renderStickyFilterRow();
         return;
       }
       box.innerHTML = rows.map((lv, idx) => {
@@ -404,6 +533,64 @@
           <div class="filter-tags">${tags}</div>
         </div>`;
       }).join("");
+      renderStickyFilterRow();
+    }
+
+    function renderStickyFilterRow() {
+      const box = $("stickyFilterRow");
+      const sticky = $("scopeSticky");
+      if (!box) return;
+      const subRows = $("subFolderRows") ? $("subFolderRows").querySelectorAll(".filter-row") : [];
+      let src = subRows.length ? subRows[subRows.length - 1] : null;
+      if (!src) {
+        const extRow = $("extTags") && $("extTags").closest(".filter-row");
+        src = extRow || null;
+      }
+      if (!src) {
+        box.innerHTML = "";
+        if (sticky) sticky.classList.remove("has-filter-row");
+        return;
+      }
+      box.innerHTML = src.innerHTML;
+      if (sticky) sticky.classList.add("has-filter-row");
+    }
+
+    function applyFolderButton(btn) {
+      let folder = btn.getAttribute("data-folder");
+      if (folder == null) return;
+      folder = normFolder(folder);
+      if (folder && folder === state.cat) folder = "";
+      const isAll = btn.getAttribute("data-all") === "1";
+      const prevFolder = normFolder(state.folder);
+      const prevAll = !!state.folderAll;
+      const parentOf = (path) => {
+        const parts = String(path || "").split("/").filter(Boolean);
+        parts.pop();
+        let parent = parts.join("/");
+        if (parent && parent === state.cat) parent = "";
+        return parent;
+      };
+      if (isAll && folder) {
+        if (prevFolder === folder) {
+          state.folderAll = !prevAll;
+        } else {
+          state.folder = folder;
+          state.folderAll = true;
+        }
+      } else if (!isAll && folder) {
+        const selected = prevFolder === folder || prevFolder.startsWith(folder + "/");
+        if (selected) {
+          state.folder = parentOf(folder);
+          state.folderAll = false;
+        } else {
+          state.folder = folder;
+          state.folderAll = true;
+        }
+      } else {
+        state.folder = "";
+        state.folderAll = false;
+      }
+      onFilterChange(true);
     }
 
     function renderGrid() {
@@ -689,6 +876,71 @@
       } catch (_) {}
     }
 
+    function renderScopeBar() {
+      const box = $("scopeBar");
+      if (!box) return;
+      const parts = [];
+      if (state.cat === "__root__") parts.push("未分类");
+      else if (state.cat) parts.push(esc(state.cat));
+      else parts.push("全部");
+      const folder = normFolder(state.folder);
+      if (folder) {
+        const rest = state.cat && folder.startsWith(state.cat + "/")
+          ? folder.slice(state.cat.length + 1)
+          : folder;
+        for (const seg of rest.split("/").filter(Boolean)) {
+          parts.push(`<span class="sep">/</span>`);
+          parts.push(esc(seg));
+        }
+        if (!state.folderAll) {
+          parts.push(`<span class="sep">·</span>`);
+          parts.push("仅根目录");
+        }
+      }
+      if (state.ext) {
+        parts.push(`<span class="sep">·</span>`);
+        parts.push(esc((state.ext || "").replace(".", "").toUpperCase() || state.ext));
+      }
+      if (state.genre) {
+        parts.push(`<span class="sep">·</span>`);
+        parts.push(esc(state.genre));
+      }
+      if (state.q) {
+        parts.push(`<span class="sep">·</span>`);
+        parts.push(`“${esc(state.q)}”`);
+      }
+      const n = filtered().length;
+      parts.push(`<span class="sep">·</span>`);
+      parts.push(`<span class="count">当前 ${n}</span>`);
+      const total = DATA.videos.length;
+      if (total && n !== total) parts.push(`<span class="sep">/</span><span>共 ${total}</span>`);
+      box.innerHTML = parts.join("");
+    }
+
+    function setupScopeSticky() {
+      const main = $("mainScroll");
+      const filters = $("filters");
+      const sticky = $("scopeSticky");
+      const btn = $("scopeFilterBtn");
+      if (!main || !filters || !sticky || !btn) return;
+      if (sticky.dataset.bound === "1") return;
+      sticky.dataset.bound = "1";
+      // 筛选栏滚出视口后，吸顶条高亮「筛选」提示可回去
+      if ("IntersectionObserver" in window) {
+        const io = new IntersectionObserver(
+          (entries) => {
+            const visible = entries.some((e) => e.isIntersecting);
+            sticky.classList.toggle("is-stuck", !visible);
+          },
+          { root: main, threshold: 0 }
+        );
+        io.observe(filters);
+      }
+      btn.addEventListener("click", () => {
+        filters.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+
     function refresh() {
       let catList = categoryVideos();
       if (state.ext) {
@@ -705,8 +957,9 @@
       renderGenreTags(scoped);
       renderExtTags(categoryVideos());
       renderSubTags(catList);
+      renderStickyFilterRow();
       renderGrid();
-      $("topHint").textContent = `共 ${DATA.videos.length} 个 · 当前 ${filtered().length} · 导出自 ${DATA.root || ""} · ${DATA.exported_at || ""}`;
+      renderScopeBar();
     }
 
     function onFilterChange(push) {
@@ -744,45 +997,32 @@
     $("subFolderRows").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-folder]");
       if (!btn) return;
-      let folder = btn.getAttribute("data-folder");
-      if (folder == null) return;
-      folder = normFolder(folder);
-      if (folder && folder === state.cat) folder = "";
-      const isAll = btn.getAttribute("data-all") === "1";
-      const prevFolder = normFolder(state.folder);
-      const prevAll = !!state.folderAll;
-      const parentOf = (path) => {
-        const parts = String(path || "").split("/").filter(Boolean);
-        parts.pop();
-        let parent = parts.join("/");
-        if (parent && parent === state.cat) parent = "";
-        return parent;
-      };
-      if (isAll && folder) {
-        // 更深行「全部」：同层可切换勾选；勾选=显示全部子目录视频，取消=只看根目录
-        if (prevFolder === folder) {
-          state.folderAll = !prevAll;
-        } else {
-          state.folder = folder;
-          state.folderAll = true;
-        }
-      } else if (!isAll && folder) {
-        // 子类标签可切换：已选中再点 → 取消回到上一层（不勾选「全部」，只看父级根目录）
-        const selected = prevFolder === folder || prevFolder.startsWith(folder + "/");
-        if (selected) {
-          state.folder = parentOf(folder);
-          // 与取消「全部」一致：停在父级且不勾选「全部」，只显示父级根目录视频
-          state.folderAll = false;
-        } else {
-          state.folder = folder;
-          state.folderAll = true;
-        }
-      } else {
-        // 频道行「全部」
-        state.folder = "";
-        state.folderAll = false;
+      applyFolderButton(btn);
+    });
+    $("scopeSticky").addEventListener("click", (e) => {
+      if (e.target.closest("#scopeFilterBtn")) return;
+      const folderBtn = e.target.closest("[data-folder]");
+      if (folderBtn) {
+        applyFolderButton(folderBtn);
+        return;
       }
-      onFilterChange(true);
+      const sortBtn = e.target.closest("[data-sort]");
+      if (sortBtn) {
+        state.sort = sortBtn.dataset.sort;
+        onFilterChange(true);
+        return;
+      }
+      const genreBtn = e.target.closest("[data-genre]");
+      if (genreBtn) {
+        state.genre = genreBtn.dataset.genre || "";
+        onFilterChange(true);
+        return;
+      }
+      const extBtn = e.target.closest("[data-ext]");
+      if (extBtn) {
+        state.ext = extBtn.dataset.ext || "";
+        onFilterChange(true);
+      }
     });
     let qTimer = 0;
     $("q").addEventListener("input", (e) => {
@@ -847,6 +1087,17 @@
       if (!ON_HTTP) {
         // file:// 也可浏览；打开视频/位置走浏览器链接
       }
+      const TIP_KEY = "vg_static_tip_dismissed";
+      try {
+        if (!localStorage.getItem(TIP_KEY)) {
+          $("exportTip").classList.add("show");
+        }
+      } catch (_) {}
+      $("tipDismiss").addEventListener("click", () => {
+        $("exportTip").classList.remove("show");
+        try { localStorage.setItem(TIP_KEY, "1"); } catch (_) {}
+      });
+      setupScopeSticky();
       refresh();
     }
   </script>

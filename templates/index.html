@@ -56,9 +56,16 @@
     }
     .brand span { color: var(--accent); }
     .search-wrap {
-      flex: 1;
-      max-width: 480px;
+      flex: 0 1 400px;
+      width: 400px;
+      max-width: 50vw;
       position: relative;
+      transition: width 0.22s ease, flex-basis 0.22s ease, max-width 0.22s ease;
+    }
+    .search-wrap:focus-within {
+      flex-basis: 900px;
+      width: 900px;
+      max-width: min(980px, 78vw);
     }
     .search-wrap input {
       width: 100%;
@@ -69,8 +76,13 @@
       color: var(--text);
       font-size: 0.95rem;
       outline: none;
+      transition: border-color 0.15s ease, box-shadow 0.22s ease, background 0.15s ease;
     }
-    .search-wrap input:focus { border-color: var(--accent); }
+    .search-wrap input:focus {
+      border-color: var(--accent);
+      background: #18202b;
+      box-shadow: 0 0 0 3px rgba(0, 200, 212, 0.12);
+    }
     .search-wrap::before {
       content: "⌕";
       position: absolute;
@@ -108,7 +120,8 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      flex-shrink: 0;
+      flex-shrink: 1;
+      min-width: 0;
     }
     .drive-bar label {
       color: var(--muted);
@@ -167,6 +180,8 @@
       flex-direction: column;
       overflow: hidden;
       transition: width 0.2s, margin 0.2s, opacity 0.2s;
+      position: relative;
+      z-index: 40;
     }
     aside.collapsed {
       width: 0;
@@ -261,7 +276,6 @@
 
     .filters {
       padding: 12px 20px 4px;
-      border-bottom: 1px solid var(--border);
       background: linear-gradient(180deg, #12161d 0%, var(--bg) 100%);
       flex-shrink: 0;
     }
@@ -289,6 +303,13 @@
       flex: 1;
       min-width: 0;
     }
+    #subFolderRows {
+      max-height: min(36vh, 280px);
+      overflow-x: hidden;
+      overflow-y: auto;
+      margin-bottom: 2px;
+    }
+    #subFolderRows:empty { display: none; margin: 0; }
     .tag {
       border: 1px solid transparent;
       background: var(--bg3);
@@ -384,8 +405,30 @@
       overflow-x: hidden;
       overflow-y: auto;
     }
-    .crumb {
-      padding: 12px 20px 0;
+    /* 完整筛选不吸顶；滑动后吸顶显示当前选中的那一行筛选标签 */
+    .scope-sticky {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 10px;
+      min-height: 48px;
+      padding: 8px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(14, 17, 22, 0.96);
+      backdrop-filter: blur(8px);
+      flex-shrink: 0;
+    }
+    .scope-sticky .crumb,
+    .sticky-filter-row {
+      grid-column: 1;
+      grid-row: 1;
+      min-width: 0;
+    }
+    .scope-sticky .crumb {
+      padding: 0;
       color: var(--muted);
       font-size: 0.85rem;
       display: flex;
@@ -393,16 +436,61 @@
       gap: 4px;
       align-items: center;
     }
-    .crumb button {
-      background: none;
-      border: none;
-      color: var(--muted);
-      cursor: pointer;
-      font-size: inherit;
-      font-family: inherit;
+    .scope-sticky .crumb .sep { opacity: 0.4; }
+    .scope-sticky .crumb .count { color: var(--text); }
+    .sticky-filter-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      visibility: hidden;
+      pointer-events: none;
     }
-    .crumb button:hover { color: var(--accent); }
-    .crumb .sep { opacity: 0.4; }
+    .scope-sticky.is-stuck.has-filter-row .crumb {
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .scope-sticky.is-stuck.has-filter-row .sticky-filter-row {
+      visibility: visible;
+      pointer-events: auto;
+    }
+    .sticky-filter-row .filter-label {
+      flex-shrink: 0;
+      min-width: 42px;
+      max-width: 72px;
+      font-size: 0.82rem;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sticky-filter-row .filter-tags {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 8px;
+      flex: 1;
+      min-width: 0;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+    .scope-filter-btn {
+      grid-column: 2;
+      grid-row: 1;
+      flex-shrink: 0;
+      border: 1px solid var(--border);
+      background: var(--bg3);
+      color: var(--text);
+      padding: 4px 10px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 0.78rem;
+      font-family: inherit;
+      white-space: nowrap;
+    }
+    .scope-filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .scope-sticky.is-stuck .scope-filter-btn {
+      border-color: rgba(0, 200, 212, 0.35);
+      color: var(--accent);
+    }
     .status-bar {
       padding: 8px 20px;
       font-size: 0.8rem;
@@ -614,21 +702,34 @@
       aside {
         position: absolute;
         left: 0; top: 57px; bottom: 0;
-        z-index: 30;
+        z-index: 50;
         transform: translateX(-100%);
         transition: transform 0.2s;
         box-shadow: 4px 0 24px rgba(0,0,0,0.4);
         width: var(--sidebar-w);
         opacity: 1;
+        pointer-events: none;
+      }
+      aside.open {
+        transform: translateX(0);
         pointer-events: auto;
       }
-      aside.open { transform: translateX(0); }
-      body.sidebar-hidden aside { width: var(--sidebar-w); opacity: 1; }
+      body.sidebar-hidden aside {
+        width: var(--sidebar-w);
+        opacity: 1;
+        pointer-events: none;
+      }
+      body.sidebar-hidden aside.open {
+        pointer-events: auto;
+      }
       body.sidebar-hidden .sidebar-show { display: none; }
       .grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
       .meta { display: none; }
       header { flex-wrap: wrap; }
-      .search-wrap { order: 10; max-width: none; width: 100%; }
+      .search-wrap,
+      .search-wrap:focus-within {
+        order: 10; flex: 1 1 auto; max-width: none; width: 100%;
+      }
     }
   </style>
 </head>
@@ -668,7 +769,7 @@
         <div class="tree" id="tree"></div>
       </div>
     </aside>
-    <section class="content">
+    <section class="content" id="contentScroll">
       <div class="filters" id="filters">
         <div class="filter-row">
           <div class="filter-label">排序</div>
@@ -684,7 +785,11 @@
         </div>
         <div id="subFolderRows"></div>
       </div>
-      <div class="crumb" id="crumb"></div>
+      <div class="scope-sticky" id="scopeSticky">
+        <div class="sticky-filter-row" id="stickyFilterRow"></div>
+        <div class="crumb" id="crumb"></div>
+        <button type="button" class="scope-filter-btn" id="scopeFilterBtn" title="回到筛选栏">筛选</button>
+      </div>
       <div class="status-bar" id="status"></div>
       <div class="grid-wrap">
         <div class="grid" id="grid"></div>
@@ -1087,6 +1192,7 @@
       const rows = levels || [];
       if (!state.category || state.category === "__root__" || !rows.length) {
         box.innerHTML = "";
+        renderStickyFilterRow();
         return;
       }
       box.innerHTML = rows.map((lv, idx) => {
@@ -1106,6 +1212,65 @@
           <div class="filter-tags">${tags}</div>
         </div>`;
       }).join("");
+      renderStickyFilterRow();
+    }
+
+    function renderStickyFilterRow() {
+      const box = $("stickyFilterRow");
+      const sticky = $("scopeSticky");
+      if (!box) return;
+      const subRows = $("subFolderRows") ? $("subFolderRows").querySelectorAll(".filter-row") : [];
+      let src = subRows.length ? subRows[subRows.length - 1] : null;
+      if (!src) {
+        const extRow = $("extTags") && $("extTags").closest(".filter-row");
+        src = extRow || null;
+      }
+      if (!src) {
+        box.innerHTML = "";
+        if (sticky) sticky.classList.remove("has-filter-row");
+        return;
+      }
+      box.innerHTML = src.innerHTML;
+      if (sticky) sticky.classList.add("has-filter-row");
+    }
+
+    function applyFolderButton(btn) {
+      let folder = btn.getAttribute("data-folder");
+      if (folder == null) return;
+      folder = String(folder).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      if (folder && folder === state.category) folder = "";
+      const isAll = btn.getAttribute("data-all") === "1";
+      const prevFolder = String(state.folder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      const prevAll = !!state.folderAll;
+      const parentOf = (path) => {
+        const parts = String(path || "").split("/").filter(Boolean);
+        parts.pop();
+        let parent = parts.join("/");
+        if (parent && parent === state.category) parent = "";
+        return parent;
+      };
+      if (isAll && folder) {
+        if (prevFolder === folder) {
+          state.folderAll = !prevAll;
+        } else {
+          state.folder = folder;
+          state.folderAll = true;
+        }
+      } else if (!isAll && folder) {
+        const selected = prevFolder === folder || prevFolder.startsWith(folder + "/");
+        if (selected) {
+          state.folder = parentOf(folder);
+          state.folderAll = false;
+        } else {
+          state.folder = folder;
+          state.folderAll = true;
+        }
+      } else {
+        state.folder = "";
+        state.folderAll = false;
+      }
+      saveUiPrefs();
+      refresh();
     }
 
     function renderTree(node, depth = 0) {
@@ -1133,10 +1298,46 @@
       if (state.category === "__root__") html = `<span>未分类</span>`;
       else if (state.category) html = `<span>${escapeHtml(state.category)}</span>`;
       else html = `<span>全部</span>`;
-      if (state.folder) html += `<span class="sep">/</span><span>${escapeHtml(state.folder)}</span>`;
+      if (state.folder) {
+        const folder = String(state.folder).replace(/\\/g, "/");
+        const rest = state.category && folder.startsWith(state.category + "/")
+          ? folder.slice(state.category.length + 1)
+          : folder;
+        for (const seg of rest.split("/").filter(Boolean)) {
+          html += `<span class="sep">/</span><span>${escapeHtml(seg)}</span>`;
+        }
+        if (!state.folderAll) html += `<span class="sep">·</span><span>仅根目录</span>`;
+      }
       if (state.ext) html += `<span class="sep">·</span><span>${escapeHtml(state.ext)}</span>`;
       if (state.genre) html += `<span class="sep">·</span><span>${escapeHtml(state.genre)}</span>`;
+      if (state.query) html += `<span class="sep">·</span><span>“${escapeHtml(state.query)}”</span>`;
+      if (state.totalCount != null) {
+        html += `<span class="sep">·</span><span class="count">当前 ${state.totalCount}</span>`;
+      }
       $("crumb").innerHTML = html;
+    }
+
+    function setupScopeSticky() {
+      const root = $("contentScroll");
+      const filters = $("filters");
+      const sticky = $("scopeSticky");
+      const btn = $("scopeFilterBtn");
+      if (!root || !filters || !sticky || !btn) return;
+      if (sticky.dataset.bound === "1") return;
+      sticky.dataset.bound = "1";
+      if ("IntersectionObserver" in window) {
+        const io = new IntersectionObserver(
+          (entries) => {
+            const visible = entries.some((e) => e.isIntersecting);
+            sticky.classList.toggle("is-stuck", !visible);
+          },
+          { root, threshold: 0 }
+        );
+        io.observe(filters);
+      }
+      btn.addEventListener("click", () => {
+        filters.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
     }
 
     function cardHtml(v) {
@@ -1204,7 +1405,7 @@
     let scrollObserver = null;
 
     function ensureScrollObserver() {
-      const root = document.querySelector("section.content");
+      const root = $("contentScroll") || document.querySelector("section.content");
       const sentinel = $("scrollSentinel");
       if (!root || !sentinel) return;
       if (scrollObserver) scrollObserver.disconnect();
@@ -1512,46 +1713,36 @@
     $("subFolderRows").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-folder]");
       if (!btn) return;
-      let folder = btn.getAttribute("data-folder");
-      if (folder == null) return;
-      folder = String(folder).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-      if (folder && folder === state.category) folder = "";
-      const isAll = btn.getAttribute("data-all") === "1";
-      const prevFolder = String(state.folder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-      const prevAll = !!state.folderAll;
-      const parentOf = (path) => {
-        const parts = String(path || "").split("/").filter(Boolean);
-        parts.pop();
-        let parent = parts.join("/");
-        if (parent && parent === state.category) parent = "";
-        return parent;
-      };
-      if (isAll && folder) {
-        // 更深行「全部」：同层可切换勾选；勾选=显示全部子目录视频，取消=只看根目录
-        if (prevFolder === folder) {
-          state.folderAll = !prevAll;
-        } else {
-          state.folder = folder;
-          state.folderAll = true;
-        }
-      } else if (!isAll && folder) {
-        // 子类标签可切换：已选中再点 → 取消回到上一层（不勾选「全部」，只看父级根目录）
-        const selected = prevFolder === folder || prevFolder.startsWith(folder + "/");
-        if (selected) {
-          state.folder = parentOf(folder);
-          // 与取消「全部」一致：停在父级且不勾选「全部」，只显示父级根目录视频
-          state.folderAll = false;
-        } else {
-          state.folder = folder;
-          state.folderAll = true;
-        }
-      } else {
-        // 频道行「全部」
-        state.folder = "";
-        state.folderAll = false;
+      applyFolderButton(btn);
+    });
+
+    $("scopeSticky").addEventListener("click", (e) => {
+      if (e.target.closest("#scopeFilterBtn")) return;
+      const folderBtn = e.target.closest("[data-folder]");
+      if (folderBtn) {
+        applyFolderButton(folderBtn);
+        return;
       }
-      saveUiPrefs();
-      refresh();
+      const sortBtn = e.target.closest("[data-sort]");
+      if (sortBtn) {
+        state.sort = sortBtn.dataset.sort || "mtime_desc";
+        saveUiPrefs();
+        refresh();
+        return;
+      }
+      const genreBtn = e.target.closest("[data-genre]");
+      if (genreBtn) {
+        state.genre = genreBtn.dataset.genre || "";
+        saveUiPrefs();
+        refresh();
+        return;
+      }
+      const extBtn = e.target.closest("[data-ext]");
+      if (extBtn) {
+        state.ext = extBtn.dataset.ext || "";
+        saveUiPrefs();
+        refresh();
+      }
     });
 
     $("treeToggleBtn").addEventListener("click", () => {
@@ -1726,6 +1917,8 @@
         setSidebarHidden(true);
       }
     } catch (_) {}
+
+    setupScopeSticky();
 
     // 打开页面：先自动检测盘符数量，再刷新列表
     (async () => {
