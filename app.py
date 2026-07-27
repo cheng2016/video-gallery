@@ -2089,7 +2089,7 @@ def _subfolder_levels(cat_videos: list[dict], category: str, folder: str) -> lis
         if folder_norm.startswith(prefix + "/"):
             selected = prefix + "/" + folder_norm[len(prefix) + 1 :].split("/")[0]
         label = "子类" if i == 0 else prefix.split("/")[-1]
-        # 第 1 行「全部」清空；更深行「全部」= 停在本层前缀（看该目录下全部）
+        # 第 1 行「全部」清空；更深行「全部」= 停在本层（勾选=含子目录全部，取消=只看根目录）
         all_id = "" if prefix == cat else prefix
         levels.append({
             "label": label,
@@ -2137,11 +2137,21 @@ def api_videos():
 
     if folder:
         folder = folder.replace("\\", "/")
-        videos = [
-            v for v in videos
-            if (v.get("folder") or "").replace("\\", "/") == folder
-            or (v.get("folder") or "").replace("\\", "/").startswith(folder + "/")
-        ]
+        # 有子分类时：folder_all=1（默认）含子目录全部；取消全部则只看本层根目录
+        # has_children 用未按搜索/格式收窄的频道列表，避免搜索时误判无子类
+        folder_all = request.args.get("folder_all", "").strip() in ("1", "true", "yes")
+        has_children = bool(_subfolder_facets(videos, "", folder))
+        if has_children and not folder_all:
+            videos = [
+                v for v in videos
+                if (v.get("folder") or "").replace("\\", "/") == folder
+            ]
+        else:
+            videos = [
+                v for v in videos
+                if (v.get("folder") or "").replace("\\", "/") == folder
+                or (v.get("folder") or "").replace("\\", "/").startswith(folder + "/")
+            ]
     if ext:
         if not ext.startswith("."):
             ext = "." + ext

@@ -722,6 +722,7 @@
       categories: [],
       category: "",
       folder: "",
+      folderAll: false,
       ext: "",
       genre: "",
       sort: "mtime_desc",
@@ -771,6 +772,8 @@
         if (p.sort) state.sort = p.sort;
         if (typeof p.category === "string") state.category = p.category;
         if (typeof p.folder === "string") state.folder = p.folder;
+        if (typeof p.folderAll === "boolean") state.folderAll = p.folderAll;
+        else if (state.folder) state.folderAll = true;
         if (typeof p.ext === "string") state.ext = p.ext;
         if (typeof p.genre === "string") state.genre = p.genre;
         if (p.drive) state._preferDrive = p.drive;
@@ -784,6 +787,7 @@
           sort: state.sort,
           category: state.category,
           folder: state.folder,
+          folderAll: !!state.folderAll,
           ext: state.ext,
           genre: state.genre,
           drive,
@@ -822,6 +826,7 @@
       const params = new URLSearchParams();
       if (state.category) params.set("category", state.category);
       if (state.folder) params.set("folder", state.folder);
+      if (state.folder && state.folderAll) params.set("folder_all", "1");
       if (state.ext) params.set("ext", state.ext);
       if (state.genre) params.set("genre", state.genre);
       if (state.sort) params.set("sort", state.sort);
@@ -992,6 +997,7 @@
       );
       if (!sameDrive) {
         state.folder = "";
+        state.folderAll = false;
         state.category = "";
         state.expanded = new Set([""]);
       }
@@ -1086,9 +1092,11 @@
       box.innerHTML = rows.map((lv, idx) => {
         const selected = lv.selected || "";
         const allId = lv.all_id || "";
-        const allActive = !selected;
-        // 用 data-folder 避免空值/dataset 歧义；data-level 标识层级
-        let tags = `<button type="button" class="tag ${allActive ? "active" : ""}" data-folder="${escapeAttr(allId)}" data-level="${idx}">全部</button>`;
+        // 频道行「全部」：未选子类时高亮
+        // 更深行「全部」：folderAll 时高亮（默认选中子类后勾选，显示全部视频）
+        const allActive = !selected && (!allId || state.folderAll);
+        // 用 data-folder 避免空值/dataset 歧义；data-level 标识层级；data-all 标识「全部」
+        let tags = `<button type="button" class="tag ${allActive ? "active" : ""}" data-folder="${escapeAttr(allId)}" data-all="1" data-level="${idx}">全部</button>`;
         for (const c of lv.items || []) {
           const active = selected === c.id;
           tags += `<button type="button" class="tag ${active ? "active" : ""}" data-folder="${escapeAttr(c.id)}" data-level="${idx}">${escapeHtml(c.name)}<span class="tag-n">${c.count}</span></button>`;
@@ -1218,7 +1226,10 @@
       renderChannels(treeData.categories || [], treeData.count || 0);
       renderSortTags();
       renderExtTags(treeData.types || []);
-      if (state.folder && state.folder === state.category) state.folder = "";
+      if (state.folder && state.folder === state.category) {
+        state.folder = "";
+        state.folderAll = false;
+      }
       if (
         state.folder &&
         state.category &&
@@ -1239,13 +1250,22 @@
       state.hasMore = !!data.has_more;
       state.offset = (data.videos || []).length;
       // 记忆的频道/子类若在当前盘无效，导致空列表时自动清空
+      // 注意：取消「全部」后根目录可能无片，或落在叶子目录，路径仍可能有效
+      const levels = data.subfolder_levels || [];
+      const folderAlive = !!(state.folder && levels.some((lv) =>
+        lv.all_id === state.folder ||
+        lv.prefix === state.folder ||
+        (lv.items || []).some((it) => it.id === state.folder)
+      ));
       if (
         state.totalCount === 0 &&
+        !folderAlive &&
         (state.category || state.folder || state.ext || state.genre) &&
         (treeData.count || 0) > 0
       ) {
         state.category = "";
         state.folder = "";
+        state.folderAll = false;
         state.ext = "";
         state.genre = "";
         saveUiPrefs();
@@ -1459,6 +1479,7 @@
       if (!item) return;
       state.category = item.dataset.cat || "";
       state.folder = "";
+      state.folderAll = false;
       saveUiPrefs();
       refresh();
       if (isMobile()) $("sidebar").classList.remove("open");
@@ -1495,8 +1516,40 @@
       if (folder == null) return;
       folder = String(folder).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
       if (folder && folder === state.category) folder = "";
-      // 点上层标签时自然截断更深路径（data-folder 已是完整目标路径）
-      state.folder = folder;
+      const isAll = btn.getAttribute("data-all") === "1";
+      const prevFolder = String(state.folder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      const prevAll = !!state.folderAll;
+      const parentOf = (path) => {
+        const parts = String(path || "").split("/").filter(Boolean);
+        parts.pop();
+        let parent = parts.join("/");
+        if (parent && parent === state.category) parent = "";
+        return parent;
+      };
+      if (isAll && folder) {
+        // 更深行「全部」：同层可切换勾选；勾选=显示全部子目录视频，取消=只看根目录
+        if (prevFolder === folder) {
+          state.folderAll = !prevAll;
+        } else {
+          state.folder = folder;
+          state.folderAll = true;
+        }
+      } else if (!isAll && folder) {
+        // 子类标签可切换：已选中再点 → 取消回到上一层（不勾选「全部」，只看父级根目录）
+        const selected = prevFolder === folder || prevFolder.startsWith(folder + "/");
+        if (selected) {
+          state.folder = parentOf(folder);
+          // 与取消「全部」一致：停在父级且不勾选「全部」，只显示父级根目录视频
+          state.folderAll = false;
+        } else {
+          state.folder = folder;
+          state.folderAll = true;
+        }
+      } else {
+        // 频道行「全部」
+        state.folder = "";
+        state.folderAll = false;
+      }
       saveUiPrefs();
       refresh();
     });
@@ -1519,6 +1572,7 @@
       const item = e.target.closest(".tree-item");
       if (!item) return;
       state.folder = item.dataset.path || "";
+      state.folderAll = !!state.folder;
       // 同步左侧频道
       if (state.folder) {
         const top = state.folder.split("/")[0];
