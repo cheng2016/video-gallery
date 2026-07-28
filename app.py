@@ -174,8 +174,10 @@ STATE: dict = {
     "export_ok": None,
     "export_msg": "",
     "export_path": "",
+    "convert_jobs": {},  # job_id -> job dict
 }
 _scan_lock = threading.Lock()
+_convert_lock = threading.Lock()
 _thumb_jpeg_cache: OrderedDict[str, bytes] = OrderedDict()
 _thumb_jpeg_lock = threading.Lock()
 
@@ -2744,6 +2746,289 @@ def api_local(vid: str):
             return jsonify({"ok": False, "msg": f"定位失败: {e}", "path": path_str}), 500
 
     return jsonify({"ok": False, "msg": "未知操作"}), 400
+
+
+def _sanitize_filename(name: str) -> str:
+    name = (name or "video").strip()
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    name = name.rstrip(" .")
+    return name[:120] or "video"
+
+
+def _unique_mp4_path(out_dir: Path, base_name: str) -> Path:
+    stem = _sanitize_filename(base_name)
+    candidate = out_dir / f"{stem}.mp4"
+    n = 1
+    while candidate.exists():
+        candidate = out_dir / f"{stem}_{n}.mp4"
+        n += 1
+    return candidate
+
+
+def _path_under_root(path: Path) -> bool:
+    root = STATE.get("root")
+    if not root or not path:
+        return False
+    try:
+        path.resolve().relative_to(Path(root).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _convert_job_update(job_id: str, **kwargs) -> None:
+    with _convert_lock:
+        job = STATE["convert_jobs"].get(job_id)
+        if not job:
+            return
+        job.update(kwargs)
+
+
+def _parse_ffmpeg_time_seconds(line: str) -> float | None:
+    m = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+    if not m:
+        return None
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def _run_ffmpeg_convert(
+    job_id: str,
+    ffmpeg: str,
+    input_args: list[str],
+    out_path: Path,
+    duration_hint: float | None = None,
+) -> tuple[bool, str]:
+    """先 copy 封装，失败再重编码。返回 (ok, msg)。"""
+    attempts = [
+        (
+            "封装",
+            input_args
+            + ["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(out_path)],
+        ),
+        (
+            "转码",
+            input_args
+            + [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ],
+        ),
+    ]
+    last_err = ""
+    for label, cmd_tail in attempts:
+        try:
+            if out_path.exists():
+                out_path.unlink()
+        except OSError:
+            pass
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "info"] + cmd_tail
+        _convert_job_update(job_id, status="running", msg=f"正在{label}…", percent=0)
+        log(f"[转MP4] {label}: {' '.join(cmd[:8])} … → {out_path.name}")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
+            )
+            with _convert_lock:
+                job = STATE["convert_jobs"].get(job_id)
+                if job is not None:
+                    job["proc"] = proc
+            err_chunks: list[str] = []
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                err_chunks.append(line)
+                if len(err_chunks) > 40:
+                    err_chunks = err_chunks[-40:]
+                t = _parse_ffmpeg_time_seconds(line)
+                if t is not None and duration_hint and duration_hint > 0:
+                    pct = max(0, min(99, int(t * 100 / duration_hint)))
+                    _convert_job_update(job_id, percent=pct, msg=f"正在{label}… {pct}%")
+            code = proc.wait()
+            with _convert_lock:
+                job = STATE["convert_jobs"].get(job_id)
+                if job is not None:
+                    job["proc"] = None
+            if code == 0 and out_path.is_file() and out_path.stat().st_size > 0:
+                return True, f"{label}完成"
+            last_err = "".join(err_chunks[-12:]).strip() or f"ffmpeg 退出码 {code}"
+            log(f"[转MP4] {label}失败: {last_err[:200]}")
+        except Exception as e:
+            last_err = str(e)
+            log(f"[转MP4] {label}异常: {e}")
+    return False, last_err or "转换失败"
+
+
+def _prepare_convert_input(item: dict) -> tuple[list[str], Path, Path | None, float | None]:
+    """
+    返回 (ffmpeg -i 前的参数含 -i, 输出目录, 临时文件或None, 时长提示)。
+    """
+    kind = item.get("kind") or ""
+    root = Path(STATE["root"])
+    duration = item.get("duration")
+    duration_f = float(duration) if duration else None
+    tmp_path: Path | None = None
+
+    if kind == "m3u8" or (item.get("ext") or "").lower() == ".m3u8":
+        pl = resolve_under_root(item.get("rel") or "")
+        if not pl:
+            raise FileNotFoundError("找不到 m3u8 文件")
+        out_dir = pl.parent
+        # 允许本地 m3u8 引用同目录/子目录 .ts 分片
+        return [
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-allowed_extensions", "ALL",
+            "-i", str(pl),
+        ], out_dir, None, duration_f
+
+    if kind == "ts_set":
+        segs = item.get("segments") or []
+        if len(segs) < 2:
+            raise ValueError("分片不足，无法转换")
+        paths: list[Path] = []
+        for rel in segs:
+            p = resolve_under_root(rel)
+            if not p:
+                raise FileNotFoundError(f"缺少分片: {rel}")
+            paths.append(p)
+        folder = (item.get("folder") or "").strip("/").replace("\\", "/")
+        out_dir = (root / folder) if folder else root
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cache = STATE.get("cache_dir") or (VGDATA_DIR)
+        cache.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache / f"convert_{item.get('id') or 'tmp'}.ffconcat"
+        lines = []
+        for p in paths:
+            s = str(p.resolve()).replace("\\", "/")
+            s = s.replace("'", r"'\''")
+            lines.append(f"file '{s}'")
+        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return ["-f", "concat", "-safe", "0", "-i", str(tmp_path)], out_dir, tmp_path, duration_f
+
+    raise ValueError("仅支持 m3u8 / TS 合集")
+
+
+def _convert_worker(job_id: str, vid: str) -> None:
+    tmp_path: Path | None = None
+    try:
+        item = find_video_by_id(vid)
+        if not item:
+            _convert_job_update(job_id, status="error", msg="未找到视频", percent=0)
+            return
+        ffmpeg = STATE.get("ffmpeg")
+        if not ffmpeg:
+            _convert_job_update(job_id, status="error", msg="未找到 ffmpeg", percent=0)
+            return
+        input_args, out_dir, tmp_path, duration_hint = _prepare_convert_input(item)
+        if not _path_under_root(out_dir):
+            _convert_job_update(job_id, status="error", msg="输出目录不在扫描根下", percent=0)
+            return
+        base_name = item.get("name") or Path(item.get("filename") or "video").stem
+        out_path = _unique_mp4_path(out_dir, base_name)
+        if not _path_under_root(out_path):
+            _convert_job_update(job_id, status="error", msg="输出路径非法", percent=0)
+            return
+        _convert_job_update(
+            job_id,
+            status="running",
+            msg="开始转换…",
+            percent=0,
+            out_path=str(out_path),
+        )
+        ok, msg = _run_ffmpeg_convert(job_id, ffmpeg, input_args, out_path, duration_hint)
+        if ok:
+            _convert_job_update(
+                job_id,
+                status="done",
+                msg=f"已保存：{out_path}",
+                percent=100,
+                out_path=str(out_path),
+            )
+            log(f"[转MP4] 完成 {vid} → {out_path}")
+        else:
+            try:
+                if out_path.exists() and out_path.stat().st_size == 0:
+                    out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            _convert_job_update(job_id, status="error", msg=msg[:500] or "转换失败", percent=0)
+    except Exception as e:
+        _convert_job_update(job_id, status="error", msg=str(e), percent=0)
+        log(f"[转MP4] 任务失败 {vid}: {e}")
+    finally:
+        if tmp_path:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+@app.route("/api/convert-mp4/<vid>", methods=["POST"])
+def api_convert_mp4_start(vid: str):
+    """将 m3u8 / ts_set 转为同目录 MP4（后台任务）。"""
+    if not re.fullmatch(r"[a-f0-9]{16}", vid or ""):
+        return jsonify({"ok": False, "msg": "无效 id"}), 400
+    if not STATE.get("ffmpeg"):
+        return jsonify({"ok": False, "msg": "未找到 ffmpeg，请先安装后再试"}), 400
+    if not STATE.get("root"):
+        return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
+    item = find_video_by_id(vid)
+    if not item:
+        return jsonify({"ok": False, "msg": "未找到视频"}), 404
+    kind = item.get("kind") or ""
+    if kind not in ("m3u8", "ts_set") and (item.get("ext") or "").lower() != ".m3u8":
+        return jsonify({"ok": False, "msg": "仅支持 m3u8 / TS 合集"}), 400
+
+    with _convert_lock:
+        for jid, job in STATE["convert_jobs"].items():
+            if job.get("vid") == vid and job.get("status") in ("queued", "running"):
+                return jsonify({
+                    "ok": True,
+                    "job_id": jid,
+                    "msg": "已有转换任务进行中",
+                    "status": job.get("status"),
+                })
+        job_id = hashlib.md5(f"{vid}-{datetime.now().timestamp()}".encode()).hexdigest()[:12]
+        STATE["convert_jobs"][job_id] = {
+            "id": job_id,
+            "vid": vid,
+            "status": "queued",
+            "msg": "排队中…",
+            "percent": 0,
+            "out_path": "",
+            "proc": None,
+        }
+
+    threading.Thread(
+        target=_convert_worker,
+        args=(job_id, vid),
+        daemon=True,
+        name=f"convert-mp4-{vid[:8]}",
+    ).start()
+    return jsonify({"ok": True, "job_id": job_id, "msg": "已开始转换", "status": "queued"})
+
+
+@app.route("/api/convert-mp4/job/<job_id>")
+def api_convert_mp4_status(job_id: str):
+    with _convert_lock:
+        job = STATE["convert_jobs"].get(job_id)
+        if not job:
+            return jsonify({"ok": False, "msg": "任务不存在"}), 404
+        return jsonify({
+            "ok": True,
+            "job_id": job_id,
+            "vid": job.get("vid") or "",
+            "status": job.get("status") or "error",
+            "msg": job.get("msg") or "",
+            "percent": int(job.get("percent") or 0),
+            "out_path": job.get("out_path") or "",
+        })
 
 
 @app.route("/api/export-static", methods=["POST"])

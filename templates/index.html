@@ -813,6 +813,7 @@
     <div class="modal-info" id="modalInfo"></div>
     <div class="modal-actions" id="modalActions">
       <button type="button" class="btn primary" id="btnLocalOpen" title="用系统默认播放器打开">系统播放器</button>
+      <button type="button" class="btn" id="btnToMp4" title="用 ffmpeg 转为同目录 MP4" style="display:none">转成 MP4</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
       <button type="button" class="btn" id="btnReveal" title="在资源管理器中显示">打开位置</button>
     </div>
@@ -834,6 +835,7 @@
       query: "",
       expanded: new Set([""]),
       root: "",
+      hasFfmpeg: false,
       drives: [],
       offset: 0,
       pageSize: 60,
@@ -1520,6 +1522,7 @@
       if (data.exporting && data.export_msg) status += (status ? " · " : "") + data.export_msg;
       else if (data.export_ok === true && data.export_path) status += (status ? " · " : "") + "静态站已导出";
       if (!data.has_ffmpeg) status += (status ? " · " : "") + "无 ffmpeg，预览图不可用";
+      state.hasFfmpeg = !!data.has_ffmpeg;
       $("status").textContent = status;
       $("rescanBtn").disabled = data.scanning;
       $("scanDriveBtn").disabled = data.scanning;
@@ -1535,6 +1538,8 @@
     let hlsPlayer = null;
     let segPlay = null;
     let currentPlayId = "";
+    let currentPlayKind = "";
+    let convertPollTimer = 0;
 
     function destroyHls() {
       if (hlsPlayer) {
@@ -1591,9 +1596,103 @@
       if (typeof fallback === "function") fallback();
     }
 
+    function stopConvertPoll() {
+      if (convertPollTimer) {
+        clearInterval(convertPollTimer);
+        convertPollTimer = 0;
+      }
+    }
+
+    function updateToMp4Button(kind, ext) {
+      const btn = $("btnToMp4");
+      if (!btn) return;
+      const k = (kind || "").toLowerCase();
+      const e = (ext || "").toLowerCase();
+      const can =
+        state.hasFfmpeg &&
+        (k === "m3u8" || k === "ts_set" || e === ".m3u8");
+      btn.style.display = can ? "" : "none";
+      btn.disabled = false;
+      btn.textContent = "转成 MP4";
+    }
+
+    async function pollConvertJob(jobId) {
+      stopConvertPoll();
+      const tick = async () => {
+        try {
+          const r = await fetch("/api/convert-mp4/job/" + encodeURIComponent(jobId));
+          const data = await r.json();
+          if (!r.ok || !data.ok) {
+            stopConvertPoll();
+            const btn = $("btnToMp4");
+            if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+            $("modalInfo").textContent = (data && data.msg) || "查询转换进度失败";
+            return;
+          }
+          const st = data.status || "";
+          const pct = data.percent != null ? data.percent : 0;
+          const msg = data.msg || "";
+          if (st === "done") {
+            stopConvertPoll();
+            const btn = $("btnToMp4");
+            if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+            $("modalInfo").textContent = msg + (data.out_path ? "\n可重新扫描后在列表中看到 MP4" : "");
+            return;
+          }
+          if (st === "error") {
+            stopConvertPoll();
+            const btn = $("btnToMp4");
+            if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+            $("modalInfo").textContent = "转换失败：" + (msg || "未知错误");
+            return;
+          }
+          $("modalInfo").textContent = msg || (`转换中… ${pct}%`);
+          const btn = $("btnToMp4");
+          if (btn) btn.textContent = pct ? `转换中 ${pct}%` : "转换中…";
+        } catch (e) {
+          stopConvertPoll();
+          const btn = $("btnToMp4");
+          if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+          $("modalInfo").textContent = "查询转换进度失败: " + e;
+        }
+      };
+      await tick();
+      convertPollTimer = setInterval(tick, 1200);
+    }
+
+    async function startConvertMp4() {
+      if (!currentPlayId) return;
+      const btn = $("btnToMp4");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "转换中…";
+      }
+      $("modalInfo").textContent = "正在提交转换任务…";
+      try {
+        const r = await fetch("/api/convert-mp4/" + encodeURIComponent(currentPlayId), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await r.json();
+        if (!r.ok || !data.ok || !data.job_id) {
+          if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+          $("modalInfo").textContent = (data && data.msg) || "无法开始转换";
+          return;
+        }
+        $("modalInfo").textContent = data.msg || "转换已开始…";
+        await pollConvertJob(data.job_id);
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+        $("modalInfo").textContent = "请求失败: " + e;
+      }
+    }
+
     function openPlayer(id, name, meta, ext, kind, segCount, extra) {
       destroyHls();
+      stopConvertPoll();
       currentPlayId = id;
+      currentPlayKind = kind || "";
       $("modalTitle").textContent = name;
       const hard = !!(extra && extra.browser_hard);
       const path = (extra && extra.path) || "";
@@ -1607,6 +1706,7 @@
       }
       if (path) tip += (tip ? " · " : "") + path;
       $("modalInfo").textContent = tip;
+      updateToMp4Button(kind, ext);
       const video = $("player");
       video.onended = null;
       video.onerror = () => {
@@ -1658,7 +1758,15 @@
 
     function closePlayer() {
       destroyHls();
+      stopConvertPoll();
       currentPlayId = "";
+      currentPlayKind = "";
+      const btn = $("btnToMp4");
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "转成 MP4";
+        btn.style.display = "none";
+      }
       const video = $("player");
       video.onended = null;
       video.pause();
@@ -1814,6 +1922,7 @@
     });
 
     $("btnLocalOpen").addEventListener("click", () => localAction("open"));
+    $("btnToMp4").addEventListener("click", () => startConvertMp4());
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
     $("btnReveal").addEventListener("click", () => localAction("reveal"));
 
