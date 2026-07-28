@@ -2914,6 +2914,22 @@ def _prepare_convert_input(item: dict) -> tuple[list[str], Path, Path | None, fl
     raise ValueError("仅支持 m3u8 / TS 合集")
 
 
+def _convert_mp4_base_name(item: dict) -> str:
+    """
+    MP4 文件名优先用 m3u8/合集所在目录名（跳过 ts/media 等泛化目录，取上一级）；
+    没有可用目录名时再回退到条目展示名 / 文件名。
+    """
+    folder = (item.get("folder") or "").strip("/").replace("\\", "/")
+    if folder:
+        parts = [p for p in folder.split("/") if p]
+        name = parts[-1] if parts else ""
+        if name.lower() in SEGMENT_FOLDER_GENERIC and len(parts) >= 2:
+            name = parts[-2]
+        if name and name.lower() not in {"index", "playlist", "master"}:
+            return name
+    return item.get("name") or Path(item.get("filename") or "video").stem
+
+
 def _convert_worker(job_id: str, vid: str) -> None:
     tmp_path: Path | None = None
     try:
@@ -2929,7 +2945,7 @@ def _convert_worker(job_id: str, vid: str) -> None:
         if not _path_under_root(out_dir):
             _convert_job_update(job_id, status="error", msg="输出目录不在扫描根下", percent=0)
             return
-        base_name = item.get("name") or Path(item.get("filename") or "video").stem
+        base_name = _convert_mp4_base_name(item)
         out_path = _unique_mp4_path(out_dir, base_name)
         if not _path_under_root(out_path):
             _convert_job_update(job_id, status="error", msg="输出路径非法", percent=0)
