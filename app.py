@@ -53,6 +53,9 @@ SEGMENT_FOLDER_GENERIC = {
     "ts", "m2ts", "video", "videos", "stream", "streams",
     "hls", "media", "data", "video_ts", "bdmv",
 }
+# 大于该体积的 .ts/.m2ts 视为整片，即使同目录有多个也不并入分片合集
+# （典型 HLS 分片远小于此；整片录像常见数百 MB～数 GB）
+STANDALONE_TS_MIN_BYTES = 50 * 1024 * 1024
 
 # 浏览器较易播放的格式
 BROWSER_FRIENDLY_EXTS = {".mp4", ".webm", ".m4v", ".mov"}
@@ -686,10 +689,177 @@ def _pick_preferred_m3u8(items: list[dict]) -> dict:
     return sorted(items, key=lambda x: (x.get("filename") or "").lower())[0]
 
 
+def _normalize_playlist_rel(base_dir: str, uri: str) -> str:
+    """把 m3u8 内相对 URI 解析为相对扫描根的路径（与播放代理规则一致）。"""
+    uri = (uri or "").split("#")[0].split("?")[0].replace("\\", "/").strip()
+    if not uri or re.match(r"https?://", uri, re.I) or re.match(r"^[a-zA-Z]:/", uri):
+        return ""
+    base_dir = (base_dir or "").replace("\\", "/").strip("/")
+    if uri.startswith("/"):
+        parts = [p for p in uri.split("/") if p and p != "."]
+    else:
+        parts = [p for p in (f"{base_dir}/{uri}" if base_dir else uri).split("/") if p and p != "."]
+    out: list[str] = []
+    for p in parts:
+        if p == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(p)
+    return "/".join(out)
+
+
+def _iter_m3u8_uris(text: str) -> list[str]:
+    """取出 m3u8 中的媒体/子列表 URI（普通行 + URI=\"...\" 属性）。"""
+    uris: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            for m in re.finditer(r'\bURI="([^"]+)"', s, re.I):
+                uris.append(m.group(1))
+            continue
+        uris.append(s)
+    return uris
+
+
+def collect_playlist_media_rels(
+    playlist_rel: str,
+    root: Path | None = None,
+    _seen: set[str] | None = None,
+    _nested_playlists: set[str] | None = None,
+) -> set[str]:
+    """
+    解析 m3u8（含 master 嵌套子列表），返回其中引用到的 .ts/.m2ts 相对路径集合。
+    只有这些文件才应视为「播放流分片」并隐藏；同目录其它大 TS 仍可单独展示。
+    若传入 _nested_playlists，会一并收集被引用的子 .m3u8 路径。
+    """
+    root = root or STATE.get("root")
+    playlist_rel = (playlist_rel or "").replace("\\", "/").strip("/")
+    if not root or not playlist_rel:
+        return set()
+    seen = _seen if _seen is not None else set()
+    nested = _nested_playlists if _nested_playlists is not None else set()
+    if playlist_rel in seen:
+        return set()
+    seen.add(playlist_rel)
+
+    path = Path(root) / playlist_rel
+    try:
+        if not path.is_file():
+            return set()
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+
+    media: set[str] = set()
+    base_dir = str(Path(playlist_rel).parent).replace("\\", "/")
+    if base_dir == ".":
+        base_dir = ""
+
+    for uri in _iter_m3u8_uris(text):
+        seg_rel = _normalize_playlist_rel(base_dir, uri)
+        if not seg_rel:
+            continue
+        ext = Path(seg_rel).suffix.lower()
+        if ext == ".m3u8":
+            nested.add(seg_rel)
+            media |= collect_playlist_media_rels(seg_rel, root, seen, nested)
+            continue
+        if ext in SEGMENT_EXTS:
+            media.add(seg_rel)
+            continue
+        # 无扩展名或非常规后缀：若磁盘上确是分片也收入
+        try:
+            cand = Path(root) / seg_rel
+            if cand.is_file():
+                cext = cand.suffix.lower()
+                if cext == ".m3u8":
+                    nested.add(seg_rel)
+                    media |= collect_playlist_media_rels(seg_rel, root, seen, nested)
+                elif cext in SEGMENT_EXTS:
+                    media.add(seg_rel)
+        except OSError:
+            pass
+    return media
+
+
+def _segment_file_size(it: dict) -> int:
+    """取 TS 体积；条目缺 size 时回落读盘（用于拆开误合并的 ts_set）。"""
+    sz = int(it.get("size") or 0)
+    if sz > 0:
+        return sz
+    rel = (it.get("rel") or "").replace("\\", "/")
+    root = STATE.get("root")
+    if not rel or not root:
+        return 0
+    try:
+        p = Path(root) / rel
+        if p.is_file():
+            return int(p.stat().st_size)
+    except OSError:
+        return 0
+    return 0
+
+
+def _materialize_standalone_ts(it: dict, folder: str) -> dict:
+    """把单片 TS（含从 ts_set 拆出的 stub）补成可展示的完整条目。"""
+    rel = (it.get("rel") or "").replace("\\", "/")
+    if (
+        it.get("kind") != "ts_set"
+        and it.get("id")
+        and rel
+        and int(it.get("size") or 0) > 0
+        and (it.get("ext") or "").lower() in SEGMENT_EXTS
+    ):
+        out = {k: v for k, v in it.items() if k not in ("segments", "seg_count")}
+        out.pop("kind", None)
+        return out
+
+    size = _segment_file_size(it)
+    mtime = float(it.get("mtime") or 0)
+    root = STATE.get("root")
+    if root and rel:
+        try:
+            p = Path(root) / rel
+            if p.is_file():
+                st = p.stat()
+                if not size:
+                    size = int(st.st_size)
+                if not mtime:
+                    mtime = float(st.st_mtime)
+        except OSError:
+            pass
+    name = it.get("name") or Path(rel).stem or "视频"
+    filename = it.get("filename") or Path(rel).name
+    ext = (it.get("ext") or Path(rel).suffix or ".ts").lower()
+    vid = video_id(rel) if rel else (it.get("id") or video_id(f"{folder}/{filename}"))
+    cache = STATE.get("cache_dir")
+    return {
+        "id": vid,
+        "name": name,
+        "filename": filename,
+        "rel": rel,
+        "folder": folder,
+        "ext": ext,
+        "size": size,
+        "size_h": format_size(size),
+        "mtime": mtime,
+        "mtime_h": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") if mtime else "",
+        "duration": None,
+        "duration_h": "",
+        "thumb": f"{vid}{THUMB_EXT}",
+        "has_thumb": thumb_file_ready(cache, vid) if cache else False,
+        "genres": it.get("genres") or detect_genres(rel, name),
+    }
+
+
 def collapse_segment_sets(videos: list[dict]) -> list[dict]:
     """
-    1) 同目录有 .m3u8 → 优先用播放列表，隐藏该目录下的 .ts/.m2ts
-    2) 否则同目录 ≥2 个 .ts/.m2ts → 合并为一个入口
+    1) 保留 m3u8 入口；解析列表内容，仅隐藏其中引用到的 .ts/.m2ts
+    2) 未被任何 m3u8 引用的小体积多段 TS → 合成 ts_set
+    3) 大体积（≥ STANDALONE_TS_MIN_BYTES）或未被引用的单片 → 独立视频
     """
     kept: list[dict] = []
     by_folder_seg: dict[str, list[dict]] = {}
@@ -704,7 +874,6 @@ def collapse_segment_sets(videos: list[dict]) -> list[dict]:
             by_folder_m3u8.setdefault(folder, []).append(v)
             continue
         if kind == "ts_set" and len(v.get("segments") or []) >= 2:
-            # 若该目录后来发现有 m3u8，会在下面丢弃 ts_set
             by_folder_seg.setdefault(folder, []).append(v)
             continue
         if ext in SEGMENT_EXTS:
@@ -712,10 +881,20 @@ def collapse_segment_sets(videos: list[dict]) -> list[dict]:
             continue
         kept.append(v)
 
-    m3u8_folders = set(by_folder_m3u8.keys())
+    root = STATE.get("root")
+    referenced_segs: set[str] = set()
+    nested_playlists: set[str] = set()
+
+    # 先解析全部 m3u8，再决定保留哪些入口 / 隐藏哪些分片
+    for _folder, items in by_folder_m3u8.items():
+        for it in items:
+            rel = (it.get("rel") or "").replace("\\", "/").strip("/")
+            if rel:
+                referenced_segs |= collect_playlist_media_rels(
+                    rel, root, _nested_playlists=nested_playlists
+                )
 
     for folder, items in by_folder_m3u8.items():
-        # 已是合成条目则规范化；否则挑选首选 m3u8
         ready = [x for x in items if x.get("kind") == "m3u8" and x.get("rel")]
         if ready:
             pick = _pick_preferred_m3u8(ready)
@@ -723,12 +902,13 @@ def collapse_segment_sets(videos: list[dict]) -> list[dict]:
             pick = make_m3u8_entry(_pick_preferred_m3u8(items))
         if pick.get("kind") != "m3u8":
             pick = make_m3u8_entry(pick)
+        pick_rel = (pick.get("rel") or "").replace("\\", "/").strip("/")
+        # 已被其它 master 引用的子列表：不单独占一个入口
+        if pick_rel and pick_rel in nested_playlists:
+            continue
         kept.append(pick)
 
     for folder, items in by_folder_seg.items():
-        if folder in m3u8_folders:
-            continue  # 有 m3u8 时不再展示裸 TS
-        # 还原已合并的 ts_set
         flat: list[dict] = []
         for it in items:
             if it.get("kind") == "ts_set" and it.get("segments"):
@@ -743,35 +923,30 @@ def collapse_segment_sets(videos: list[dict]) -> list[dict]:
                     })
             else:
                 flat.append(it)
-        if len(flat) < 2:
-            # 单个 ts：若来自 ts_set 还原可能缺字段，尽量保留原条目
-            for it in items:
-                if it.get("kind") != "ts_set":
-                    kept.append(it)
-            continue
-        # 若 items 里已有完整 ts_set 且无 m3u8，直接规范化保留
-        existing = next((x for x in items if x.get("kind") == "ts_set"), None)
-        if existing and len(existing.get("segments") or []) >= 2:
-            segs_as_items = [{
-                "rel": rel,
-                "filename": Path(rel).name,
-                "name": Path(rel).stem,
-                "ext": Path(rel).suffix.lower(),
-                "size": 0,
-                "mtime": existing.get("mtime") or 0,
-            } for rel in existing["segments"]]
-            merged = make_ts_set(folder, segs_as_items)
-            merged["size"] = int(existing.get("size") or merged["size"])
-            merged["size_h"] = format_size(merged["size"])
-            merged["mtime"] = existing.get("mtime") or merged["mtime"]
-            merged["mtime_h"] = existing.get("mtime_h") or merged["mtime_h"]
-            merged["has_thumb"] = bool(existing.get("has_thumb"))
-            merged["thumb"] = existing.get("thumb") or merged["thumb"]
-            merged["id"] = existing.get("id") or merged["id"]
-            merged["genres"] = existing.get("genres") or merged["genres"]
-            kept.append(merged)
-        else:
-            kept.append(make_ts_set(folder, flat))
+
+        # 播放列表已引用的分片：隐藏；其余再按体积决定单片 / 合集
+        candidates: list[dict] = []
+        for it in flat:
+            rel = (it.get("rel") or "").replace("\\", "/").strip("/")
+            if rel and rel in referenced_segs:
+                continue
+            candidates.append(it)
+
+        standalone: list[dict] = []
+        small: list[dict] = []
+        for it in candidates:
+            if _segment_file_size(it) >= STANDALONE_TS_MIN_BYTES:
+                standalone.append(it)
+            else:
+                small.append(it)
+
+        for it in standalone:
+            kept.append(_materialize_standalone_ts(it, folder))
+
+        if len(small) >= 2:
+            kept.append(make_ts_set(folder, small))
+        elif len(small) == 1:
+            kept.append(_materialize_standalone_ts(small[0], folder))
 
     kept.sort(
         key=lambda x: (
@@ -2321,23 +2496,6 @@ def thumb(vid: str):
     return Response(placeholder, mimetype="image/svg+xml", headers=placeholder_headers)
 
 
-def _normalize_rel_join(base_dir: str, uri: str) -> str:
-    uri = (uri or "").split("?")[0].replace("\\", "/")
-    base_dir = (base_dir or "").replace("\\", "/").strip("/")
-    if uri.startswith("/"):
-        parts = [p for p in uri.split("/") if p and p != "."]
-    else:
-        parts = [p for p in (f"{base_dir}/{uri}" if base_dir else uri).split("/") if p and p != "."]
-    out: list[str] = []
-    for p in parts:
-        if p == "..":
-            if out:
-                out.pop()
-            continue
-        out.append(p)
-    return "/".join(out)
-
-
 def rewrite_m3u8_for_proxy(text: str, playlist_rel: str, vid: str) -> str:
     """把 m3u8 里的相对分片改写到本服务 /hls/<vid>/file?rel=..."""
     from urllib.parse import quote
@@ -2354,7 +2512,7 @@ def rewrite_m3u8_for_proxy(text: str, playlist_rel: str, vid: str) -> str:
         if re.match(r"https?://", raw, re.I):
             lines.append(line)
             continue
-        seg_rel = _normalize_rel_join(base_dir, raw)
+        seg_rel = _normalize_playlist_rel(base_dir, raw)
         lines.append(f"/hls/{vid}/file?rel={quote(seg_rel, safe='')}")
     return "\n".join(lines) + "\n"
 
