@@ -179,6 +179,8 @@
     .card {
       background: var(--bg2); border-radius: var(--radius); overflow: hidden;
       border: 1px solid transparent; cursor: pointer;
+      content-visibility: auto;
+      contain-intrinsic-size: 200px 260px;
     }
     .card:hover { border-color: #009aa3; transform: translateY(-1px); }
     .thumb { aspect-ratio: 16/9; background: #0a0c10; position: relative; }
@@ -187,6 +189,12 @@
       position: absolute; right: 8px; bottom: 8px; background: rgba(0,0,0,.75);
       color: #fff; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px;
     }
+    .dup-badge, .bad-badge {
+      position: absolute; top: 8px; color: #fff; font-size: 0.7rem;
+      padding: 2px 6px; border-radius: 4px; z-index: 2;
+    }
+    .dup-badge { left: 8px; background: rgba(200, 120, 40, 0.92); }
+    .bad-badge { right: 8px; background: rgba(180, 50, 50, 0.92); }
     .body { padding: 10px 12px 12px; }
     .title {
       font-size: 0.9rem; line-height: 1.35; margin-bottom: 6px;
@@ -283,9 +291,14 @@
     const SORTS = [
       { id: "mtime_desc", label: "最新" },
       { id: "mtime_asc", label: "最早" },
-      { id: "name", label: "名称" },
       { id: "size_desc", label: "最大" },
+      { id: "duration_desc", label: "最长" },
+      { id: "duration_asc", label: "最短" },
+      { id: "name", label: "名称" },
     ];
+    const VIRTUAL_MIN = 150;
+    const VIRTUAL_ROW_H = 268;
+    const VIRTUAL_GAP = 14;
     const GENRE_ORDER = [
       "动作","喜剧","爱情","剧情","科幻","恐怖","悬疑","犯罪","警匪","枪战","战争","冒险","奇幻","玄幻","仙侠","武侠","功夫","动画","灾难","青春","古装","历史","宫廷","家庭","儿童","运动","音乐","西部","黑色","纪录片","短片","同性","医疗","律政","职场","都市","农村","谍战","僵尸","超级英雄","机器人","公路","美食","旅行","自然","神话","童话","励志","治愈","惊悚","恐怖喜剧","动作喜剧","爱情喜剧","犯罪悬疑","科幻动作","武侠仙侠","戏曲","脱口秀","真人秀","晚会"
     ];
@@ -354,10 +367,11 @@
       if (state.genre) {
         list = list.filter((v) => videoGenres(v).includes(state.genre));
       }
-      const rev = state.sort !== "mtime_asc" && state.sort !== "name";
+      const rev = state.sort !== "mtime_asc" && state.sort !== "name" && state.sort !== "duration_asc";
       list.sort((a, b) => {
         if (state.sort === "name") return (a.name || "").localeCompare(b.name || "", "zh");
         if (state.sort.startsWith("size")) return (a.size || 0) - (b.size || 0);
+        if (state.sort.startsWith("duration")) return (a.duration || 0) - (b.duration || 0);
         return (a.mtime || 0) - (b.mtime || 0);
       });
       if (rev) list.reverse();
@@ -593,30 +607,89 @@
       onFilterChange(true);
     }
 
+    function cardHtml(v) {
+      const mark = v.duration_h
+        ? v.duration_h
+        : (v.kind === "m3u8" ? "HLS" : (v.seg_count ? (v.seg_count + "段") : (v.ext || "").replace(".", "").toUpperCase()));
+      const gtxt = videoGenres(v).slice(0, 2).join("·");
+      const thumb = v.thumb
+        ? `<img src="${esc(v.thumb)}" alt="" loading="lazy" onerror="this.style.opacity=.2" />`
+        : `<img alt="" style="opacity:.2" />`;
+      const dup = !!v.dup;
+      const bad = !!v.bad;
+      return `<div class="card" data-id="${esc(v.id)}">
+        <div class="thumb">
+          ${thumb}
+          ${dup ? `<span class="dup-badge" title="${esc(v.dup_reason || "重复")}">重复×${esc(v.dup_n || 0)}</span>` : ""}
+          ${bad ? `<span class="bad-badge" title="${esc(v.bad_reason || "无法读取")}">损坏</span>` : ""}
+          <span class="mark">${esc(mark)}</span>
+        </div>
+        <div class="body">
+          <div class="title">${esc(v.name)}</div>
+          <div class="meta">
+            <span>${esc(v.size_h)}</span>
+            <span>${esc(v.folder || "根目录")}</span>
+            ${gtxt ? `<span>${esc(gtxt)}</span>` : ""}
+            ${bad ? `<span>疑似损坏</span>` : ""}
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function getVirtualCols() {
+      const grid = $("grid");
+      const w = (grid && grid.clientWidth) || 800;
+      const min = window.matchMedia("(max-width: 800px)").matches ? 150 : 200;
+      return Math.max(1, Math.floor((w + VIRTUAL_GAP) / (min + VIRTUAL_GAP)));
+    }
+
+    let cachedList = [];
+    let virtualBound = false;
+    function bindVirtualScroll() {
+      if (virtualBound) return;
+      virtualBound = true;
+      let raf = 0;
+      const onScroll = () => {
+        if (cachedList.length < VIRTUAL_MIN) return;
+        if (raf) cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => { raf = 0; paintVirtual(); });
+      };
+      window.addEventListener("scroll", onScroll, { passive: true });
+      window.addEventListener("resize", onScroll);
+    }
+
+    function paintVirtual() {
+      const grid = $("grid");
+      if (!grid) return;
+      const cols = getVirtualCols();
+      const total = cachedList.length;
+      const totalRows = Math.ceil(total / cols) || 1;
+      const rowStride = VIRTUAL_ROW_H + VIRTUAL_GAP;
+      const scrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+      const viewH = window.innerHeight || 800;
+      const gridTop = grid.getBoundingClientRect().top + scrollTop;
+      const relTop = Math.max(0, scrollTop - gridTop);
+      const firstRow = Math.max(0, Math.floor(relTop / rowStride) - 3);
+      const lastRow = Math.min(totalRows - 1, Math.ceil((relTop + viewH) / rowStride) + 3);
+      const start = firstRow * cols;
+      const end = Math.min(total, (lastRow + 1) * cols);
+      const padTop = firstRow * rowStride;
+      const padBot = Math.max(0, (totalRows - lastRow - 1) * rowStride);
+      grid.innerHTML =
+        `<div style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
+        cachedList.slice(start, end).map(cardHtml).join("") +
+        `<div style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
+    }
+
     function renderGrid() {
-      const list = filtered();
-      $("empty").style.display = list.length ? "none" : "block";
-      $("grid").innerHTML = list.map((v) => {
-        const mark = v.kind === "m3u8" ? "HLS" : (v.seg_count ? (v.seg_count + "段") : (v.ext || "").replace(".", "").toUpperCase());
-        const gtxt = videoGenres(v).slice(0, 2).join("·");
-        const thumb = v.thumb
-          ? `<img src="${esc(v.thumb)}" alt="" loading="lazy" onerror="this.style.opacity=.2" />`
-          : `<img alt="" style="opacity:.2" />`;
-        return `<div class="card" data-id="${esc(v.id)}">
-          <div class="thumb">
-            ${thumb}
-            <span class="mark">${esc(mark)}</span>
-          </div>
-          <div class="body">
-            <div class="title">${esc(v.name)}</div>
-            <div class="meta">
-              <span>${esc(v.size_h)}</span>
-              <span>${esc(v.folder || "根目录")}</span>
-              ${gtxt ? `<span>${esc(gtxt)}</span>` : ""}
-            </div>
-          </div>
-        </div>`;
-      }).join("");
+      cachedList = filtered();
+      $("empty").style.display = cachedList.length ? "none" : "block";
+      bindVirtualScroll();
+      if (cachedList.length >= VIRTUAL_MIN) {
+        paintVirtual();
+        return;
+      }
+      $("grid").innerHTML = cachedList.map(cardHtml).join("");
     }
 
     function destroyHls() {

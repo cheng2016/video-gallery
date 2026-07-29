@@ -514,6 +514,8 @@
       background: var(--bg2);
       border: 1px solid transparent;
       transition: border-color 0.15s, transform 0.15s;
+      content-visibility: auto;
+      contain-intrinsic-size: 220px 290px;
     }
     .card:hover {
       border-color: var(--accent-dim);
@@ -568,6 +570,28 @@
       font-size: 0.75rem;
       padding: 2px 6px;
       border-radius: 4px;
+    }
+    .dup-badge {
+      position: absolute;
+      left: 8px;
+      top: 8px;
+      background: rgba(200, 120, 40, 0.92);
+      color: #fff;
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border-radius: 4px;
+      z-index: 2;
+    }
+    .bad-badge {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      background: rgba(180, 50, 50, 0.92);
+      color: #fff;
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border-radius: 4px;
+      z-index: 2;
     }
     .card-body { padding: 10px 12px 14px; }
     .card-title {
@@ -814,6 +838,7 @@
     <div class="modal-actions" id="modalActions">
       <button type="button" class="btn primary" id="btnLocalOpen" title="用系统默认播放器打开">系统播放器</button>
       <button type="button" class="btn" id="btnToMp4" title="用 ffmpeg 转为同目录 MP4" style="display:none">转成 MP4</button>
+      <button type="button" class="btn" id="btnCancelMp4" title="取消正在进行的转换" style="display:none">取消转换</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
       <button type="button" class="btn" id="btnReveal" title="在资源管理器中显示">打开位置</button>
     </div>
@@ -841,6 +866,9 @@
       pageSize: 60,
       hasMore: false,
       totalCount: 0,
+      lastPlayId: "",
+      loadedVideos: [],
+      virtualEnabled: false,
     };
 
     const CHANNEL_ICO = {
@@ -864,12 +892,19 @@
       { id: "mtime_desc", label: "最新" },
       { id: "mtime_asc", label: "最早" },
       { id: "size_desc", label: "最大" },
+      { id: "duration_desc", label: "最长" },
+      { id: "duration_asc", label: "最短" },
       { id: "name", label: "名称" },
     ];
+
+    const VIRTUAL_MIN = 150;
+    const VIRTUAL_ROW_H = 288;
+    const VIRTUAL_GAP = 18;
 
     const $ = (id) => document.getElementById(id);
 
     const PREFS_KEY = "vg_ui_prefs";
+    const PLAY_PROG_KEY = "vg_play_progress";
 
     function loadUiPrefs() {
       try {
@@ -883,7 +918,9 @@
         else if (state.folder) state.folderAll = true;
         if (typeof p.ext === "string") state.ext = p.ext;
         if (typeof p.genre === "string") state.genre = p.genre;
+        if (typeof p.query === "string") state.query = p.query;
         if (p.drive) state._preferDrive = p.drive;
+        if (p.lastPlayId) state.lastPlayId = p.lastPlayId;
       } catch (_) {}
     }
 
@@ -897,12 +934,51 @@
           folderAll: !!state.folderAll,
           ext: state.ext,
           genre: state.genre,
+          query: state.query || "",
           drive,
+          lastPlayId: state.lastPlayId || "",
         }));
       } catch (_) {}
     }
 
+    function loadPlayProgressMap() {
+      try {
+        return JSON.parse(localStorage.getItem(PLAY_PROG_KEY) || "{}") || {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function getPlayProgress(id) {
+      const m = loadPlayProgressMap();
+      const row = m[id];
+      if (!row || !(row.t > 5)) return 0;
+      return Number(row.t) || 0;
+    }
+
+    function savePlayProgress(id, t, duration) {
+      if (!id) return;
+      try {
+        const m = loadPlayProgressMap();
+        const dur = Number(duration) || 0;
+        // 播到结尾附近视为看完，清进度
+        if (t < 5 || (dur > 0 && t >= dur - 3)) {
+          delete m[id];
+        } else {
+          m[id] = { t: Math.floor(t), updated: Date.now() };
+        }
+        // 最多保留 200 条，防膨胀
+        const keys = Object.keys(m);
+        if (keys.length > 200) {
+          keys.sort((a, b) => (m[a].updated || 0) - (m[b].updated || 0));
+          for (let i = 0; i < keys.length - 200; i++) delete m[keys[i]];
+        }
+        localStorage.setItem(PLAY_PROG_KEY, JSON.stringify(m));
+      } catch (_) {}
+    }
+
     loadUiPrefs();
+    if (state.query && $("search")) $("search").value = state.query;
 
     function isMobile() {
       return window.matchMedia("(max-width: 900px)").matches;
@@ -1345,60 +1421,142 @@
     function cardHtml(v) {
       const year = v.mtime_h ? String(v.mtime_h).slice(0, 4) : "";
       const tv = v.thumb_v || (v.has_thumb ? 1 : 0);
+      const dup = !!v.dup;
+      const dupN = v.dup_n || 0;
+      const dupReason = v.dup_reason || "重复";
+      const bad = !!v.bad;
+      const badReason = v.bad_reason || "无法读取";
+      const watched = getPlayProgress(v.id) > 5;
       return `
         <div class="card" data-id="${v.id}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}">
           <div class="thumb">
             <img src="/thumb/${v.id}?v=${tv}" alt="" loading="lazy" decoding="async"
               onerror="if(!this.dataset.retried){this.dataset.retried=1;this.src='/thumb/${v.id}?v='+Date.now()}" />
             <div class="play"><div class="play-icon"></div></div>
+            ${dup ? `<span class="dup-badge" title="${escapeAttr(dupReason)}">重复×${dupN}</span>` : ""}
+            ${bad ? `<span class="bad-badge" title="${escapeAttr(badReason)}">损坏</span>` : ""}
             ${year ? `<span class="dur" style="left:8px;right:auto">${escapeHtml(year)}</span>` : ""}
             ${v.seg_count ? `<span class="dur">${v.seg_count} 段</span>` : (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8" ? `<span class="dur">HLS</span>` : (v.duration_h ? `<span class="dur">${escapeHtml(v.duration_h)}</span>` : `<span class="dur">${escapeHtml((v.ext || "").toUpperCase())}</span>`))}
           </div>
           <div class="card-body">
-            <div class="card-title" title="${escapeAttr(v.name)}">${escapeHtml(v.name)}</div>
+            <div class="card-title" title="${escapeAttr(v.name)}">${escapeHtml(v.name)}${watched ? " · 续播" : ""}</div>
             <div class="card-meta">
               <span>${escapeHtml(v.size_h)}</span>
               <span>${escapeHtml(v.folder || "根目录")}</span>
               ${v.seg_count ? `<span>TS 合集</span>` : ""}
               ${(v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8") ? `<span>m3u8</span>` : ""}
+              ${dup ? `<span title="${escapeAttr(dupReason)}">疑似重复</span>` : ""}
+              ${bad ? `<span title="${escapeAttr(badReason)}">疑似损坏</span>` : ""}
+              ${v.duration_h ? `<span>${escapeHtml(v.duration_h)}</span>` : ""}
               ${(v.genres && v.genres.length) ? `<span>${escapeHtml(v.genres.slice(0, 2).join("·"))}</span>` : ""}
             </div>
           </div>
         </div>`;
     }
 
+    function getVirtualCols() {
+      const grid = $("grid");
+      const w = (grid && grid.clientWidth) || 800;
+      const min = window.matchMedia("(max-width: 900px)").matches ? 160 : 220;
+      return Math.max(1, Math.floor((w + VIRTUAL_GAP) / (min + VIRTUAL_GAP)));
+    }
+
+    function updateGridHint() {
+      const wrap = $("loadMoreWrap");
+      const hint = $("loadMoreHint");
+      const grid = $("grid");
+      const shown = state.virtualEnabled
+        ? state.loadedVideos.length
+        : (grid ? grid.querySelectorAll(".card").length : 0);
+      if (!wrap || !hint) return;
+      if (state.hasMore) {
+        wrap.style.display = "block";
+        hint.textContent = `已加载 ${shown}/${state.totalCount}，继续下滑加载…`;
+      } else if (shown > 0) {
+        wrap.style.display = "block";
+        hint.textContent = shown >= state.totalCount
+          ? `共 ${state.totalCount} 个`
+          : `已显示 ${shown} 个`;
+      } else {
+        wrap.style.display = "none";
+      }
+    }
+
+    function renderVirtualGrid() {
+      const grid = $("grid");
+      const root = $("contentScroll");
+      if (!grid || !root) return;
+      const cols = getVirtualCols();
+      const total = state.loadedVideos.length;
+      const totalRows = Math.ceil(total / cols) || 1;
+      const rowStride = VIRTUAL_ROW_H + VIRTUAL_GAP;
+      const scrollTop = root.scrollTop;
+      const viewH = root.clientHeight;
+      const firstRow = Math.max(0, Math.floor(scrollTop / rowStride) - 3);
+      const lastRow = Math.min(totalRows - 1, Math.ceil((scrollTop + viewH) / rowStride) + 3);
+      const start = firstRow * cols;
+      const end = Math.min(total, (lastRow + 1) * cols);
+      const padTop = firstRow * rowStride;
+      const padBot = Math.max(0, (totalRows - lastRow - 1) * rowStride);
+      grid.innerHTML =
+        `<div class="v-spacer" style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
+        state.loadedVideos.slice(start, end).map(cardHtml).join("") +
+        `<div class="v-spacer" style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
+      updateGridHint();
+      if (state.hasMore && end >= total - cols * 2 && !loadingMore) loadMore();
+    }
+
+    let virtualScrollBound = false;
+    function bindVirtualScroll() {
+      if (virtualScrollBound) return;
+      const root = $("contentScroll");
+      if (!root) return;
+      virtualScrollBound = true;
+      let raf = 0;
+      root.addEventListener("scroll", () => {
+        if (!state.virtualEnabled) return;
+        if (raf) cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => { raf = 0; renderVirtualGrid(); });
+      }, { passive: true });
+      window.addEventListener("resize", () => {
+        if (state.virtualEnabled) renderVirtualGrid();
+      });
+    }
+
     function renderGrid(videos, scanning, append) {
       const grid = $("grid");
       const empty = $("empty");
       const wrap = $("loadMoreWrap");
-      const hint = $("loadMoreHint");
-      if (!append) grid.innerHTML = "";
-      if (!videos.length && !append) {
+      if (!append) {
+        state.loadedVideos = (videos || []).slice();
+      } else if (videos && videos.length) {
+        state.loadedVideos = state.loadedVideos.concat(videos);
+      }
+      state.virtualEnabled = state.totalCount >= VIRTUAL_MIN;
+      bindVirtualScroll();
+
+      if (!state.loadedVideos.length && !append) {
+        grid.innerHTML = "";
         empty.style.display = "block";
         empty.textContent = scanning
           ? "正在扫描硬盘，请稍候…（页面会自动刷新）"
           : "没有找到视频";
-        wrap.style.display = "none";
+        if (wrap) wrap.style.display = "none";
         return;
       }
       empty.style.display = "none";
-      if (videos.length) {
+
+      if (state.virtualEnabled) {
+        renderVirtualGrid();
+        if (!state.hasMore) ensureScrollObserver();
+        return;
+      }
+
+      if (!append) grid.innerHTML = "";
+      if (videos && videos.length) {
         grid.insertAdjacentHTML("beforeend", videos.map(cardHtml).join(""));
       }
-      const shown = grid.children.length;
-      if (state.hasMore) {
-        wrap.style.display = "block";
-        if (hint) hint.textContent = `已显示 ${shown}/${state.totalCount}，继续下滑加载…`;
-      } else if (shown > 0) {
-        wrap.style.display = "block";
-        if (hint) {
-          hint.textContent = shown >= state.totalCount
-            ? `共 ${state.totalCount} 个`
-            : `已显示 ${shown} 个`;
-        }
-      } else {
-        wrap.style.display = "none";
-      }
+      updateGridHint();
       ensureScrollObserver();
     }
 
@@ -1519,6 +1677,7 @@
       if (data.root) status += `当前: ${data.root}`;
       if (data.scan_progress) status += (status ? " · " : "") + data.scan_progress;
       if (data.thumb_progress) status += (status ? " · " : "") + data.thumb_progress;
+      if (data.meta_progress) status += (status ? " · " : "") + data.meta_progress;
       if (data.exporting && data.export_msg) status += (status ? " · " : "") + data.export_msg;
       else if (data.export_ok === true && data.export_path) status += (status ? " · " : "") + "静态站已导出";
       if (!data.has_ffmpeg) status += (status ? " · " : "") + "无 ffmpeg，预览图不可用";
@@ -1540,6 +1699,8 @@
     let currentPlayId = "";
     let currentPlayKind = "";
     let convertPollTimer = 0;
+    let currentConvertJobId = "";
+    let playProgressTimer = 0;
 
     function destroyHls() {
       if (hlsPlayer) {
@@ -1603,6 +1764,16 @@
       }
     }
 
+    function setConvertUi(converting) {
+      const btn = $("btnToMp4");
+      const cancel = $("btnCancelMp4");
+      if (btn) {
+        btn.disabled = !!converting;
+        if (!converting) btn.textContent = "转成 MP4";
+      }
+      if (cancel) cancel.style.display = converting ? "" : "none";
+    }
+
     function updateToMp4Button(kind, ext) {
       const btn = $("btnToMp4");
       if (!btn) return;
@@ -1612,20 +1783,40 @@
         state.hasFfmpeg &&
         (k === "m3u8" || k === "ts_set" || e === ".m3u8");
       btn.style.display = can ? "" : "none";
-      btn.disabled = false;
-      btn.textContent = "转成 MP4";
+      if (!currentConvertJobId) {
+        btn.disabled = false;
+        btn.textContent = "转成 MP4";
+        const cancel = $("btnCancelMp4");
+        if (cancel) cancel.style.display = "none";
+      }
+    }
+
+    async function cancelConvertMp4() {
+      if (!currentConvertJobId) return;
+      try {
+        await fetch("/api/convert-mp4/job/" + encodeURIComponent(currentConvertJobId) + "/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        $("modalInfo").textContent = "正在取消转换…";
+      } catch (e) {
+        $("modalInfo").textContent = "取消失败: " + e;
+      }
     }
 
     async function pollConvertJob(jobId) {
       stopConvertPoll();
+      currentConvertJobId = jobId;
+      setConvertUi(true);
       const tick = async () => {
         try {
           const r = await fetch("/api/convert-mp4/job/" + encodeURIComponent(jobId));
           const data = await r.json();
           if (!r.ok || !data.ok) {
             stopConvertPoll();
-            const btn = $("btnToMp4");
-            if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+            currentConvertJobId = "";
+            setConvertUi(false);
             $("modalInfo").textContent = (data && data.msg) || "查询转换进度失败";
             return;
           }
@@ -1634,16 +1825,17 @@
           const msg = data.msg || "";
           if (st === "done") {
             stopConvertPoll();
-            const btn = $("btnToMp4");
-            if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
-            $("modalInfo").textContent = msg + (data.out_path ? "\n可重新扫描后在列表中看到 MP4" : "");
+            currentConvertJobId = "";
+            setConvertUi(false);
+            $("modalInfo").textContent = msg || "转换完成，已加入片库";
+            try { await refresh(); } catch (_) {}
             return;
           }
-          if (st === "error") {
+          if (st === "error" || st === "cancelled") {
             stopConvertPoll();
-            const btn = $("btnToMp4");
-            if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
-            $("modalInfo").textContent = "转换失败：" + (msg || "未知错误");
+            currentConvertJobId = "";
+            setConvertUi(false);
+            $("modalInfo").textContent = st === "cancelled" ? "已取消转换" : ("转换失败：" + (msg || "未知错误"));
             return;
           }
           $("modalInfo").textContent = msg || (`转换中… ${pct}%`);
@@ -1651,8 +1843,8 @@
           if (btn) btn.textContent = pct ? `转换中 ${pct}%` : "转换中…";
         } catch (e) {
           stopConvertPoll();
-          const btn = $("btnToMp4");
-          if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+          currentConvertJobId = "";
+          setConvertUi(false);
           $("modalInfo").textContent = "查询转换进度失败: " + e;
         }
       };
@@ -1662,11 +1854,9 @@
 
     async function startConvertMp4() {
       if (!currentPlayId) return;
+      setConvertUi(true);
       const btn = $("btnToMp4");
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = "转换中…";
-      }
+      if (btn) btn.textContent = "转换中…";
       $("modalInfo").textContent = "正在提交转换任务…";
       try {
         const r = await fetch("/api/convert-mp4/" + encodeURIComponent(currentPlayId), {
@@ -1676,23 +1866,66 @@
         });
         const data = await r.json();
         if (!r.ok || !data.ok || !data.job_id) {
-          if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+          currentConvertJobId = "";
+          setConvertUi(false);
           $("modalInfo").textContent = (data && data.msg) || "无法开始转换";
           return;
         }
         $("modalInfo").textContent = data.msg || "转换已开始…";
         await pollConvertJob(data.job_id);
       } catch (e) {
-        if (btn) { btn.disabled = false; btn.textContent = "转成 MP4"; }
+        currentConvertJobId = "";
+        setConvertUi(false);
         $("modalInfo").textContent = "请求失败: " + e;
       }
+    }
+
+    function bindPlayProgress(video) {
+      if (playProgressTimer) {
+        clearInterval(playProgressTimer);
+        playProgressTimer = 0;
+      }
+      playProgressTimer = setInterval(() => {
+        if (!currentPlayId || !video || video.paused) return;
+        savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0);
+      }, 4000);
+    }
+
+    function formatResumeTime(sec) {
+      const s = Math.floor(sec || 0);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const r = s % 60;
+      if (h) return `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+      return `${m}:${String(r).padStart(2, "0")}`;
+    }
+
+    function resumePlayback(video, id) {
+      const t = getPlayProgress(id);
+      if (!(t > 5)) return;
+      const seek = () => {
+        try {
+          if (video.duration && t < video.duration - 2) {
+            video.currentTime = t;
+            const base = $("modalInfo").textContent || "";
+            if (!base.includes("续播")) {
+              $("modalInfo").textContent = base + `\n已从 ${formatResumeTime(t)} 续播`;
+            }
+          }
+        } catch (_) {}
+      };
+      if (video.readyState >= 1) seek();
+      else video.addEventListener("loadedmetadata", seek, { once: true });
     }
 
     function openPlayer(id, name, meta, ext, kind, segCount, extra) {
       destroyHls();
       stopConvertPoll();
+      currentConvertJobId = "";
       currentPlayId = id;
       currentPlayKind = kind || "";
+      state.lastPlayId = id;
+      saveUiPrefs();
       $("modalTitle").textContent = name;
       const hard = !!(extra && extra.browser_hard);
       const path = (extra && extra.path) || "";
@@ -1714,17 +1947,21 @@
           "浏览器播放失败。请点「系统播放器」用本地播放器打开" + (path ? "：\n" + path : "");
       };
       $("modal").classList.add("open");
+      bindPlayProgress(video);
 
       if (kind === "m3u8") {
         playHls(`/playlist/${id}.m3u8`);
+        resumePlayback(video, id);
         return;
       }
       if (kind === "ts_set") {
         playHls(`/playlist/${id}.m3u8`, () => playTsSetSequential(id, segCount || 1, 0));
+        resumePlayback(video, id);
         return;
       }
 
       video.src = "/stream/" + id;
+      resumePlayback(video, id);
       video.play().catch(() => {});
     }
 
@@ -1757,17 +1994,27 @@
     }
 
     function closePlayer() {
+      const video = $("player");
+      if (currentPlayId && video) {
+        savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0);
+      }
       destroyHls();
       stopConvertPoll();
+      if (playProgressTimer) {
+        clearInterval(playProgressTimer);
+        playProgressTimer = 0;
+      }
       currentPlayId = "";
       currentPlayKind = "";
+      currentConvertJobId = "";
       const btn = $("btnToMp4");
       if (btn) {
         btn.disabled = false;
         btn.textContent = "转成 MP4";
         btn.style.display = "none";
       }
-      const video = $("player");
+      const cancel = $("btnCancelMp4");
+      if (cancel) cancel.style.display = "none";
       video.onended = null;
       video.pause();
       video.removeAttribute("src");
@@ -1923,6 +2170,7 @@
 
     $("btnLocalOpen").addEventListener("click", () => localAction("open"));
     $("btnToMp4").addEventListener("click", () => startConvertMp4());
+    $("btnCancelMp4").addEventListener("click", () => cancelConvertMp4());
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
     $("btnReveal").addEventListener("click", () => localAction("reveal"));
 

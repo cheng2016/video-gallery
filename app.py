@@ -172,6 +172,7 @@ STATE: dict = {
     "scanning": False,
     "scan_progress": "",
     "thumb_progress": "",
+    "meta_progress": "",
     "ffmpeg": None,
     "updating": False,  # 后台增量中
     "exporting": False,
@@ -182,6 +183,8 @@ STATE: dict = {
 }
 _scan_lock = threading.Lock()
 _convert_lock = threading.Lock()
+_meta_lock = threading.Lock()
+_meta_running = False
 _thumb_jpeg_cache: OrderedDict[str, bytes] = OrderedDict()
 _thumb_jpeg_lock = threading.Lock()
 
@@ -211,9 +214,57 @@ def _video_search_text(v: dict) -> str:
     return text
 
 
+def mark_duplicates(videos: list[dict]) -> None:
+    """
+    标记疑似重复片：
+    - 同名（忽略大小写/首尾空格）且均非 m3u8；
+    - 或体积完全相同且 ≥ MIN_VIDEO_FILE_BYTES（排除小文件噪声）。
+    写入 dup / dup_n / dup_reason，供前端展示。
+    """
+    for v in videos:
+        v.pop("dup", None)
+        v.pop("dup_n", None)
+        v.pop("dup_reason", None)
+
+    by_name: dict[str, list[dict]] = {}
+    by_size: dict[int, list[dict]] = {}
+    for v in videos:
+        kind = v.get("kind") or ""
+        if kind in ("m3u8", "ts_set"):
+            continue
+        name_key = (v.get("name") or Path(v.get("filename") or "").stem or "").strip().casefold()
+        if name_key:
+            by_name.setdefault(name_key, []).append(v)
+        size = int(v.get("size") or 0)
+        if size >= MIN_VIDEO_FILE_BYTES:
+            by_size.setdefault(size, []).append(v)
+
+    def _flag(group: list[dict], reason: str) -> None:
+        if len(group) < 2:
+            return
+        n = len(group)
+        for v in group:
+            prev = int(v.get("dup_n") or 0)
+            v["dup"] = True
+            v["dup_n"] = max(prev, n)
+            reasons = set(str(v.get("dup_reason") or "").split("+")) if v.get("dup_reason") else set()
+            reasons.discard("")
+            reasons.add(reason)
+            v["dup_reason"] = "+".join(sorted(reasons))
+
+    for group in by_name.values():
+        _flag(group, "同名")
+    for group in by_size.values():
+        # 同体积且路径不同才算；同名组已标过也叠加原因
+        paths = {(g.get("rel") or "") for g in group}
+        if len(paths) >= 2:
+            _flag(group, "同体积")
+
+
 def rebuild_indexes(videos: list[dict] | None = None) -> None:
     """扫描结束后预计算频道索引与侧面统计，加速 /api/tree、/api/videos。"""
     videos = videos if videos is not None else STATE.get("videos") or []
+    mark_duplicates(videos)
     by_cat: dict[str, list] = {}
     by_id: dict[str, dict] = {}
     type_counts: dict[str, int] = {}
@@ -1203,27 +1254,61 @@ def format_duration(seconds: float | None) -> str:
 
 
 def probe_duration(ffmpeg: str, path: Path) -> float | None:
-    ffprobe = ffmpeg.replace("ffmpeg", "ffprobe").replace("ffmpeg.exe", "ffprobe.exe")
-    if not os.path.isfile(ffprobe):
-        ffprobe = shutil.which("ffprobe") or ""
-    if not ffprobe:
+    info = probe_media_info(ffmpeg, path)
+    if not info.get("ok"):
         return None
+    dur = info.get("duration")
+    return float(dur) if dur else None
+
+
+def probe_media_info(ffmpeg: str, path: Path) -> dict:
+    """ffprobe 轻量检测：是否含视频流 + 时长。"""
+    if not path or not path.is_file():
+        return {"ok": False, "err": "文件不存在"}
+    ffprobe = _ffprobe_path(ffmpeg)
+    if not ffprobe:
+        return {"ok": False, "err": "未找到 ffprobe"}
     try:
         r = subprocess.run(
             [
                 ffprobe, "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type",
                 "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-of", "json",
                 str(path),
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=25,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
         )
-        if r.returncode == 0 and r.stdout.strip():
-            return float(r.stdout.strip())
-    except Exception:
-        pass
-    return None
+        err = (r.stderr or "").strip()
+        if r.returncode != 0:
+            return {"ok": False, "err": (err or "ffprobe 失败")[:120]}
+        payload = json.loads(r.stdout or "{}") if r.stdout else {}
+        streams = payload.get("streams") or []
+        if not streams:
+            return {"ok": False, "err": "无视频流"}
+        dur = None
+        fmt = payload.get("format") or {}
+        if fmt.get("duration"):
+            try:
+                d = float(fmt["duration"])
+                if d > 0:
+                    dur = d
+            except (TypeError, ValueError):
+                pass
+        return {"ok": True, "duration": dur}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "err": "探测超时"}
+    except Exception as e:
+        return {"ok": False, "err": str(e)[:120]}
+
+
+def _ffprobe_path(ffmpeg: str) -> str:
+    ffprobe = ffmpeg.replace("ffmpeg", "ffprobe").replace("ffmpeg.exe", "ffprobe.exe")
+    if not os.path.isfile(ffprobe):
+        ffprobe = shutil.which("ffprobe") or ""
+    return ffprobe
 
 
 def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0) -> bool:
@@ -1317,6 +1402,135 @@ def _video_file_for_thumb(item: dict) -> Path | None:
                 return hit
         return None
     return resolve_under_root(item.get("rel") or "")
+
+
+def _apply_probe_to_item(item: dict, info: dict) -> None:
+    item["probe_ver"] = 1
+    if info.get("ok"):
+        item.pop("bad", None)
+        item.pop("bad_reason", None)
+        dur = info.get("duration")
+        if dur:
+            item["duration"] = dur
+            item["duration_h"] = format_duration(dur)
+    else:
+        item["bad"] = True
+        item["bad_reason"] = info.get("err") or "无法读取"
+
+
+def _item_probe_path(item: dict) -> Path | None:
+    thumb_src = _video_file_for_thumb(item)
+    if thumb_src and thumb_src.is_file():
+        return thumb_src
+    rel = item.get("rel") or ""
+    if rel:
+        return resolve_video_path(rel)
+    return None
+
+
+def _needs_metadata_probe(item: dict) -> bool:
+    if item.get("probe_ver") == 1:
+        return False
+    # 已有时长说明曾可读，补上 probe 标记即可，避免大库二次全量探测
+    if item.get("duration") and not item.get("bad"):
+        item["probe_ver"] = 1
+        return False
+    kind = item.get("kind") or ""
+    if kind == "ts_set" and not item.get("segments"):
+        return False
+    size = int(item.get("size") or 0)
+    if size and size < MIN_VIDEO_FILE_BYTES and kind not in ("m3u8", "ts_set"):
+        return False
+    return True
+
+
+def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tuple[int, int]:
+    """并行 ffprobe：补时长 + 损坏标记。返回 (成功, 失败)。"""
+    ffmpeg = STATE.get("ffmpeg")
+    if not items or not ffmpeg:
+        return 0, 0
+    total = len(items)
+    workers = max(1, min(4, thumb_worker_count(total)))
+    STATE["meta_progress"] = f"{label}探测 0/{total}（{workers} 线程）…"
+    ok_n = fail_n = done = 0
+    lock = threading.Lock()
+
+    def one(item: dict) -> tuple[dict, bool, str]:
+        name = item.get("name") or item.get("rel") or item.get("id") or "?"
+        kind = item.get("kind") or ""
+        is_stream = kind in ("m3u8", "ts_set") or (item.get("ext") or "").lower() == ".m3u8"
+        path = _item_probe_path(item)
+        if not path or not path.is_file():
+            item["probe_ver"] = 1
+            if not is_stream:
+                item["bad"] = True
+                item["bad_reason"] = "文件不存在"
+            return item, False, f"{name} (无实体文件)"
+        # 播放列表：只对真实媒体分片探测；若落到 .m3u8 本身则只记 probe，不标坏
+        if is_stream and path.suffix.lower() == ".m3u8":
+            item["probe_ver"] = 1
+            return item, True, name
+        info = probe_media_info(ffmpeg, path)
+        _apply_probe_to_item(item, info)
+        return item, bool(info.get("ok")), name
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(one, it) for it in items]
+        for fut in as_completed(futures):
+            item, ok, name = fut.result()
+            with lock:
+                done += 1
+                if ok:
+                    ok_n += 1
+                else:
+                    fail_n += 1
+                STATE["meta_progress"] = f"{label}探测 {done}/{total}（可读 {ok_n}，异常 {fail_n}）…"
+                if done % 40 == 0 or done == total:
+                    log(f"[元数据] ({done}/{total}) {'OK' if ok else '异常'} {name}")
+    return ok_n, fail_n
+
+
+def start_metadata_enrichment() -> None:
+    """后台补时长 / 损坏检测（不阻塞浏览）。"""
+    global _meta_running
+    if not STATE.get("ffmpeg") or not STATE.get("videos"):
+        return
+    if not _meta_lock.acquire(blocking=False):
+        return
+    if _meta_running:
+        _meta_lock.release()
+        return
+    _meta_running = True
+    _meta_lock.release()
+    threading.Thread(target=_bg_enrich_metadata, daemon=True, name="meta-enrich").start()
+
+
+def _bg_enrich_metadata() -> None:
+    global _meta_running
+    try:
+        root = STATE.get("root")
+        cache = STATE.get("cache_dir")
+        videos = STATE.get("videos") or []
+        need = [v for v in videos if _needs_metadata_probe(v)]
+        if not need:
+            # 可能只是给「已有时长」补了 probe_ver，仍落盘避免下次重复判断
+            if cache and root:
+                save_index(cache, Path(root), videos)
+            STATE["meta_progress"] = ""
+            return
+        log(f"[元数据] 后台探测 {len(need)} 个…")
+        ok_n, fail_n = enrich_metadata_parallel(need, label="后台")
+        rebuild_indexes(videos)
+        if cache and root:
+            save_index(cache, Path(root), videos)
+        STATE["meta_progress"] = f"元数据完成：可读 {ok_n}，异常 {fail_n}"
+        log(f"[元数据] 完成：可读 {ok_n}，异常 {fail_n}")
+    except Exception as e:
+        STATE["meta_progress"] = f"元数据探测失败: {e}"
+        log(f"[元数据] 失败: {e}")
+    finally:
+        _meta_running = False
+        threading.Timer(4.0, lambda: STATE.update(meta_progress="")).start()
 
 
 def attach_thumb_meta(v: dict) -> dict:
@@ -1635,6 +1849,7 @@ def scan_videos(
     if not quiet:
         STATE["scanning"] = False
     log("[扫描] 全部结束，可在浏览器浏览")
+    start_metadata_enrichment()
 
 
 def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: bool = True) -> bool:
@@ -1724,6 +1939,7 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                     log(f"[预览图] 缓存缺图约 {missing} 个，将在后台增量时补全")
                 else:
                     log("[预览图] 缓存齐全")
+                start_metadata_enrichment()
                 return True
         except Exception as e:
             log(f"[缓存] 加载失败，将重新扫描: {e}")
@@ -1975,8 +2191,15 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
             "size_h": v.get("size_h") or "",
             "mtime": float(v.get("mtime") or 0),
             "mtime_h": v.get("mtime_h") or "",
+            "duration": v.get("duration"),
+            "duration_h": v.get("duration_h") or "",
             "genres": ensure_video_genres(v),
             "seg_count": int(v.get("seg_count") or 0),
+            "dup": bool(v.get("dup")),
+            "dup_n": int(v.get("dup_n") or 0),
+            "dup_reason": v.get("dup_reason") or "",
+            "bad": bool(v.get("bad")),
+            "bad_reason": v.get("bad_reason") or "",
             "src": src_rel,
             "path": path_str,
             "file_url": file_url,
@@ -2178,6 +2401,7 @@ def api_tree():
         "export_ok": STATE.get("export_ok"),
         "scan_progress": STATE["scan_progress"],
         "thumb_progress": STATE["thumb_progress"],
+        "meta_progress": STATE.get("meta_progress") or "",
         "count": count,
         "has_ffmpeg": bool(STATE["ffmpeg"]),
         "root": str(root) if root else "",
@@ -2379,6 +2603,12 @@ def api_videos():
         reverse = True
     elif sort == "size_asc":
         key_fn = lambda v: v.get("size") or 0
+        reverse = False
+    elif sort == "duration_desc":
+        key_fn = lambda v: v.get("duration") or 0
+        reverse = True
+    elif sort == "duration_asc":
+        key_fn = lambda v: v.get("duration") or 0
         reverse = False
     else:
         reverse = True
@@ -2698,14 +2928,18 @@ def api_info(vid: str):
     item = find_video_by_id(vid)
     if not item:
         abort(404)
-    # 懒加载时长
-    if not item.get("duration") and STATE["ffmpeg"]:
-        path = resolve_video_path(item["rel"])
-        if path:
-            d = probe_duration(STATE["ffmpeg"], path)
-            if d:
-                item["duration"] = d
-                item["duration_h"] = format_duration(d)
+    # 懒加载时长 / 损坏标记
+    if STATE.get("ffmpeg") and item.get("probe_ver") != 1 and not item.get("duration"):
+        path = _item_probe_path(item)
+        if path and path.is_file() and path.suffix.lower() != ".m3u8":
+            info = probe_media_info(STATE["ffmpeg"], path)
+            _apply_probe_to_item(item, info)
+        elif not path or not path.is_file():
+            kind = item.get("kind") or ""
+            if kind not in ("m3u8", "ts_set") and (item.get("ext") or "").lower() != ".m3u8":
+                item["probe_ver"] = 1
+                item["bad"] = True
+                item["bad_reason"] = "文件不存在"
     payload = {k: v for k, v in item.items() if k not in ("_q", "segments")}
     # 本地路径（供复制 / 系统播放器）
     local = _local_path_for_item(item)
@@ -2809,11 +3043,114 @@ def _convert_job_update(job_id: str, **kwargs) -> None:
         job.update(kwargs)
 
 
+def _convert_job_cancelled(job_id: str) -> bool:
+    with _convert_lock:
+        job = STATE["convert_jobs"].get(job_id) or {}
+        return bool(job.get("cancel"))
+
+
 def _parse_ffmpeg_time_seconds(line: str) -> float | None:
     m = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
     if not m:
         return None
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def _probe_input_duration(ffmpeg: str, input_args: list[str]) -> float | None:
+    """从 convert 输入参数里取出 -i 路径做 ffprobe。"""
+    try:
+        i = input_args.index("-i")
+        src = input_args[i + 1]
+    except (ValueError, IndexError):
+        return None
+    return probe_duration(ffmpeg, Path(src))
+
+
+def _kill_convert_proc(proc: subprocess.Popen | None) -> None:
+    if not proc or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _register_converted_mp4(out_path: Path) -> dict | None:
+    """把转出的 MP4 登记进当前片库（无需全盘重扫）。"""
+    root = STATE.get("root")
+    cache = STATE.get("cache_dir")
+    if not root or not out_path or not out_path.is_file():
+        return None
+    try:
+        rel = safe_rel(out_path, Path(root))
+        st = out_path.stat()
+    except (ValueError, OSError):
+        return None
+    if is_too_small_video(".mp4", st.st_size):
+        return None
+
+    vid = video_id(rel)
+    folder = str(Path(rel).parent).replace("\\", "/") if Path(rel).parent != Path(".") else ""
+    item = {
+        "id": vid,
+        "name": out_path.stem,
+        "filename": out_path.name,
+        "rel": rel,
+        "folder": folder,
+        "ext": ".mp4",
+        "size": st.st_size,
+        "size_h": format_size(st.st_size),
+        "mtime": st.st_mtime,
+        "mtime_h": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+        "duration": None,
+        "duration_h": "",
+        "thumb": f"{vid}{THUMB_EXT}",
+        "has_thumb": thumb_file_ready(cache, vid) if cache else False,
+        "genres": detect_genres(rel, out_path.stem),
+    }
+    ffmpeg = STATE.get("ffmpeg")
+    if ffmpeg:
+        d = probe_duration(ffmpeg, out_path)
+        if d:
+            item["duration"] = d
+            item["duration_h"] = format_duration(d)
+
+    videos = list(STATE.get("videos") or [])
+    replaced = False
+    for i, v in enumerate(videos):
+        if (v.get("rel") or "") == rel or v.get("id") == vid:
+            videos[i] = item
+            replaced = True
+            break
+    if not replaced:
+        videos.append(item)
+    STATE["videos"] = videos
+    STATE["tree"] = build_tree(Path(root), videos)
+    rebuild_indexes(videos)
+    if cache:
+        save_index(cache, Path(root), videos)
+    # 后台补一张预览图
+    if ffmpeg and cache and not item.get("has_thumb"):
+        def _thumb_one():
+            try:
+                out = thumb_path(cache, vid)
+                if make_thumbnail(ffmpeg, out_path, out):
+                    item["has_thumb"] = True
+                    item["thumb_v"] = thumb_version(cache, vid)
+                    rebuild_indexes(STATE.get("videos") or [])
+            except Exception as e:
+                log(f"[转MP4] 预览图失败: {e}")
+        threading.Thread(target=_thumb_one, daemon=True, name="convert-thumb").start()
+    log(f"[转MP4] 已入库: {rel}")
+    return item
 
 
 def _run_ffmpeg_convert(
@@ -2843,6 +3180,8 @@ def _run_ffmpeg_convert(
     ]
     last_err = ""
     for label, cmd_tail in attempts:
+        if _convert_job_cancelled(job_id):
+            return False, "已取消"
         try:
             if out_path.exists():
                 out_path.unlink()
@@ -2866,8 +3205,13 @@ def _run_ffmpeg_convert(
                 if job is not None:
                     job["proc"] = proc
             err_chunks: list[str] = []
+            cancelled = False
             assert proc.stderr is not None
             for line in proc.stderr:
+                if _convert_job_cancelled(job_id):
+                    cancelled = True
+                    _kill_convert_proc(proc)
+                    break
                 err_chunks.append(line)
                 if len(err_chunks) > 40:
                     err_chunks = err_chunks[-40:]
@@ -2880,6 +3224,12 @@ def _run_ffmpeg_convert(
                 job = STATE["convert_jobs"].get(job_id)
                 if job is not None:
                     job["proc"] = None
+            if cancelled or _convert_job_cancelled(job_id):
+                try:
+                    out_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return False, "已取消"
             if code == 0 and out_path.is_file() and out_path.stat().st_size > 0:
                 return True, f"{label}完成"
             last_err = "".join(err_chunks[-12:]).strip() or f"ffmpeg 退出码 {code}"
@@ -2887,6 +3237,8 @@ def _run_ffmpeg_convert(
         except Exception as e:
             last_err = str(e)
             log(f"[转MP4] {label}异常: {e}")
+            if _convert_job_cancelled(job_id):
+                return False, "已取消"
     return False, last_err or "转换失败"
 
 
@@ -2966,7 +3318,15 @@ def _convert_worker(job_id: str, vid: str) -> None:
         if not ffmpeg:
             _convert_job_update(job_id, status="error", msg="未找到 ffmpeg", percent=0)
             return
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+            return
+        _convert_job_update(job_id, status="running", msg="正在分析时长…", percent=0)
         input_args, out_dir, tmp_path, duration_hint = _prepare_convert_input(item)
+        if not duration_hint:
+            duration_hint = _probe_input_duration(ffmpeg, input_args)
+        if duration_hint:
+            _convert_job_update(job_id, duration=duration_hint)
         if not _path_under_root(out_dir):
             _convert_job_update(job_id, status="error", msg="输出目录不在扫描根下", percent=0)
             return
@@ -2974,6 +3334,9 @@ def _convert_worker(job_id: str, vid: str) -> None:
         out_path = _unique_mp4_path(out_dir, base_name)
         if not _path_under_root(out_path):
             _convert_job_update(job_id, status="error", msg="输出路径非法", percent=0)
+            return
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
             return
         _convert_job_update(
             job_id,
@@ -2984,14 +3347,22 @@ def _convert_worker(job_id: str, vid: str) -> None:
         )
         ok, msg = _run_ffmpeg_convert(job_id, ffmpeg, input_args, out_path, duration_hint)
         if ok:
+            added = _register_converted_mp4(out_path)
             _convert_job_update(
                 job_id,
                 status="done",
-                msg=f"已保存：{out_path}",
+                msg=f"已保存并加入片库：{out_path}",
                 percent=100,
                 out_path=str(out_path),
+                added_id=(added or {}).get("id") or "",
             )
             log(f"[转MP4] 完成 {vid} → {out_path}")
+        elif msg == "已取消" or _convert_job_cancelled(job_id):
+            try:
+                out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
         else:
             try:
                 if out_path.exists() and out_path.stat().st_size == 0:
@@ -3000,7 +3371,10 @@ def _convert_worker(job_id: str, vid: str) -> None:
                 pass
             _convert_job_update(job_id, status="error", msg=msg[:500] or "转换失败", percent=0)
     except Exception as e:
-        _convert_job_update(job_id, status="error", msg=str(e), percent=0)
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+        else:
+            _convert_job_update(job_id, status="error", msg=str(e), percent=0)
         log(f"[转MP4] 任务失败 {vid}: {e}")
     finally:
         if tmp_path:
@@ -3043,6 +3417,8 @@ def api_convert_mp4_start(vid: str):
             "msg": "排队中…",
             "percent": 0,
             "out_path": "",
+            "added_id": "",
+            "cancel": False,
             "proc": None,
         }
 
@@ -3069,7 +3445,23 @@ def api_convert_mp4_status(job_id: str):
             "msg": job.get("msg") or "",
             "percent": int(job.get("percent") or 0),
             "out_path": job.get("out_path") or "",
+            "added_id": job.get("added_id") or "",
         })
+
+
+@app.route("/api/convert-mp4/job/<job_id>/cancel", methods=["POST"])
+def api_convert_mp4_cancel(job_id: str):
+    with _convert_lock:
+        job = STATE["convert_jobs"].get(job_id)
+        if not job:
+            return jsonify({"ok": False, "msg": "任务不存在"}), 404
+        if job.get("status") in ("done", "error", "cancelled"):
+            return jsonify({"ok": True, "msg": "任务已结束", "status": job.get("status")})
+        job["cancel"] = True
+        job["msg"] = "正在取消…"
+        proc = job.get("proc")
+    _kill_convert_proc(proc)
+    return jsonify({"ok": True, "msg": "已请求取消", "status": "cancelling"})
 
 
 @app.route("/api/export-static", methods=["POST"])
