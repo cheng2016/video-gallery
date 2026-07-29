@@ -56,6 +56,10 @@ SEGMENT_FOLDER_GENERIC = {
 # 大于该体积的 .ts/.m2ts 视为整片，即使同目录有多个也不并入分片合集
 # （典型 HLS 分片远小于此；整片录像常见数百 MB～数 GB）
 STANDALONE_TS_MIN_BYTES = 50 * 1024 * 1024
+# 普通视频文件过小视为无效（占位/损坏/假后缀），不进图库；m3u8 本身很小除外
+MIN_VIDEO_FILE_BYTES = 100 * 1024
+# TS 分片允许更小，仅丢掉近乎空文件的垃圾
+MIN_SEGMENT_FILE_BYTES = 1024
 
 # 浏览器较易播放的格式
 BROWSER_FRIENDLY_EXTS = {".mp4", ".webm", ".m4v", ".mov"}
@@ -963,6 +967,15 @@ def should_skip_dir(name: str) -> bool:
     return name.startswith(".") or name.lower() in SKIP_DIR_NAMES
 
 
+def is_too_small_video(ext: str, size: int) -> bool:
+    """过小的假/损坏视频文件（m3u8 除外）。"""
+    ext = (ext or "").lower()
+    if ext in PLAYLIST_EXTS:
+        return False
+    min_bytes = MIN_SEGMENT_FILE_BYTES if ext in SEGMENT_EXTS else MIN_VIDEO_FILE_BYTES
+    return int(size or 0) < min_bytes
+
+
 def _clear_path_attrs_windows(path: Path) -> None:
     """去掉 Hidden/System，否则 Windows 上覆盖写入常报 PermissionError (errno 13)。"""
     if sys.platform != "win32":
@@ -1524,6 +1537,9 @@ def scan_videos(
                 st = full.stat()
             except (ValueError, OSError):
                 continue
+            # 跳过过小的假/损坏视频；播放列表 .m3u8 体积小，不按此过滤
+            if is_too_small_video(ext, st.st_size):
+                continue
             old = old_map.get(rel)
             if (
                 old
@@ -1677,6 +1693,15 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                         if not (root / rel).is_file():
                             continue
                     except OSError:
+                        continue
+                    ext = (v.get("ext") or Path(rel).suffix).lower()
+                    size = int(v.get("size") or 0)
+                    if size <= 0:
+                        try:
+                            size = int((root / rel).stat().st_size)
+                        except OSError:
+                            size = 0
+                    if is_too_small_video(ext, size):
                         continue
                     vid = v.get("id") or video_id(rel)
                     v["id"] = vid
