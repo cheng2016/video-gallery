@@ -837,6 +837,7 @@
     <div class="modal-info" id="modalInfo"></div>
     <div class="modal-actions" id="modalActions">
       <button type="button" class="btn primary" id="btnLocalOpen" title="用系统默认播放器打开">系统播放器</button>
+      <button type="button" class="btn" id="btnFixAudio" title="视频直拷，音频转为 AAC（解决浏览器无声）" style="display:none">修复声音</button>
       <button type="button" class="btn" id="btnToMp4" title="用 ffmpeg 转为同目录 MP4" style="display:none">转成 MP4</button>
       <button type="button" class="btn" id="btnCancelMp4" title="取消正在进行的转换" style="display:none">取消转换</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
@@ -1766,10 +1767,15 @@
 
     function setConvertUi(converting) {
       const btn = $("btnToMp4");
+      const fixBtn = $("btnFixAudio");
       const cancel = $("btnCancelMp4");
       if (btn) {
         btn.disabled = !!converting;
         if (!converting) btn.textContent = "转成 MP4";
+      }
+      if (fixBtn) {
+        fixBtn.disabled = !!converting;
+        if (!converting) fixBtn.textContent = "修复声音";
       }
       if (cancel) cancel.style.display = converting ? "" : "none";
     }
@@ -1791,6 +1797,17 @@
       }
     }
 
+    function updateFixAudioButton(extra) {
+      const btn = $("btnFixAudio");
+      if (!btn) return;
+      const can = state.hasFfmpeg && !!(extra && extra.audio_hard);
+      btn.style.display = can ? "" : "none";
+      if (!currentConvertJobId) {
+        btn.disabled = false;
+        btn.textContent = "修复声音";
+      }
+    }
+
     async function cancelConvertMp4() {
       if (!currentConvertJobId) return;
       try {
@@ -1799,13 +1816,13 @@
           headers: { "Content-Type": "application/json" },
           body: "{}",
         });
-        $("modalInfo").textContent = "正在取消转换…";
+        $("modalInfo").textContent = "正在取消…";
       } catch (e) {
         $("modalInfo").textContent = "取消失败: " + e;
       }
     }
 
-    async function pollConvertJob(jobId) {
+    async function pollConvertJob(jobId, doneLabel) {
       stopConvertPoll();
       currentConvertJobId = jobId;
       setConvertUi(true);
@@ -1817,7 +1834,7 @@
             stopConvertPoll();
             currentConvertJobId = "";
             setConvertUi(false);
-            $("modalInfo").textContent = (data && data.msg) || "查询转换进度失败";
+            $("modalInfo").textContent = (data && data.msg) || "查询进度失败";
             return;
           }
           const st = data.status || "";
@@ -1827,7 +1844,7 @@
             stopConvertPoll();
             currentConvertJobId = "";
             setConvertUi(false);
-            $("modalInfo").textContent = msg || "转换完成，已加入片库";
+            $("modalInfo").textContent = msg || (doneLabel || "完成，已加入片库");
             try { await refresh(); } catch (_) {}
             return;
           }
@@ -1835,17 +1852,19 @@
             stopConvertPoll();
             currentConvertJobId = "";
             setConvertUi(false);
-            $("modalInfo").textContent = st === "cancelled" ? "已取消转换" : ("转换失败：" + (msg || "未知错误"));
+            $("modalInfo").textContent = st === "cancelled" ? "已取消" : ("失败：" + (msg || "未知错误"));
             return;
           }
-          $("modalInfo").textContent = msg || (`转换中… ${pct}%`);
+          $("modalInfo").textContent = msg || (`处理中… ${pct}%`);
           const btn = $("btnToMp4");
-          if (btn) btn.textContent = pct ? `转换中 ${pct}%` : "转换中…";
+          if (btn && btn.style.display !== "none") btn.textContent = pct ? `转换中 ${pct}%` : "转换中…";
+          const fixBtn = $("btnFixAudio");
+          if (fixBtn && fixBtn.style.display !== "none") fixBtn.textContent = pct ? `修复中 ${pct}%` : "修复中…";
         } catch (e) {
           stopConvertPoll();
           currentConvertJobId = "";
           setConvertUi(false);
-          $("modalInfo").textContent = "查询转换进度失败: " + e;
+          $("modalInfo").textContent = "查询进度失败: " + e;
         }
       };
       await tick();
@@ -1872,7 +1891,35 @@
           return;
         }
         $("modalInfo").textContent = data.msg || "转换已开始…";
-        await pollConvertJob(data.job_id);
+        await pollConvertJob(data.job_id, "转换完成，已加入片库");
+      } catch (e) {
+        currentConvertJobId = "";
+        setConvertUi(false);
+        $("modalInfo").textContent = "请求失败: " + e;
+      }
+    }
+
+    async function startFixAudio() {
+      if (!currentPlayId) return;
+      setConvertUi(true);
+      const btn = $("btnFixAudio");
+      if (btn) btn.textContent = "修复中…";
+      $("modalInfo").textContent = "正在提交修复任务…";
+      try {
+        const r = await fetch("/api/fix-audio/" + encodeURIComponent(currentPlayId), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await r.json();
+        if (!r.ok || !data.ok || !data.job_id) {
+          currentConvertJobId = "";
+          setConvertUi(false);
+          $("modalInfo").textContent = (data && data.msg) || "无法开始修复";
+          return;
+        }
+        $("modalInfo").textContent = data.msg || "修复已开始…";
+        await pollConvertJob(data.job_id, "声音已修复，已加入片库");
       } catch (e) {
         currentConvertJobId = "";
         setConvertUi(false);
@@ -1928,6 +1975,8 @@
       saveUiPrefs();
       $("modalTitle").textContent = name;
       const hard = !!(extra && extra.browser_hard);
+      const audioHard = !!(extra && extra.audio_hard);
+      const audioCodec = (extra && extra.audio_codec) || "";
       const path = (extra && extra.path) || "";
       let tip = meta || "";
       if (kind === "m3u8") {
@@ -1937,9 +1986,14 @@
       } else if (hard || (ext && HARD_EXTS.has(String(ext).toLowerCase()))) {
         tip += (tip ? " · " : "") + "此格式浏览器可能无法播放，建议用「系统播放器」";
       }
+      if (audioHard) {
+        tip += (tip ? "\n" : "") +
+          `浏览器可能听不到声音（音频为 ${audioCodec || "不兼容格式"}）。可点「修复声音」生成 AAC 版，或用「系统播放器」`;
+      }
       if (path) tip += (tip ? " · " : "") + path;
       $("modalInfo").textContent = tip;
       updateToMp4Button(kind, ext);
+      updateFixAudioButton(extra);
       const video = $("player");
       video.onended = null;
       video.onerror = () => {
@@ -2012,6 +2066,12 @@
         btn.disabled = false;
         btn.textContent = "转成 MP4";
         btn.style.display = "none";
+      }
+      const fixBtn = $("btnFixAudio");
+      if (fixBtn) {
+        fixBtn.disabled = false;
+        fixBtn.textContent = "修复声音";
+        fixBtn.style.display = "none";
       }
       const cancel = $("btnCancelMp4");
       if (cancel) cancel.style.display = "none";
@@ -2161,6 +2221,8 @@
             path: info.path || "",
             browser_hard: !!info.browser_hard,
             browser_ok: !!info.browser_ok,
+            audio_hard: !!info.audio_hard,
+            audio_codec: info.audio_codec || "",
           }
         );
       } catch {
@@ -2169,6 +2231,7 @@
     });
 
     $("btnLocalOpen").addEventListener("click", () => localAction("open"));
+    $("btnFixAudio").addEventListener("click", () => startFixAudio());
     $("btnToMp4").addEventListener("click", () => startConvertMp4());
     $("btnCancelMp4").addEventListener("click", () => cancelConvertMp4());
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
