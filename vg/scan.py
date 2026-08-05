@@ -25,9 +25,11 @@ from vg.config import (
     THUMB_EXT,
     VIDEO_EXTS,
 )
+from vg.disk_libs import archive_current_library, find_in_disk_libs, stamp_lib_meta
 from vg.drives import save_prefs
 from vg.genres import detect_genres, ensure_video_genres
 from vg.segments import collapse_segment_sets
+from vg.series import attach_series
 from vg.state import STATE, _scan_lock
 from vg.util import (
     format_size,
@@ -106,6 +108,7 @@ def rebuild_indexes(videos: list[dict] | None = None) -> None:
     """扫描结束后预计算频道索引与侧面统计，加速 /api/tree、/api/videos。"""
     videos = videos if videos is not None else STATE.get("videos") or []
     mark_duplicates(videos)
+    attach_series(videos)
     by_cat: dict[str, list] = {}
     by_id: dict[str, dict] = {}
     type_counts: dict[str, int] = {}
@@ -156,6 +159,8 @@ def rebuild_indexes(videos: list[dict] | None = None) -> None:
     STATE["videos"] = videos
     STATE["by_category"] = by_cat
     STATE["by_id"] = by_id
+    # 多盘条目已有 _lib_root，绝不能用当前 STATE.root 全量覆盖
+    stamp_lib_meta(videos, overwrite=False)
     STATE["facets"] = {
         "types": types,
         "genres": genres,
@@ -164,8 +169,15 @@ def rebuild_indexes(videos: list[dict] | None = None) -> None:
     }
 
 
-def start_scan(root: Path, do_thumbs: bool = True, force: bool = False) -> tuple[bool, str]:
-    """切换根目录。force=False 优先读缓存（秒开）再后台增量；force=True 增量全盘扫描。"""
+def start_scan(
+    root: Path,
+    do_thumbs: bool = True,
+    force: bool = False,
+    replace_mounts: bool = True,
+) -> tuple[bool, str]:
+    """切换根目录。force=False 优先读缓存（秒开）再后台增量；force=True 增量全盘扫描。
+    replace_mounts=True：片库只保留这一根；False：保留已挂载目录（用于「加入片库」）。
+    """
     if STATE["scanning"] or not _scan_lock.acquire(blocking=False):
         return False, "正在扫描中，请稍候"
 
@@ -179,13 +191,61 @@ def start_scan(root: Path, do_thumbs: bool = True, force: bool = False) -> tuple
     def run():
         nonlocal want_bg_incremental
         try:
+            # 换盘前归档当前片库，局域网历史仍可播旧盘视频
+            try:
+                cur = STATE.get("root")
+                if cur and Path(cur).resolve() != root.resolve():
+                    archive_current_library()
+            except OSError:
+                archive_current_library()
+            try:
+                from vg.roots import get_mounted_roots, set_mounted_roots
+
+                root_s = str(root.resolve())
+                if replace_mounts:
+                    set_mounted_roots([root_s], primary=root_s)
+                else:
+                    mounts = get_mounted_roots()
+                    if root_s.lower() not in {m.lower() for m in mounts}:
+                        mounts = list(mounts) + [root_s]
+                    set_mounted_roots(mounts, primary=root_s)
+            except Exception as e:
+                log(f"[多根] 设置挂载失败: {e}")
             STATE["root"] = root
             STATE["cache_dir"] = ensure_cache_dir(root)
             save_prefs(last_root=str(root))
             if force:
                 STATE["scan_progress"] = f"正在增量扫描 {root} …"
                 STATE["thumb_progress"] = ""
-                STATE["videos"] = []
+                # 多盘时不要把其它盘的片从内存清空到「整库变空」；
+                # 其它盘频道仍可从各盘 index 读出；扫完 on_scan_finished 会再合并。
+                try:
+                    archive_current_library()
+                except Exception:
+                    pass
+                try:
+                    from vg.roots import get_mounted_roots
+                    from vg.disk_libs import _norm_root_str
+
+                    mounts = get_mounted_roots()
+                    root_s = str(root.resolve())
+                    if len(mounts) > 1:
+                        keep = []
+                        for v in list(STATE.get("videos") or []):
+                            lr = (v.get("_lib_root") or "").strip()
+                            if not lr:
+                                continue
+                            try:
+                                if _norm_root_str(lr).lower() == root_s.lower():
+                                    continue
+                            except Exception:
+                                continue
+                            keep.append(v)
+                        STATE["videos"] = keep
+                    else:
+                        STATE["videos"] = []
+                except Exception:
+                    STATE["videos"] = []
                 STATE["tree"] = {
                     "name": root.name or str(root),
                     "path": "",
@@ -462,6 +522,15 @@ def scan_videos(
 
     found.sort(key=lambda x: x["rel"].lower())
     found = collapse_segment_sets(found)
+    try:
+        root_s = str(Path(root).resolve())
+    except OSError:
+        root_s = str(root)
+    stamp_lib_meta(found, root=root_s, cache=cache, overwrite=True)
+    for v in found:
+        v["root"] = root_s
+        if "_folder_raw" not in v:
+            v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
     STATE["tree"] = build_tree(root, found)
     rebuild_indexes(found)
     extra = f"（{len(errors)} 个目录跳过）" if errors else ""
@@ -470,6 +539,12 @@ def scan_videos(
     log(f"[扫描] 完成，共 {len(found)} 个{tip}{extra}")
     save_index(cache, root, found)
     save_prefs(last_root=str(root))
+    try:
+        from vg.roots import on_scan_finished
+
+        on_scan_finished(root)
+    except Exception as e:
+        log(f"[多根] 扫描收尾失败: {e}")
 
     if do_thumbs and ffmpeg and found:
         missing = []
@@ -579,6 +654,15 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                     ensure_video_genres(v)
                     videos.append(v)
                 videos = collapse_segment_sets(videos)
+                try:
+                    root_s = str(Path(root).resolve())
+                except OSError:
+                    root_s = str(root)
+                stamp_lib_meta(videos, root=root_s, cache=cache, overwrite=True)
+                for v in videos:
+                    v["root"] = root_s
+                    if "_folder_raw" not in v:
+                        v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
                 STATE["tree"] = build_tree(root, videos)
                 rebuild_indexes(videos)
                 dropped = len(data["videos"]) - len(videos)
@@ -587,6 +671,12 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                 log(f"[缓存] 已加载 {len(videos)} 个视频{tip} ← {index_path}")
                 save_index(cache, root, videos)
                 save_prefs(last_root=str(root))
+                try:
+                    from vg.roots import on_scan_finished
+
+                    on_scan_finished(root)
+                except Exception as e:
+                    log(f"[多根] 缓存收尾失败: {e}")
                 # 缺图交给随后的后台增量扫描统一并行补全，避免与增量抢状态
                 missing = sum(1 for v in videos if not v.get("has_thumb"))
                 if missing:
@@ -627,12 +717,45 @@ def _fill_missing_thumbs(missing: list[dict]) -> None:
 
 
 
-def find_video_by_id(vid: str) -> dict | None:
+def find_video_by_id(vid: str, prefer_root: str | None = None) -> dict | None:
+    """Find video in active library, then archived / cached disk indexes.
+
+    prefer_root: when history remembers which disk, prefer that library (avoids id collision).
+    """
+    from vg.disk_libs import ensure_cached_indexes_scanned, ensure_library
+
+    prefer = (prefer_root or "").strip() or None
+    if prefer:
+        ensure_library(prefer)
+        hit = find_in_disk_libs(vid, prefer_root=prefer)
+        if hit is not None:
+            return hit
+        # same as active?
+        cur = STATE.get("root")
+        try:
+            if cur and str(Path(cur).resolve()) == str(Path(prefer).expanduser().resolve()):
+                by_id = STATE.get("by_id") or {}
+                hit = by_id.get(vid)
+                if hit is not None:
+                    return hit
+        except OSError:
+            pass
+
     by_id = STATE.get("by_id") or {}
     hit = by_id.get(vid)
     if hit is not None:
         return hit
-    return next((v for v in STATE.get("videos") or [] if v.get("id") == vid), None)
+    hit = next((v for v in STATE.get("videos") or [] if v.get("id") == vid), None)
+    if hit is not None:
+        return hit
+
+    hit = find_in_disk_libs(vid, prefer_root=None)
+    if hit is not None:
+        return hit
+
+    # 冷启动 / 未归档过的盘：扫一遍 preview_cache 里仍在线的索引
+    ensure_cached_indexes_scanned()
+    return find_in_disk_libs(vid, prefer_root=prefer)
 
 
 def _video_category(v: dict) -> str:

@@ -24,6 +24,12 @@ STATE: dict = {
     "export_msg": "",
     "export_path": "",
     "convert_jobs": {},  # job_id -> job dict
+    "bind_host": "127.0.0.1",
+    "bind_port": 8765,
+    "lan_share": False,
+    "disk_libs": {},  # root_key -> {root, cache_dir, by_id, updated} 跨盘历史/续播
+    "mounted_roots": [],  # 多根目录：统一片库挂载列表
+    "convert_parallel": 1,  # 转码并发上限
 }
 _scan_lock = threading.Lock()
 _convert_lock = threading.Lock()

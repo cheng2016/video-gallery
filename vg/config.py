@@ -2,38 +2,44 @@
 """Constants and paths for video gallery."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+
+def _bundle_dir() -> Path:
+    """只读资源目录（templates 等）。frozen 时为 PyInstaller _MEIPASS。"""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent.parent
+
+
+def _writable_root() -> Path:
+    """可写根目录（preview_cache）。frozen 时为 exe 同目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
 
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
     ".m4v", ".ts", ".m2ts", ".mpg", ".mpeg", ".3gp", ".rmvb", ".rm",
 }
 
-# 同目录下多段分片（如 HLS/切片）合并为一个播放入口
 SEGMENT_EXTS = {".ts", ".m2ts"}
 PLAYLIST_EXTS = {".m3u8"}
 SEGMENT_FOLDER_GENERIC = {
     "ts", "m2ts", "video", "videos", "stream", "streams",
     "hls", "media", "data", "video_ts", "bdmv",
 }
-# 大于该体积的 .ts/.m2ts 视为整片，即使同目录有多个也不并入分片合集
-# （典型 HLS 分片远小于此；整片录像常见数百 MB～数 GB）
 STANDALONE_TS_MIN_BYTES = 50 * 1024 * 1024
-# 普通视频文件过小视为无效（占位/损坏/假后缀），不进图库；m3u8 本身很小除外
 MIN_VIDEO_FILE_BYTES = 100 * 1024
-# TS 分片允许更小，仅丢掉近乎空文件的垃圾
 MIN_SEGMENT_FILE_BYTES = 1024
 
-# 浏览器较易播放的格式
 BROWSER_FRIENDLY_EXTS = {".mp4", ".webm", ".m4v", ".mov"}
-# 浏览器常失败，建议本地播放器
 BROWSER_HARD_EXTS = {".mkv", ".avi", ".wmv", ".flv", ".rmvb", ".rm", ".ts", ".m2ts", ".mpg", ".mpeg"}
-# 浏览器通常能播的音频编码（Chrome/Edge）
 BROWSER_FRIENDLY_AUDIO = {"aac", "mp3", "opus", "vorbis"}
-# 元数据探测版本：含音频编码；旧缓存需补探测
 PROBE_META_VER = 2
 
-# 影片类型：规范名 + 匹配关键词（路径/文件名包含即命中；无片源的类型前端不显示）
 GENRE_DEFS: list[tuple[str, tuple[str, ...]]] = [
     ("动作", ("动作", "action", "武打", "打斗", "搏击")),
     ("喜剧", ("喜剧", "搞笑", "欢喜", "comedy", "幽默")),
@@ -97,24 +103,24 @@ GENRE_DEFS: list[tuple[str, tuple[str, ...]]] = [
     ("晚会", ("晚会", "春晚", "庆典")),
 ]
 
-THUMB_DIR_NAME = ".video_gallery_cache"  # 旧版扫盘目录名，仅用于跳过/清理
-# 早期版本曾把缓存写到视频盘根目录，现已废弃
+THUMB_DIR_NAME = ".video_gallery_cache"
 LEGACY_DISK_CACHE_NAMES = (
     ".video_gallery_cache",
     "video_gallery_cache",
     ".vgdata",
 )
 INDEX_NAME = "index.json"
-APP_DIR = Path(__file__).resolve().parent.parent
-# 预览图/索引：固定在程序根目录 preview_cache\（不写视频盘）
-VGDATA_DIR = APP_DIR / "preview_cache"
+APP_DIR = _bundle_dir()
+WRITABLE_ROOT = _writable_root()
+VGDATA_DIR = WRITABLE_ROOT / "preview_cache"
 KEY_FILE = VGDATA_DIR / "vault.key"
 PREFS_FILE = VGDATA_DIR / "prefs.json"
-THUMB_EXT = ".vgt"  # 加密预览图，不能当普通图片打开
+THUMB_EXT = ".vgt"
 THUMB_WORKERS_MAX = 32
-THUMB_JPEG_CACHE_MAX = 256  # 内存中缓存已解密 JPEG，加速反复打开
+THUMB_JPEG_CACHE_MAX = 256
+# 转码/修声音同时跑的任务数（1=最稳，不打满 CPU；可在 prefs 覆盖）
+CONVERT_MAX_PARALLEL = 1
 
-# 扫描整盘时跳过（大小写不敏感）
 SKIP_DIR_NAMES = {
     "$recycle.bin", "system volume information", "recovery",
     "windows", "program files", "program files (x86)", "programdata",
@@ -128,4 +134,3 @@ SKIP_DIR_NAMES = {
 }
 
 STATIC_EXPORT_DIRNAME = "_video_gallery_static"
-

@@ -124,10 +124,37 @@ def list_drives_info() -> list[dict]:
     return drives
 
 
+def list_lan_ipv4() -> list[str]:
+    """本机局域网 IPv4（用于分享提示）。"""
+    ips: list[str] = []
+    try:
+        import socket
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    # UDP 探测默认出口网卡
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.insert(0, ip)
+        finally:
+            s.close()
+    except Exception:
+        pass
+    return ips
+
+
 def list_ready_drives() -> list[Path]:
     """列出本机可用硬盘盘符。"""
     return [Path(d["path"]) for d in list_drives_info()]
-
 
 
 def load_prefs() -> dict:

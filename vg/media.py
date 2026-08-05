@@ -123,15 +123,20 @@ def _ffprobe_path(ffmpeg: str) -> str:
     return ffprobe
 
 
-def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0) -> bool:
-    """截帧后写入加密预览图 out（.vgt）。有效缓存则跳过；损坏则重建。"""
+def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0, force: bool = False) -> bool:
+    """截帧后写入加密预览图 out（.vgt）。有效缓存则跳过；force 或损坏则重建。"""
     out.parent.mkdir(parents=True, exist_ok=True)
     _clear_path_attrs_windows(out)
-    if out.exists():
+    if out.exists() and not force:
         try:
             raw = decrypt_blob(out.read_bytes())
             if raw and raw[:2] == b"\xff\xd8" and len(raw) > 100:
                 return True
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
+    elif out.exists() and force:
+        try:
             out.unlink(missing_ok=True)
         except OSError:
             pass
@@ -141,7 +146,11 @@ def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0) -> bo
 
     tmp = out.with_suffix(".tmp.jpg")
     try:
-        for ss in (seek, 1.0, 0.0, 10.0):
+        seeks = [seek]
+        for fallback in (1.0, 0.0, 10.0, 30.0):
+            if abs(fallback - seek) > 0.05:
+                seeks.append(fallback)
+        for ss in seeks:
             try:
                 if tmp.exists():
                     tmp.unlink()
@@ -175,6 +184,19 @@ def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0) -> bo
             pass
 
 
+def save_thumbnail_jpeg(out: Path, jpeg_bytes: bytes) -> bool:
+    """把 JPEG 字节写入加密预览图。"""
+    if not jpeg_bytes or jpeg_bytes[:2] != b"\xff\xd8":
+        return False
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        _clear_path_attrs_windows(out)
+        out.write_bytes(encrypt_blob(jpeg_bytes))
+        return True
+    except OSError:
+        return False
+
+
 def _first_media_from_m3u8(playlist: Path) -> Path | None:
     try:
         text = playlist.read_text(encoding="utf-8", errors="ignore")
@@ -202,18 +224,20 @@ def _first_media_from_m3u8(playlist: Path) -> Path | None:
 
 def _video_file_for_thumb(item: dict) -> Path | None:
     """取可用于截帧的实体文件（TS 合集用第一段；m3u8 解析首个媒体）。"""
-    if not STATE.get("root"):
+    from vg.disk_libs import resolve_item_rel, root_for_item
+
+    if not root_for_item(item) and not STATE.get("root"):
         return None
     if item.get("kind") == "ts_set" and item.get("segments"):
-        return resolve_under_root(item["segments"][0])
+        return resolve_item_rel(item, item["segments"][0])
     if item.get("kind") == "m3u8" or (item.get("ext") or "").lower() == ".m3u8":
-        pl = resolve_under_root(item.get("rel") or "")
+        pl = resolve_item_rel(item, item.get("rel") or "")
         if pl:
             hit = _first_media_from_m3u8(pl)
             if hit:
                 return hit
         return None
-    return resolve_under_root(item.get("rel") or "")
+    return resolve_item_rel(item, item.get("rel") or "")
 
 
 def _apply_probe_to_item(item: dict, info: dict) -> None:
@@ -237,12 +261,14 @@ def _apply_probe_to_item(item: dict, info: dict) -> None:
 
 
 def _item_probe_path(item: dict) -> Path | None:
+    from vg.disk_libs import resolve_item_rel
+
     thumb_src = _video_file_for_thumb(item)
     if thumb_src and thumb_src.is_file():
         return thumb_src
     rel = item.get("rel") or ""
     if rel:
-        return resolve_video_path(rel)
+        return resolve_item_rel(item, rel)
     return None
 
 

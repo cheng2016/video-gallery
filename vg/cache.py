@@ -228,11 +228,15 @@ def save_index(cache: Path, root: Path, videos: list[dict]) -> None:
 
 def attach_thumb_meta(v: dict) -> dict:
     """给列表项补 has_thumb / thumb_v（只看文件是否存在，避免列表接口解密过慢）。"""
-    cache = STATE.get("cache_dir")
-    vid = v.get("id") or ""
+    from vg.disk_libs import cache_dir_for_item
+    from vg.roots import thumb_id_for_item
+
+    cache = cache_dir_for_item(v) or STATE.get("cache_dir")
+    vid = thumb_id_for_item(v) or (v.get("id") or "")
     if cache and vid and (thumb_cache_get(vid) is not None or thumb_file_ready(cache, vid)):
         v["has_thumb"] = True
         v["thumb_v"] = thumb_version(cache, vid) or 1
+        v["thumb_id"] = vid
         return v
     v["has_thumb"] = False
     v["thumb_v"] = 0

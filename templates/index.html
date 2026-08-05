@@ -38,12 +38,38 @@
     header {
       display: flex;
       align-items: center;
-      gap: 16px;
-      padding: 12px 20px;
+      flex-wrap: nowrap;
+      gap: 8px;
+      padding: 10px 14px;
       background: linear-gradient(180deg, #141920 0%, var(--bg) 100%);
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
       z-index: 20;
+      overflow-x: auto;
+      overflow-y: hidden;
+    }
+    header .btn {
+      padding: 7px 11px;
+      font-size: 0.82rem;
+      flex-shrink: 0;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px;
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.025);
+      flex-shrink: 0;
+    }
+    .header-actions .btn {
+      border-color: transparent;
+      background: transparent;
+    }
+    .header-actions .btn:hover {
+      background: var(--hover);
+      border-color: var(--border);
     }
     .brand {
       font-size: 1.15rem;
@@ -56,16 +82,16 @@
     }
     .brand span { color: var(--accent); }
     .search-wrap {
-      flex: 0 1 400px;
-      width: 400px;
-      max-width: 50vw;
+      flex: 1 1 160px;
+      width: auto;
+      min-width: 120px;
+      max-width: 280px;
       position: relative;
-      transition: width 0.22s ease, flex-basis 0.22s ease, max-width 0.22s ease;
+      transition: max-width 0.22s ease;
     }
     .search-wrap:focus-within {
-      flex-basis: 900px;
-      width: 900px;
-      max-width: min(980px, 78vw);
+      flex: 1 1 320px;
+      max-width: min(420px, 36vw);
     }
     .search-wrap input {
       width: 100%;
@@ -144,10 +170,95 @@
     .drive-hint {
       font-size: 0.75rem;
       color: var(--muted);
-      max-width: 220px;
+      max-width: 100px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    .lib-nav {
+      display: none;
+      flex-direction: column;
+      gap: 2px;
+      padding: 8px 10px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .lib-nav.show { display: flex; }
+    .lib-nav-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      padding: 0 6px 4px;
+    }
+    .lib-nav-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      text-align: left;
+      width: 100%;
+      font-size: 0.85rem;
+    }
+    .lib-nav-item:hover { background: var(--hover); }
+    .lib-nav-item.active {
+      background: rgba(56, 132, 255, 0.16);
+      border-color: var(--accent-dim);
+    }
+    .lib-nav-item .lib-nav-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .lib-nav-item .badge {
+      margin-left: auto;
+      opacity: 0.75;
+      font-size: 0.75rem;
+    }
+    .lib-nav-item .lib-nav-x {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0 2px;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .lib-nav-item .lib-nav-x:hover { color: var(--danger); }
+    .lib-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(56, 132, 255, 0.2);
+      color: #9ec1ff;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .card-meta .lib-badge { margin-right: 4px; }
+    .cover-panel {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 14px 12px;
+      border-top: 1px solid var(--border);
+      background: var(--bg2);
+      font-size: 0.85rem;
+    }
+    .cover-panel label { color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+    .cover-panel input[type="number"] {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 4px 6px;
     }
     .drive-count {
       display: inline-block;
@@ -273,6 +384,41 @@
       padding: 1px 7px;
       border-radius: 999px;
     }
+    .channel-item .ch-twisty {
+      width: 16px;
+      flex-shrink: 0;
+      text-align: center;
+      opacity: 0.7;
+      font-size: 0.7rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    .channel-item.channel-disk {
+      font-weight: 600;
+      margin-top: 4px;
+      background: rgba(255,255,255,0.03);
+    }
+    .channel-item.channel-disk.disk-scoped {
+      color: var(--accent);
+      background: rgba(0, 200, 212, 0.08);
+    }
+    .channel-item.channel-nested.muted {
+      opacity: 0.55;
+      pointer-events: none;
+    }
+    .channel-children {
+      padding: 2px 0 6px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .channel-item.channel-nested {
+      padding-left: 8px;
+      font-weight: 400;
+      font-size: 0.9rem;
+    }
+    .tree-item.tree-disk .label { font-weight: 600; }
+    .lib-nav { display: none !important; }
 
     .filters {
       padding: 12px 20px 4px;
@@ -497,6 +643,115 @@
       color: var(--muted);
       min-height: 28px;
     }
+    .continue-bar {
+      padding: 4px 20px 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .continue-bar .cont-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-right: 4px;
+    }
+    .continue-chip {
+      border: 1px solid var(--border);
+      background: var(--bg2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .continue-chip:hover { border-color: var(--accent); color: var(--accent); }
+    .continue-chip .pct {
+      opacity: 0.7;
+      font-size: 0.75em;
+      margin-left: 6px;
+    }
+    .media-row {
+      display: flex;
+      gap: 12px;
+      align-items: stretch;
+      margin: 10px 0;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg2);
+    }
+    .media-row-thumb {
+      width: 96px;
+      min-width: 96px;
+      height: 54px;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #0a0c10;
+      position: relative;
+    }
+    .media-row-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .media-row-thumb .ph {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.7rem;
+    }
+    .media-row-body {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .media-row-body strong {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .media-row-meta {
+      opacity: 0.75;
+      font-size: 0.82em;
+      line-height: 1.35;
+      word-break: break-all;
+    }
+    .media-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .media-row-check {
+      margin-top: 4px;
+      flex-shrink: 0;
+    }
+    button.media-row-btn {
+      display: flex;
+      gap: 12px;
+      width: 100%;
+      text-align: left;
+      align-items: stretch;
+      margin: 8px 0;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg2);
+      color: var(--text);
+      cursor: pointer;
+    }
+    button.media-row-btn:hover { border-color: var(--accent); }
     .grid-wrap {
       flex: 0 0 auto;
       overflow: visible;
@@ -749,10 +1004,11 @@
       body.sidebar-hidden .sidebar-show { display: none; }
       .grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
       .meta { display: none; }
-      header { flex-wrap: wrap; }
+      header { flex-wrap: nowrap; }
       .search-wrap,
       .search-wrap:focus-within {
-        order: 10; flex: 1 1 auto; max-width: none; width: 100%;
+        flex: 1 1 100px;
+        max-width: 160px;
       }
     }
   </style>
@@ -766,27 +1022,34 @@
       <select id="driveSelect" title="选择要扫描的硬盘">
         <option value="">检测中…</option>
       </select>
-      <button class="btn primary" id="scanDriveBtn" title="打开此盘：有缓存则秒开，无缓存才扫描">打开此盘</button>
+      <button class="btn primary" id="scanDriveBtn" title="扫描所选盘；新盘会自动加入现有片库">扫描所选盘</button>
       <span class="drive-hint" id="driveHint">正在检测盘符…</span>
     </div>
     <div class="search-wrap">
-      <input type="search" id="search" placeholder="搜索视频名称…" autocomplete="off" />
+      <input type="search" id="search" placeholder="搜索…" autocomplete="off" />
     </div>
     <div class="meta" id="countLabel">—</div>
-    <button class="btn" id="rescanBtn" title="增量扫描：复用未改动的条目，只处理新增/变更">重新扫描</button>
-    <button class="btn" id="exportStaticBtn" title="导出到当前盘/_video_gallery_static/，双击即可离线浏览，无需启动服务">导出静态站</button>
+    <div class="header-actions">
+      <button class="btn" id="rescanBtn" title="增量扫描：复用未改动的条目，只处理新增/变更">重新扫描</button>
+      <button class="btn" id="queueBtn" title="转换队列：转 MP4 / 修复声音">转换队列</button>
+      <button class="btn" id="cleanupBtn" title="查看并清理重复 / 损坏文件">文件清理</button>
+      <button class="btn" id="lanBtn" title="允许同一 WiFi 下其它设备访问">局域网共享</button>
+      <button class="btn" id="historyBtn" title="最近播放 / 继续看 / 已看完">播放历史</button>
+      <button class="btn" id="exportStaticBtn" title="导出到当前盘/_video_gallery_static/，双击即可离线浏览，无需启动服务">导出静态站</button>
+    </div>
   </header>
 
   <div class="main">
     <button class="sidebar-show" id="sidebarShowBtn" title="显示频道">频道 ›</button>
     <aside id="sidebar">
+      <div id="libNav" class="lib-nav" aria-label="片库目录"></div>
       <div class="aside-head">
-        <div class="aside-title">频道</div>
+        <div class="aside-title" id="channelAsideTitle">频道</div>
         <button class="aside-hide" id="sidebarHideBtn" title="隐藏侧栏">«</button>
       </div>
       <div class="channel-list" id="channelList"></div>
       <div class="aside-head" style="border-top:1px solid var(--border)">
-        <div class="aside-title">文件夹</div>
+        <div class="aside-title" id="folderAsideTitle">文件夹</div>
         <button class="aside-hide" id="treeToggleBtn" title="展开/收起文件夹" style="width:auto;padding:0 8px;font-size:0.75rem">展开</button>
       </div>
       <div class="tree-panel" id="treePanel">
@@ -798,6 +1061,10 @@
         <div class="filter-row">
           <div class="filter-label">排序</div>
           <div class="filter-tags" id="sortTags"></div>
+        </div>
+        <div class="filter-row">
+          <div class="filter-label">视图</div>
+          <div class="filter-tags" id="viewTags"></div>
         </div>
         <div class="filter-row" id="genreRow" style="display:none">
           <div class="filter-label">类型</div>
@@ -815,6 +1082,7 @@
         <button type="button" class="scope-filter-btn" id="scopeFilterBtn" title="回到筛选栏">筛选</button>
       </div>
       <div class="status-bar" id="status"></div>
+      <div id="continueBar" class="continue-bar" style="display:none"></div>
       <div class="grid-wrap">
         <div class="grid" id="grid"></div>
         <div class="empty" id="empty" style="display:none">没有找到视频</div>
@@ -840,9 +1108,73 @@
       <button type="button" class="btn" id="btnFixAudio" title="视频直拷，音频转为 AAC（解决浏览器无声）" style="display:none">修复声音</button>
       <button type="button" class="btn" id="btnToMp4" title="用 ffmpeg 转为同目录 MP4" style="display:none">转成 MP4</button>
       <button type="button" class="btn" id="btnCancelMp4" title="取消正在进行的转换" style="display:none">取消转换</button>
+      <button type="button" class="btn" id="btnCover" title="用当前画面或指定时间截帧换封面">换封面</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
       <button type="button" class="btn" id="btnReveal" title="在资源管理器中显示">打开位置</button>
     </div>
+    <div id="coverPanel" class="cover-panel" style="display:none">
+      <label>截帧时间（秒） <input type="number" id="coverSeek" min="0" step="0.5" value="3" style="width:5em" /></label>
+      <button type="button" class="btn primary" id="btnCoverSeek">按时间截帧</button>
+      <button type="button" class="btn" id="btnCoverNow">用当前画面</button>
+      <label class="btn" style="cursor:pointer;margin:0">上传图片
+        <input type="file" id="coverFile" accept="image/*" style="display:none" />
+      </label>
+    </div>
+  </div>
+
+  <div class="modal" id="seriesModal">
+    <div class="modal-bar">
+      <div class="title" id="seriesModalTitle">剧集</div>
+      <button class="modal-close" id="seriesModalClose" title="关闭">×</button>
+    </div>
+    <div class="modal-info" id="seriesModalList" style="flex:1;overflow:auto;max-height:70vh"></div>
+  </div>
+
+  <div class="modal" id="cleanupModal">
+    <div class="modal-bar">
+      <div class="title">片库清理</div>
+      <button class="modal-close" id="cleanupModalClose" title="关闭">×</button>
+    </div>
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
+      <button type="button" class="btn primary" id="cleanupTabDup">重复</button>
+      <button type="button" class="btn" id="cleanupTabBad">损坏</button>
+      <button type="button" class="btn" id="cleanupBatchFix" title="把勾选中需修声音的加入限速队列">批量修声音</button>
+      <button type="button" class="btn" id="cleanupBatchMp4" title="把勾选中的 m3u8/TS 合集加入限速队列">批量转MP4</button>
+    </div>
+    <div class="modal-info" id="cleanupBody" style="flex:1;overflow:auto;max-height:65vh"></div>
+  </div>
+
+  <div class="modal" id="historyModal">
+    <div class="modal-bar">
+      <div class="title">观看历史</div>
+      <button class="modal-close" id="historyModalClose" title="关闭">×</button>
+    </div>
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
+      <button type="button" class="btn primary" id="histTabResume">继续看</button>
+      <button type="button" class="btn" id="histTabRecent">最近</button>
+      <button type="button" class="btn" id="histTabDone">已看完</button>
+      <button type="button" class="btn" id="histClearBtn" title="清除本地观看记录">清空记录</button>
+    </div>
+    <div class="modal-info" id="historyBody" style="flex:1;overflow:auto;max-height:65vh"></div>
+  </div>
+
+  <div class="modal" id="queueModal">
+    <div class="modal-bar">
+      <div class="title">转换队列</div>
+      <button class="modal-close" id="queueModalClose" title="关闭">×</button>
+    </div>
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;gap:8px">
+      <label>并发
+        <select id="queueParallel" title="同时转码数，1 最稳">
+          <option value="1">1（推荐）</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+      <button type="button" class="btn" id="queueRefreshBtn">刷新</button>
+    </div>
+    <div class="modal-info" id="queueBody" style="flex:1;overflow:auto;max-height:65vh"></div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script>
@@ -858,6 +1190,7 @@
       ext: "",
       genre: "",
       sort: "mtime_desc",
+      view: "series",
       query: "",
       expanded: new Set([""]),
       root: "",
@@ -870,6 +1203,10 @@
       lastPlayId: "",
       loadedVideos: [],
       virtualEnabled: false,
+      lib: "",           // 当前浏览的挂载根；空=全部
+      mountedRoots: [],  // [{path,label,count,categories}]
+      multi: false,
+      libExpanded: null, // Set of expanded disk paths in channel list
     };
 
     const CHANNEL_ICO = {
@@ -913,6 +1250,7 @@
         if (!raw) return;
         const p = JSON.parse(raw);
         if (p.sort) state.sort = p.sort;
+        if (p.view === "flat" || p.view === "series") state.view = p.view;
         if (typeof p.category === "string") state.category = p.category;
         if (typeof p.folder === "string") state.folder = p.folder;
         if (typeof p.folderAll === "boolean") state.folderAll = p.folderAll;
@@ -930,6 +1268,7 @@
         const drive = ($("driveSelect") && $("driveSelect").value) || state._preferDrive || "";
         localStorage.setItem(PREFS_KEY, JSON.stringify({
           sort: state.sort,
+          view: state.view || "series",
           category: state.category,
           folder: state.folder,
           folderAll: !!state.folderAll,
@@ -953,29 +1292,159 @@
     function getPlayProgress(id) {
       const m = loadPlayProgressMap();
       const row = m[id];
-      if (!row || !(row.t > 5)) return 0;
+      if (!row) return 0;
+      if (row.done) return 0;
+      if (!(row.t > 5)) return 0;
       return Number(row.t) || 0;
     }
 
-    function savePlayProgress(id, t, duration) {
+    function getPlayRow(id) {
+      const m = loadPlayProgressMap();
+      return m[id] || null;
+    }
+
+    function savePlayProgress(id, t, duration, meta) {
       if (!id) return;
       try {
         const m = loadPlayProgressMap();
         const dur = Number(duration) || 0;
-        // 播到结尾附近视为看完，清进度
-        if (t < 5 || (dur > 0 && t >= dur - 3)) {
-          delete m[id];
-        } else {
-          m[id] = { t: Math.floor(t), updated: Date.now() };
+        const nearEnd = dur > 30 && t >= dur - 5;
+        if (t < 5 && !nearEnd) {
+          // 刚开始不算
+          if (!m[id]) return;
         }
-        // 最多保留 200 条，防膨胀
+        const prev = m[id] || {};
+        const root = (meta && meta.root) || prev.root || state.root || "";
+        const rel = (meta && meta.rel) || prev.rel || "";
+        const baseMeta = {
+          name: (meta && meta.name) || prev.name || "",
+          folder: (meta && meta.folder) || prev.folder || "",
+          root,
+          rel,
+        };
+        if (nearEnd) {
+          m[id] = {
+            t: Math.floor(dur || t),
+            duration: Math.floor(dur),
+            updated: Date.now(),
+            done: true,
+            ...baseMeta,
+          };
+        } else if (t >= 5) {
+          m[id] = {
+            t: Math.floor(t),
+            duration: Math.floor(dur),
+            updated: Date.now(),
+            done: false,
+            ...baseMeta,
+          };
+        }
         const keys = Object.keys(m);
-        if (keys.length > 200) {
+        if (keys.length > 300) {
           keys.sort((a, b) => (m[a].updated || 0) - (m[b].updated || 0));
-          for (let i = 0; i < keys.length - 200; i++) delete m[keys[i]];
+          for (let i = 0; i < keys.length - 300; i++) delete m[keys[i]];
         }
         localStorage.setItem(PLAY_PROG_KEY, JSON.stringify(m));
+        renderContinueBar();
       } catch (_) {}
+    }
+
+    function historyHints(rows) {
+      const hints = {};
+      (rows || []).forEach((r) => {
+        if (!r || !r.id) return;
+        if (r.root || r.rel) {
+          hints[r.id] = { root: r.root || "", rel: r.rel || "" };
+        }
+      });
+      return hints;
+    }
+
+    function infoUrl(id, root) {
+      let u = "/api/info/" + encodeURIComponent(id);
+      if (root) u += "?root=" + encodeURIComponent(root);
+      return u;
+    }
+
+    async function openFromHistory(id, rootHint) {
+      const row = getPlayRow(id) || {};
+      const root = rootHint || row.root || "";
+      const r = await fetch(infoUrl(id, root));
+      if (!r.ok) {
+        const offline = root && !(state.root && String(state.root).toLowerCase() === String(root).toLowerCase());
+        throw new Error(
+          offline
+            ? ("找不到该片。若来自其他磁盘，请确认主机已插入/打开：\n" + root)
+            : "无法打开（可能已移出片库，或对应磁盘未连接）"
+        );
+      }
+      const info = await r.json();
+      // 补全进度里的 root/rel，方便下次跨盘
+      try {
+        const m = loadPlayProgressMap();
+        if (m[id]) {
+          m[id].root = info.root || m[id].root || root || state.root || "";
+          m[id].rel = info.rel || m[id].rel || "";
+          if (info.name) m[id].name = info.name;
+          if (info.folder) m[id].folder = info.folder;
+          localStorage.setItem(PLAY_PROG_KEY, JSON.stringify(m));
+        }
+      } catch (_) {}
+      openPlayer(
+        id,
+        info.name,
+        `${info.size_h || ""} · ${info.folder || info.rel || ""}`,
+        info.ext,
+        info.kind || "",
+        info.seg_count || 0,
+        {
+          path: info.path || "",
+          folder: info.folder || "",
+          root: info.root || root || state.root || "",
+          rel: info.rel || "",
+          browser_hard: !!info.browser_hard,
+          browser_ok: !!info.browser_ok,
+          audio_hard: !!info.audio_hard,
+          audio_codec: info.audio_codec || "",
+        }
+      );
+    }
+
+    function historyEntries(kind) {
+      const m = loadPlayProgressMap();
+      let rows = Object.keys(m).map((id) => ({ id, ...(m[id] || {}) }));
+      if (kind === "resume") {
+        rows = rows.filter((r) => !r.done && (r.t || 0) > 5);
+      } else if (kind === "done") {
+        rows = rows.filter((r) => r.done);
+      }
+      rows.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+      return rows;
+    }
+
+    function renderContinueBar() {
+      const bar = $("continueBar");
+      if (!bar) return;
+      const rows = historyEntries("resume").slice(0, 8);
+      if (!rows.length) {
+        bar.style.display = "none";
+        bar.innerHTML = "";
+        return;
+      }
+      bar.style.display = "flex";
+      // 异步补缩略图信息
+      bar.innerHTML = `<span class="cont-label">继续看</span>` + rows.map((r) => {
+        const dur = Number(r.duration) || 0;
+        const pct = dur > 0 ? Math.min(99, Math.round((r.t / dur) * 100)) : 0;
+        const label = escapeHtml(r.name || r.id);
+        return `<button type="button" class="continue-chip" data-play-id="${escapeAttr(r.id)}" title="${escapeAttr(r.folder || r.root || "")}" style="display:inline-flex;align-items:center;gap:8px;max-width:260px">
+          <span class="media-row-thumb" style="width:48px;min-width:48px;height:28px;border-radius:4px">
+            <img src="/thumb/${escapeAttr(r.id)}?v=1${r.root ? `&root=${encodeURIComponent(r.root)}` : ""}" alt="" loading="lazy"
+              onerror="this.style.opacity=.15" />
+          </span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}${pct ? `<span class="pct">${pct}%</span>` : ""}</span>
+        </button>`;
+      }).join("");
     }
 
     loadUiPrefs();
@@ -1002,7 +1471,9 @@
     }
 
     async function fetchTree() {
-      const r = await fetch("/api/tree");
+      const params = new URLSearchParams();
+      if (state.lib) params.set("lib", state.lib);
+      const r = await fetch("/api/tree" + (params.toString() ? ("?" + params) : ""));
       return r.json();
     }
 
@@ -1014,7 +1485,9 @@
       if (state.ext) params.set("ext", state.ext);
       if (state.genre) params.set("genre", state.genre);
       if (state.sort) params.set("sort", state.sort);
+      if (state.view) params.set("view", state.view);
       if (state.query) params.set("q", state.query);
+      if (state.lib) params.set("lib", state.lib);
       params.set("offset", String(offset == null ? state.offset : offset));
       params.set("limit", String(state.pageSize));
       const r = await fetch("/api/videos?" + params);
@@ -1173,8 +1646,7 @@
       $("scanDriveBtn").disabled = true;
       $("rescanBtn").disabled = true;
       $("driveSelect").disabled = true;
-      $("status").textContent = `正在打开 ${path} …`;
-      // 换盘时清筛选；同盘刷新保留
+      $("status").textContent = `正在扫描 ${path}，新盘会自动加入片库…`;
       const sameDrive = state.root && path && (
         String(state.root).replace(/[\\/]+$/, "").toLowerCase() ===
         String(path).replace(/[\\/]+$/, "").toLowerCase()
@@ -1200,6 +1672,8 @@
           $("driveSelect").disabled = false;
           return;
         }
+        if (data.msg) $("status").textContent = data.msg;
+        await refresh();
         startPoll();
       } catch (e) {
         alert("请求失败: " + e);
@@ -1209,23 +1683,150 @@
       }
     }
 
+    function sameLibPath(a, b) {
+      return String(a || "").replace(/[\\/]+$/, "").toLowerCase() ===
+        String(b || "").replace(/[\\/]+$/, "").toLowerCase();
+    }
+
+    function normalizeMountRoots(roots) {
+      return (roots || []).map((r) => {
+        if (typeof r === "string") {
+          return { path: r, label: r, count: 0, categories: [] };
+        }
+        return {
+          path: r.path || "",
+          label: r.label || r.path || "",
+          count: r.count || 0,
+          categories: Array.isArray(r.categories) ? r.categories : [],
+          current: !!r.current,
+        };
+      }).filter((r) => r.path);
+    }
+
+    async function renderMountChips(rootsFromApi) {
+      // 多根切换已并入频道列表，这里只同步数据
+      let roots = rootsFromApi;
+      if (!roots) {
+        try {
+          const data = await fetch("/api/roots").then((r) => r.json());
+          roots = data.roots || [];
+        } catch (_) {
+          roots = state.mountedRoots || [];
+        }
+      }
+      state.mountedRoots = normalizeMountRoots(roots);
+      state.multi = state.mountedRoots.length > 1;
+      if (state.lib && !state.mountedRoots.some((r) => sameLibPath(r.path, state.lib))) {
+        state.lib = "";
+      }
+      if (!state.multi) state.lib = "";
+      if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
+      // 多盘时默认全部展开，方便看到「盘 → 频道」
+      if (state.multi) {
+        state.mountedRoots.forEach((r) => state.libExpanded.add(r.path));
+      }
+      const box = $("libNav");
+      if (box) {
+        box.classList.remove("show");
+        box.innerHTML = "";
+      }
+      updateAsideTitles();
+    }
+
+    function selectLib(libPath) {
+      const next = libPath || "";
+      if (state.lib === next) return;
+      state.lib = next;
+      state.folder = "";
+      state.folderAll = false;
+      state.category = "";
+      if (next) {
+        if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
+        state.libExpanded.add(next);
+      }
+      state.expanded = new Set([""]);
+      saveUiPrefs();
+      refresh();
+    }
+
     function renderChannels(categories, total) {
       state.categories = categories || [];
-      const allActive = !state.category;
-      let html = `<div class="channel-item ${allActive ? "active" : ""}" data-cat="">
-        <span class="ico">${CHANNEL_ICO.__all__}</span>
-        <span class="label">全部</span>
-        <span class="badge">${total || 0}</span>
-      </div>`;
-      for (const c of state.categories) {
-        const id = c.id === "" ? "__root__" : c.id;
-        const isActive = state.category === id;
-        const ico = CHANNEL_ICO[c.name] || CHANNEL_ICO[c.id] || "▸";
-        html += `<div class="channel-item ${isActive ? "active" : ""}" data-cat="${escapeAttr(id)}">
-          <span class="ico">${ico}</span>
-          <span class="label">${escapeHtml(c.name)}</span>
-          <span class="badge">${c.count}</span>
+      if (!state.multi) {
+        const allActive = !state.category;
+        let html = `<div class="channel-item ${allActive ? "active" : ""}" data-cat="" data-lib="">
+          <span class="ico">${CHANNEL_ICO.__all__}</span>
+          <span class="label">全部</span>
+          <span class="badge">${total || 0}</span>
         </div>`;
+        for (const c of state.categories) {
+          const id = c.id === "" ? "__root__" : c.id;
+          const isActive = state.category === id;
+          const ico = CHANNEL_ICO[c.name] || CHANNEL_ICO[c.id] || "▸";
+          html += `<div class="channel-item ${isActive ? "active" : ""}" data-cat="${escapeAttr(id)}" data-lib="">
+            <span class="ico">${ico}</span>
+            <span class="label">${escapeHtml(c.name)}</span>
+            <span class="badge">${c.count}</span>
+          </div>`;
+        }
+        $("channelList").innerHTML = html;
+        return;
+      }
+
+      // 多根：全部视频 → 各盘分组 → 该盘下的全部视频/频道
+      if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
+      if (state.lib) {
+        const hit = (state.mountedRoots || []).find((r) => sameLibPath(r.path, state.lib));
+        if (hit) state.libExpanded.add(hit.path);
+      }
+      if (state.libExpanded.size === 0) {
+        (state.mountedRoots || []).forEach((r) => state.libExpanded.add(r.path));
+      }
+      const roots = state.mountedRoots || [];
+      const grand = roots.reduce((s, r) => s + (r.count || 0), 0);
+      const allDisksActive = !state.lib && !state.category;
+      let html = `<div class="channel-item ${allDisksActive ? "active" : ""}" data-lib="" data-cat="">
+        <span class="ico">${CHANNEL_ICO.__all__}</span>
+        <span class="label">全部视频</span>
+        <span class="badge">${grand || total || 0}</span>
+      </div>`;
+
+      for (const root of roots) {
+        const expanded = [...state.libExpanded].some((p) => sameLibPath(p, root.path));
+        const diskOn = sameLibPath(state.lib, root.path);
+        html += `<div class="channel-item channel-disk ${diskOn ? "disk-scoped" : ""}" data-disk-header="${escapeAttr(root.path)}" title="${escapeAttr(root.path)}">
+          <span class="ch-twisty" data-expand-lib="${escapeAttr(root.path)}">${expanded ? "▼" : "▶"}</span>
+          <span class="ico">▣</span>
+          <span class="label">${escapeHtml(root.label || root.path)}</span>
+          <span class="badge">${root.count || 0}</span>
+          <span class="ch-twisty lib-nav-x" data-unmount="${escapeAttr(root.path)}" title="移出片库">×</span>
+        </div>`;
+        if (!expanded) continue;
+        html += `<div class="channel-children">`;
+        const cats = root.categories || [];
+        const diskAllActive = diskOn && !state.category;
+        html += `<div class="channel-item channel-nested ${diskAllActive ? "active" : ""}" data-lib="${escapeAttr(root.path)}" data-cat="">
+          <span class="ico">${CHANNEL_ICO.__all__}</span>
+          <span class="label">该盘全部视频</span>
+          <span class="badge">${root.count || 0}</span>
+        </div>`;
+        for (const c of cats) {
+          const id = c.id === "" ? "__root__" : c.id;
+          const isActive = diskOn && state.category === id;
+          const ico = CHANNEL_ICO[c.name] || CHANNEL_ICO[c.id] || "▸";
+          html += `<div class="channel-item channel-nested ${isActive ? "active" : ""}" data-lib="${escapeAttr(root.path)}" data-cat="${escapeAttr(id)}">
+            <span class="ico">${ico}</span>
+            <span class="label">${escapeHtml(c.name)}</span>
+            <span class="badge">${c.count}</span>
+          </div>`;
+        }
+        if (!cats.length && !(root.count > 0)) {
+          html += `<div class="channel-item channel-nested muted">
+            <span class="ico">·</span>
+            <span class="label">等待扫描结果…</span>
+            <span class="badge">0</span>
+          </div>`;
+        }
+        html += `</div>`;
       }
       $("channelList").innerHTML = html;
     }
@@ -1234,6 +1835,15 @@
       $("sortTags").innerHTML = SORTS.map((s) =>
         `<button type="button" class="tag ${state.sort === s.id ? "active" : ""}" data-sort="${s.id}">${s.label}</button>`
       ).join("");
+      const vt = $("viewTags");
+      if (vt) {
+        vt.innerHTML = [
+          { id: "series", label: "合集" },
+          { id: "flat", label: "单集" },
+        ].map((s) =>
+          `<button type="button" class="tag ${state.view === s.id ? "active" : ""}" data-view="${s.id}">${s.label}</button>`
+        ).join("");
+      }
     }
 
     function renderExtTags(types) {
@@ -1352,20 +1962,43 @@
       refresh();
     }
 
+    function treeNodeKey(node) {
+      const lib = node && node.lib ? String(node.lib) : "";
+      const path = (node && node.path) || "";
+      return lib ? `${lib}::${path}` : path;
+    }
+
     function renderTree(node, depth = 0) {
+      if (!node) return "";
+      // 多根：盘节点（有 lib、无 path）或其子文件夹
       const hasChildren = node.children && node.children.length > 0;
       const path = node.path || "";
-      const isActive = state.folder === path;
-      const expanded = state.expanded.has(path) || depth === 0;
+      const lib = node.lib || "";
+      const key = treeNodeKey(node);
+      // 激活：点到该盘（无文件夹）或点到该盘下某文件夹
+      let isActive = false;
+      if (lib) {
+        if (!path) isActive = sameLibPath(state.lib, lib) && !state.folder;
+        else isActive = sameLibPath(state.lib, lib) && state.folder === path;
+      } else {
+        isActive = state.folder === path;
+      }
+      const expanded = state.expanded.has(key) || state.expanded.has(path) || depth === 0
+        || (lib && sameLibPath(state.lib, lib) && !path);
 
-      let html = `<div class="tree-item ${isActive ? "active" : ""}" data-path="${escapeAttr(path)}" style="padding-left:${10 + depth * 4}px">
-        <span class="twisty" data-toggle="${escapeAttr(path)}">${hasChildren ? (expanded ? "▼" : "▶") : "·"}</span>
+      let html = `<div class="tree-item ${isActive ? "active" : ""} ${lib && !path ? "tree-disk" : ""}"
+        data-path="${escapeAttr(path)}"
+        data-lib="${escapeAttr(lib)}"
+        data-tree-key="${escapeAttr(key)}"
+        style="padding-left:${10 + depth * 12}px"
+        title="${escapeAttr(lib || path || "")}">
+        <span class="twisty" data-toggle-key="${escapeAttr(key)}">${hasChildren ? (expanded ? "▼" : "▶") : "·"}</span>
         <span class="label">${escapeHtml(node.name)}</span>
-        <span class="badge">${node.count}</span>
+        <span class="badge">${node.count || 0}</span>
       </div>`;
 
-      if (hasChildren) {
-        html += `<div class="tree-children ${expanded ? "" : "collapsed"}" data-children="${escapeAttr(path)}">`;
+      if (hasChildren && expanded) {
+        html += `<div class="tree-children">`;
         for (const c of node.children) html += renderTree(c, depth + 1);
         html += `</div>`;
       }
@@ -1374,9 +2007,18 @@
 
     function renderCrumb() {
       let html = "";
-      if (state.category === "__root__") html = `<span>未分类</span>`;
-      else if (state.category) html = `<span>${escapeHtml(state.category)}</span>`;
-      else html = `<span>全部</span>`;
+      if (state.multi) {
+        if (state.lib) {
+          const lab = ((state.mountedRoots || []).find((r) => sameLibPath(r.path, state.lib)) || {}).label || state.lib;
+          html = `<span class="lib-badge">${escapeHtml(lab)}</span>`;
+        } else {
+          html = `<span>全部目录</span>`;
+        }
+        html += `<span class="sep">·</span>`;
+      }
+      if (state.category === "__root__") html += `<span>未分类</span>`;
+      else if (state.category) html += `<span>${escapeHtml(state.category)}</span>`;
+      else html += `<span>全部</span>`;
       if (state.folder) {
         const folder = String(state.folder).replace(/\\/g, "/");
         const rest = state.category && folder.startsWith(state.category + "/")
@@ -1421,29 +2063,36 @@
 
     function cardHtml(v) {
       const year = v.mtime_h ? String(v.mtime_h).slice(0, 4) : "";
+      const isSeries = v.kind === "series";
+      const thumbId = isSeries ? (v.thumb_id || v.cover_id || v.id) : v.id;
       const tv = v.thumb_v || (v.has_thumb ? 1 : 0);
       const dup = !!v.dup;
       const dupN = v.dup_n || 0;
       const dupReason = v.dup_reason || "重复";
       const bad = !!v.bad;
       const badReason = v.bad_reason || "无法读取";
-      const watched = getPlayProgress(v.id) > 5;
+      const watched = !isSeries && getPlayProgress(v.id) > 5;
+      const epMark = isSeries
+        ? `<span class="dur">${v.ep_count || 0} 集</span>`
+        : (v.seg_count ? `<span class="dur">${v.seg_count} 段</span>` : (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8" ? `<span class="dur">HLS</span>` : (v.duration_h ? `<span class="dur">${escapeHtml(v.duration_h)}</span>` : `<span class="dur">${escapeHtml((v.ext || "").toUpperCase())}</span>`)));
       return `
-        <div class="card" data-id="${v.id}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}">
+        <div class="card" data-id="${v.id}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}">
           <div class="thumb">
-            <img src="/thumb/${v.id}?v=${tv}" alt="" loading="lazy" decoding="async"
-              onerror="if(!this.dataset.retried){this.dataset.retried=1;this.src='/thumb/${v.id}?v='+Date.now()}" />
+            <img src="/thumb/${thumbId}?v=${tv}" alt="" loading="lazy" decoding="async"
+              onerror="if(!this.dataset.retried){this.dataset.retried=1;this.src='/thumb/${thumbId}?v='+Date.now()}" />
             <div class="play"><div class="play-icon"></div></div>
             ${dup ? `<span class="dup-badge" title="${escapeAttr(dupReason)}">重复×${dupN}</span>` : ""}
             ${bad ? `<span class="bad-badge" title="${escapeAttr(badReason)}">损坏</span>` : ""}
             ${year ? `<span class="dur" style="left:8px;right:auto">${escapeHtml(year)}</span>` : ""}
-            ${v.seg_count ? `<span class="dur">${v.seg_count} 段</span>` : (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8" ? `<span class="dur">HLS</span>` : (v.duration_h ? `<span class="dur">${escapeHtml(v.duration_h)}</span>` : `<span class="dur">${escapeHtml((v.ext || "").toUpperCase())}</span>`))}
+            ${epMark}
           </div>
           <div class="card-body">
-            <div class="card-title" title="${escapeAttr(v.name)}">${escapeHtml(v.name)}${watched ? " · 续播" : ""}</div>
+            <div class="card-title" title="${escapeAttr(v.name)}">${escapeHtml(v.name)}${watched ? " · 续播" : ""}${isSeries ? " · 剧集" : ""}</div>
             <div class="card-meta">
-              <span>${escapeHtml(v.size_h)}</span>
+              ${(!state.lib && v.lib_label) ? `<span class="lib-badge" title="${escapeAttr(v.root || "")}">${escapeHtml(v.lib_label)}</span>` : ""}
+              <span>${escapeHtml(v.size_h || "")}</span>
               <span>${escapeHtml(v.folder || "根目录")}</span>
+              ${isSeries ? `<span>${v.ep_count || 0} 集</span>` : ""}
               ${v.seg_count ? `<span>TS 合集</span>` : ""}
               ${(v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8") ? `<span>m3u8</span>` : ""}
               ${dup ? `<span title="${escapeAttr(dupReason)}">疑似重复</span>` : ""}
@@ -1585,9 +2234,14 @@
       const treeData = await fetchTree();
       lastScanning = !!treeData.scanning;
       state.tree = treeData.tree;
+      state.root = treeData.root || state.root;
+      await renderMountChips(treeData.roots || []);
+      if (treeData.multi || (treeData.roots || []).length > 1) state.multi = true;
+      updateAsideTitles();
       renderChannels(treeData.categories || [], treeData.count || 0);
       renderSortTags();
       renderExtTags(treeData.types || []);
+      if ($("tree")) $("tree").innerHTML = treeData.tree ? renderTree(treeData.tree) : "";
       if (state.folder && state.folder === state.category) {
         state.folder = "";
         state.folderAll = false;
@@ -1640,9 +2294,12 @@
       renderSubTags(data.subfolder_levels || []);
       renderCrumb();
       renderGrid(data.videos || [], lastScanning, false);
+      const libTip = state.lib
+        ? ((state.mountedRoots.find((r) => sameLibPath(r.path, state.lib)) || {}).label || state.lib)
+        : (state.multi ? "全部目录" : "");
       $("countLabel").textContent = lastScanning
         ? `扫描中… ${data.count} 个`
-        : `${data.count} 个视频`;
+        : (libTip ? `${libTip} · ${data.count} 个` : `${data.count} 个视频`);
     }
 
     async function loadMore() {
@@ -1670,34 +2327,64 @@
       const data = await fetchTree();
       state.tree = data.tree;
       state.root = data.root || state.root;
+      await renderMountChips(data.roots || []);
+      if (data.multi || (data.roots || []).length > 1) state.multi = true;
+      updateAsideTitles();
       renderChannels(data.categories || [], data.count || 0);
       renderSortTags();
       renderExtTags(data.types || []);
       if ($("tree")) $("tree").innerHTML = data.tree ? renderTree(data.tree) : "";
       let status = "";
-      if (data.root) status += `当前: ${data.root}`;
+      if (state.multi) {
+        const names = (data.roots || []).map((r) => r.label).join(" + ");
+        status += `片库: ${names || "多目录"}`;
+        if (state.lib) {
+          const cur = (data.roots || []).find((r) => sameLibPath(r.path, state.lib));
+          status += ` · 正在看 ${cur ? cur.label : state.lib}`;
+        } else {
+          status += " · 正在看全部";
+        }
+      } else if (data.root) {
+        status += `当前: ${data.root}`;
+      }
       if (data.scan_progress) status += (status ? " · " : "") + data.scan_progress;
       if (data.thumb_progress) status += (status ? " · " : "") + data.thumb_progress;
       if (data.meta_progress) status += (status ? " · " : "") + data.meta_progress;
       if (data.exporting && data.export_msg) status += (status ? " · " : "") + data.export_msg;
       else if (data.export_ok === true && data.export_path) status += (status ? " · " : "") + "静态站已导出";
-      if (!data.has_ffmpeg) status += (status ? " · " : "") + "无 ffmpeg，预览图不可用";
+      if (!data.has_ffmpeg) status += (status ? " · " : "") + "无 ffmpeg（预览/转码不可用，可运行 winget install ffmpeg）";
+      if (data.lan_share && data.lan_urls && data.lan_urls.length) {
+        const share = data.lan_urls.filter((u) => !u.includes("127.0.0.1")).slice(0, 2).join(" · ");
+        status += (status ? " · " : "") + "局域网: " + (share || data.lan_urls[0]);
+        if ($("lanBtn")) $("lanBtn").classList.add("primary");
+      } else if ($("lanBtn")) {
+        $("lanBtn").classList.remove("primary");
+      }
       state.hasFfmpeg = !!data.has_ffmpeg;
+      state.lanShare = !!data.lan_share;
       $("status").textContent = status;
       $("rescanBtn").disabled = data.scanning;
       $("scanDriveBtn").disabled = data.scanning;
       $("driveSelect").disabled = data.scanning;
       if ($("exportStaticBtn")) {
         $("exportStaticBtn").disabled = !!(data.scanning || data.exporting || !data.root || !(data.count > 0));
-        $("exportStaticBtn").textContent = data.exporting ? "导出中…" : "导出静态站";
+        $("exportStaticBtn").textContent = data.exporting ? "正在导出…" : "导出静态站";
       }
       return data;
+    }
+
+    function updateAsideTitles() {
+      const ch = $("channelAsideTitle");
+      const fo = $("folderAsideTitle");
+      if (ch) ch.textContent = state.multi ? "频道（按盘）" : "频道";
+      if (fo) fo.textContent = state.multi ? "文件夹（按盘）" : "文件夹";
     }
 
     const HARD_EXTS = new Set([".mkv", ".avi", ".wmv", ".flv", ".rmvb", ".rm", ".ts", ".m2ts", ".mpg", ".mpeg"]);
     let hlsPlayer = null;
     let segPlay = null;
     let currentPlayId = "";
+    let currentPlayMeta = { name: "", folder: "" };
     let currentPlayKind = "";
     let convertPollTimer = 0;
     let currentConvertJobId = "";
@@ -1934,7 +2621,7 @@
       }
       playProgressTimer = setInterval(() => {
         if (!currentPlayId || !video || video.paused) return;
-        savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0);
+        savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0, currentPlayMeta);
       }, 4000);
     }
 
@@ -1970,9 +2657,16 @@
       stopConvertPoll();
       currentConvertJobId = "";
       currentPlayId = id;
+      currentPlayMeta = {
+        name: name || "",
+        folder: (extra && extra.folder) || "",
+        root: (extra && extra.root) || state.root || "",
+        rel: (extra && extra.rel) || "",
+      };
       currentPlayKind = kind || "";
       state.lastPlayId = id;
       saveUiPrefs();
+      if ($("coverPanel")) $("coverPanel").style.display = "none";
       $("modalTitle").textContent = name;
       const hard = !!(extra && extra.browser_hard);
       const audioHard = !!(extra && extra.audio_hard);
@@ -2050,7 +2744,7 @@
     function closePlayer() {
       const video = $("player");
       if (currentPlayId && video) {
-        savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0);
+        savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0, currentPlayMeta);
       }
       destroyHls();
       stopConvertPoll();
@@ -2059,8 +2753,10 @@
         playProgressTimer = 0;
       }
       currentPlayId = "";
+      currentPlayMeta = { name: "", folder: "" };
       currentPlayKind = "";
       currentConvertJobId = "";
+      if ($("coverPanel")) $("coverPanel").style.display = "none";
       const btn = $("btnToMp4");
       if (btn) {
         btn.disabled = false;
@@ -2091,11 +2787,49 @@
 
     // events
     $("channelList").addEventListener("click", (e) => {
-      const item = e.target.closest(".channel-item[data-cat]");
-      if (!item) return;
+      const unmount = e.target.closest("[data-unmount]");
+      if (unmount) {
+        e.preventDefault();
+        e.stopPropagation();
+        const path = unmount.getAttribute("data-unmount");
+        if (!confirm("从片库移出：\n" + path + "\n（不删除磁盘文件）")) return;
+        fetch("/api/roots", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "remove", path }),
+        }).then((r) => r.json()).then((data) => {
+          alert(data.msg || (data.ok ? "已移除" : "失败"));
+          if (state.lib === path) state.lib = "";
+          return refresh();
+        }).catch((err) => alert("失败: " + err));
+        return;
+      }
+      const expand = e.target.closest("[data-expand-lib]");
+      const diskHeader = e.target.closest("[data-disk-header]");
+      if (expand || diskHeader) {
+        e.preventDefault();
+        e.stopPropagation();
+        const path = expand
+          ? expand.getAttribute("data-expand-lib")
+          : diskHeader.getAttribute("data-disk-header");
+        if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
+        const existing = [...state.libExpanded].find((p) => sameLibPath(p, path));
+        if (existing) state.libExpanded.delete(existing);
+        else state.libExpanded.add(path);
+        renderChannels(state.categories || [], state.totalCount || 0);
+        return;
+      }
+      const item = e.target.closest(".channel-item");
+      if (!item || !item.hasAttribute("data-cat")) return;
+      const nextLib = item.getAttribute("data-lib");
+      state.lib = nextLib == null ? (state.lib || "") : (nextLib || "");
       state.category = item.dataset.cat || "";
       state.folder = "";
       state.folderAll = false;
+      if (state.lib) {
+        if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
+        state.libExpanded.add(state.lib);
+      }
       saveUiPrefs();
       refresh();
       if (isMobile()) $("sidebar").classList.remove("open");
@@ -2105,6 +2839,14 @@
       const btn = e.target.closest("[data-sort]");
       if (!btn) return;
       state.sort = btn.dataset.sort || "mtime_desc";
+      saveUiPrefs();
+      refresh();
+    });
+
+    $("viewTags").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-view]");
+      if (!btn) return;
+      state.view = btn.dataset.view || "series";
       saveUiPrefs();
       refresh();
     });
@@ -2167,33 +2909,41 @@
     });
 
     $("tree").addEventListener("click", (e) => {
-      const toggle = e.target.closest("[data-toggle]");
+      const toggle = e.target.closest("[data-toggle-key]") || e.target.closest("[data-toggle]");
       if (toggle && e.target.classList.contains("twisty")) {
-        const path = toggle.dataset.toggle;
-        if (state.expanded.has(path)) state.expanded.delete(path);
-        else state.expanded.add(path);
+        const key = toggle.getAttribute("data-toggle-key") || toggle.dataset.toggle || "";
+        if (state.expanded.has(key)) state.expanded.delete(key);
+        else state.expanded.add(key);
         $("tree").innerHTML = renderTree(state.tree);
         return;
       }
       const item = e.target.closest(".tree-item");
       if (!item) return;
-      state.folder = item.dataset.path || "";
-      state.folderAll = !!state.folder;
-      // 同步左侧频道
-      if (state.folder) {
-        const top = state.folder.split("/")[0];
-        state.category = top;
+      const lib = item.getAttribute("data-lib") || "";
+      const path = item.getAttribute("data-path") || "";
+      if (lib) {
+        state.lib = lib;
+        if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
+        state.libExpanded.add(lib);
+      }
+      state.folder = path;
+      state.folderAll = !!path;
+      if (path) {
+        const top = path.split("/")[0];
+        state.category = top || "";
       } else {
         state.category = "";
       }
-      state.expanded.add(state.folder);
-      const parts = state.folder.split("/").filter(Boolean);
-      let acc = "";
-      for (const p of parts) {
-        acc = acc ? acc + "/" + p : p;
-        state.expanded.add(acc);
+      const key = item.getAttribute("data-tree-key") || (lib ? `${lib}::${path}` : path);
+      state.expanded.add(key);
+      if (path) {
+        const parts = path.split("/").filter(Boolean);
+        let acc = "";
+        for (const p of parts) {
+          acc = acc ? acc + "/" + p : p;
+          state.expanded.add(lib ? `${lib}::${acc}` : acc);
+        }
       }
-      $("tree").innerHTML = renderTree(state.tree);
       saveUiPrefs();
       refresh();
       if (isMobile()) $("sidebar").classList.remove("open");
@@ -2205,6 +2955,11 @@
       const card = e.target.closest(".card");
       if (!card) return;
       const id = card.dataset.id;
+      const kind = card.dataset.kind || "";
+      if (kind === "series") {
+        openSeries(id);
+        return;
+      }
       try {
         const info = await fetch("/api/info/" + id).then((r) => {
           if (!r.ok) throw new Error("not found");
@@ -2219,6 +2974,9 @@
           info.seg_count || 0,
           {
             path: info.path || "",
+            folder: info.folder || "",
+            root: info.root || state.root || "",
+            rel: info.rel || "",
             browser_hard: !!info.browser_hard,
             browser_ok: !!info.browser_ok,
             audio_hard: !!info.audio_hard,
@@ -2229,6 +2987,390 @@
         alert("无法打开该视频（文件可能已移动或删除）");
       }
     });
+
+    async function openSeries(sid) {
+      const box = $("seriesModalList");
+      const title = $("seriesModalTitle");
+      box.innerHTML = "加载中…";
+      $("seriesModal").classList.add("open");
+      try {
+        const data = await fetch("/api/series/" + encodeURIComponent(sid)).then((r) => r.json());
+        if (!data.ok) {
+          box.textContent = data.msg || "加载失败";
+          return;
+        }
+        title.textContent = data.title || "剧集";
+        box.innerHTML = (data.episodes || []).map((ep) => {
+          const label = (ep.season != null && ep.episode != null)
+            ? `S${String(ep.season).padStart(2, "0")}E${String(ep.episode).padStart(2, "0")} · ${escapeHtml(ep.name || "")}`
+            : escapeHtml(ep.name || "");
+          return `<button type="button" class="btn" style="display:block;width:100%;text-align:left;margin:6px 0" data-epid="${ep.id}">${label}<br><span style="opacity:.7;font-size:.8em">${escapeHtml(ep.size_h || "")} · ${escapeHtml(ep.folder || "")}</span></button>`;
+        }).join("") || "暂无分集";
+      } catch (err) {
+        box.textContent = "加载失败: " + err;
+      }
+    }
+
+    $("seriesModalClose").addEventListener("click", () => $("seriesModal").classList.remove("open"));
+    $("seriesModal").addEventListener("click", (e) => {
+      if (e.target === $("seriesModal")) $("seriesModal").classList.remove("open");
+    });
+    $("seriesModalList").addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-epid]");
+      if (!btn) return;
+      const id = btn.dataset.epid;
+      $("seriesModal").classList.remove("open");
+      try {
+        const info = await fetch("/api/info/" + id).then((r) => r.json());
+        openPlayer(
+          id,
+          info.name,
+          `${info.size_h || ""} · ${info.folder || info.rel || ""}`,
+          info.ext,
+          info.kind || "",
+          info.seg_count || 0,
+          {
+            path: info.path || "",
+            folder: info.folder || "",
+            root: info.root || state.root || "",
+            rel: info.rel || "",
+            browser_hard: !!info.browser_hard,
+            browser_ok: !!info.browser_ok,
+            audio_hard: !!info.audio_hard,
+            audio_codec: info.audio_codec || "",
+          }
+        );
+      } catch {
+        alert("无法打开该分集");
+      }
+    });
+
+    let cleanupType = "dup";
+    function thumbHtml(id, thumbV, hasThumb, root) {
+      const vid = id || "";
+      const tv = thumbV || (hasThumb ? 1 : 0);
+      if (!vid) {
+        return `<div class="media-row-thumb"><span class="ph">无图</span></div>`;
+      }
+      const rootQ = root ? `&root=${encodeURIComponent(root)}` : "";
+      return `<div class="media-row-thumb">
+        <img src="/thumb/${escapeAttr(vid)}?v=${tv}${rootQ}" alt="" loading="lazy" decoding="async"
+          onerror="this.style.display='none';this.parentNode.querySelector('.ph').style.display='flex'" />
+        <span class="ph" style="display:none">无图</span>
+      </div>`;
+    }
+
+    function pickKeepId(items, mode) {
+      if (!items.length) return "";
+      if (mode === "newest") {
+        return items.slice().sort((a, b) => (b.mtime || 0) - (a.mtime || 0))[0].id;
+      }
+      if (mode === "largest") {
+        return items.slice().sort((a, b) => (b.size || 0) - (a.size || 0))[0].id;
+      }
+      return items[0].id;
+    }
+    async function loadCleanup(type) {
+      cleanupType = type || "dup";
+      $("cleanupTabDup").classList.toggle("primary", cleanupType === "dup");
+      $("cleanupTabBad").classList.toggle("primary", cleanupType === "bad");
+      const body = $("cleanupBody");
+      body.innerHTML = "加载中…";
+      try {
+        const data = await fetch("/api/cleanup?type=" + encodeURIComponent(cleanupType)).then((r) => r.json());
+        if (!data.ok) {
+          body.textContent = data.msg || "加载失败";
+          return;
+        }
+        const groups = data.groups || [];
+        if (!groups.length || !(groups[0].items || []).length) {
+          body.textContent = cleanupType === "bad" ? "没有标记为损坏的文件" : "没有发现重复组";
+          return;
+        }
+        body.innerHTML = groups.map((g, gi) => {
+          const items = g.items || [];
+          const keepNewest = pickKeepId(items, "newest");
+          const rows = items.map((it) => {
+            const isKeep = cleanupType === "dup" && it.id === keepNewest;
+            const checked = cleanupType === "bad" ? "checked" : (isKeep ? "" : "checked");
+            const keepTag = isKeep ? ` <span style="color:var(--accent)">保留·最新</span>` : "";
+            const reason = it.reason ? ` · ${escapeHtml(it.reason)}` : "";
+            return `
+            <div class="media-row">
+              <input type="checkbox" class="cleanup-check media-row-check" data-id="${escapeAttr(it.id)}" ${checked} />
+              ${thumbHtml(it.id, it.thumb_v, it.has_thumb)}
+              <div class="media-row-body">
+                <strong title="${escapeAttr(it.name || "")}">${escapeHtml(it.name || "")}${keepTag}</strong>
+                <div class="media-row-meta">${escapeHtml(it.size_h || "")} · ${escapeHtml(it.mtime_h || "")} · ${escapeHtml(it.folder || "")}${reason}<br>${escapeHtml(it.path || "")}</div>
+                <div class="media-row-actions">
+                  <button type="button" class="btn cleanup-reveal" data-id="${escapeAttr(it.id)}">打开位置</button>
+                  ${cleanupType === "dup" ? `<button type="button" class="btn cleanup-keep-one" data-id="${escapeAttr(it.id)}">只留这个</button>` : ""}
+                </div>
+              </div>
+            </div>`;
+          }).join("");
+          const tools = cleanupType === "dup"
+            ? `<button type="button" class="btn cleanup-keep-mode" data-mode="newest" data-gi="${gi}">只留最新</button>
+               <button type="button" class="btn cleanup-keep-mode" data-mode="largest" data-gi="${gi}">只留最大</button>`
+            : "";
+          return `<div class="cleanup-group" style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px" data-gi="${gi}">
+            <div style="margin-bottom:8px"><strong>${escapeHtml(g.reason || "")}</strong> · ${items.length} 项 · 勾选=删除</div>
+            ${rows}
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+              ${tools}
+              <button type="button" class="btn primary cleanup-del-group" data-gi="${gi}">删除勾选（进回收站）</button>
+            </div>
+          </div>`;
+        }).join("");
+        body.dataset.groups = JSON.stringify(groups);
+      } catch (err) {
+        body.textContent = "加载失败: " + err;
+      }
+    }
+
+    $("cleanupBtn").addEventListener("click", () => {
+      $("cleanupModal").classList.add("open");
+      loadCleanup("dup");
+    });
+    $("cleanupModalClose").addEventListener("click", () => $("cleanupModal").classList.remove("open"));
+    $("cleanupModal").addEventListener("click", (e) => {
+      if (e.target === $("cleanupModal")) $("cleanupModal").classList.remove("open");
+    });
+    $("cleanupTabDup").addEventListener("click", () => loadCleanup("dup"));
+    $("cleanupTabBad").addEventListener("click", () => loadCleanup("bad"));
+    async function cleanupBatchConvert(kind) {
+      const ids = Array.from(document.querySelectorAll(".cleanup-check:checked")).map((el) => el.dataset.id).filter(Boolean);
+      if (!ids.length) {
+        alert("请先勾选要处理的条目");
+        return;
+      }
+      const label = kind === "fix_audio" ? "修声音" : "转 MP4";
+      if (!confirm(`将 ${ids.length} 项加入「${label}」队列？\n默认同时只跑 1 个，避免打满 CPU。`)) return;
+      try {
+        const r = await fetch("/api/convert/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids, kind }),
+        });
+        const data = await r.json();
+        alert(data.msg || (data.ok ? "已加入队列" : "失败"));
+        if (data.ok) openQueueModal();
+      } catch (err) {
+        alert("失败: " + err);
+      }
+    }
+    if ($("cleanupBatchFix")) $("cleanupBatchFix").addEventListener("click", () => cleanupBatchConvert("fix_audio"));
+    if ($("cleanupBatchMp4")) $("cleanupBatchMp4").addEventListener("click", () => cleanupBatchConvert("mp4"));
+    $("cleanupBody").addEventListener("click", async (e) => {
+      const reveal = e.target.closest(".cleanup-reveal");
+      if (reveal) {
+        e.preventDefault();
+        const id = reveal.dataset.id;
+        try {
+          await fetch("/api/local/" + id, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "reveal" }),
+          });
+        } catch (_) {}
+        return;
+      }
+      const keepOne = e.target.closest(".cleanup-keep-one");
+      if (keepOne) {
+        e.preventDefault();
+        const panel = keepOne.closest(".cleanup-group");
+        const keepId = keepOne.dataset.id;
+        panel.querySelectorAll(".cleanup-check").forEach((c) => {
+          c.checked = c.dataset.id !== keepId;
+        });
+        return;
+      }
+      const keepMode = e.target.closest(".cleanup-keep-mode");
+      if (keepMode) {
+        e.preventDefault();
+        const panel = keepMode.closest(".cleanup-group");
+        const gi = Number(keepMode.dataset.gi);
+        let groups = [];
+        try { groups = JSON.parse($("cleanupBody").dataset.groups || "[]"); } catch (_) {}
+        const items = (groups[gi] && groups[gi].items) || [];
+        const keepId = pickKeepId(items, keepMode.dataset.mode || "newest");
+        panel.querySelectorAll(".cleanup-check").forEach((c) => {
+          c.checked = c.dataset.id !== keepId;
+        });
+        return;
+      }
+      const del = e.target.closest(".cleanup-del-group");
+      if (!del) return;
+      const panel = del.closest(".cleanup-group") || del.closest("div");
+      const ids = [...panel.querySelectorAll(".cleanup-check:checked")].map((c) => c.dataset.id).filter(Boolean);
+      if (!ids.length) {
+        alert("请先勾选要删除的文件");
+        return;
+      }
+      if (cleanupType === "dup") {
+        const total = panel.querySelectorAll(".cleanup-check").length;
+        if (ids.length >= total) {
+          if (!confirm("将删除该组全部文件。确定都不要保留吗？")) return;
+        } else if (total - ids.length < 1) {
+          if (!confirm("未保留任何一份，确定继续？")) return;
+        }
+      }
+      if (!confirm(`将 ${ids.length} 个文件移到回收站，并从片库移除。继续？`)) return;
+      try {
+        const r = await fetch("/api/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids, trash: true }),
+        });
+        const data = await r.json();
+        alert(data.msg || (data.ok ? "完成" : "失败"));
+        await loadCleanup(cleanupType);
+        try { await refresh(); } catch (_) {}
+      } catch (err) {
+        alert("删除失败: " + err);
+      }
+    });
+
+    // —— 局域网分享 ——
+    $("lanBtn").addEventListener("click", async () => {
+      try {
+        const cur = await fetch("/api/share").then((r) => r.json());
+        const urls = (cur.urls || []).join("\n");
+        const lanUrls = (cur.urls || []).filter((u) => !u.includes("127.0.0.1"));
+        if (cur.lan) {
+          const action = confirm(
+            "局域网分享已开启（即时生效）。\n\n地址：\n" + urls +
+            "\n\n确定 = 复制局域网地址\n取消 = 关闭分享"
+          );
+          if (action) {
+            const copy = lanUrls[0] || (cur.urls || [])[0] || "";
+            try {
+              await navigator.clipboard.writeText(copy);
+              alert("已复制：\n" + copy);
+            } catch (_) {
+              prompt("复制此地址：", copy);
+            }
+            return;
+          }
+          const r = await fetch("/api/share", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ lan: false }),
+          });
+          const data = await r.json();
+          alert(data.msg || "已关闭");
+          try { await refreshTree(); } catch (_) {}
+          return;
+        }
+        if (!confirm("开启后，同一 WiFi 下的手机/电视可立刻用浏览器打开（无需重启）。\n若仍连不上，多半是 Windows 防火墙，程序会尝试自动放行。继续？")) return;
+        const r = await fetch("/api/share", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lan: true }),
+        });
+        const data = await r.json();
+        alert(data.msg || "已开启");
+        try { await refreshTree(); } catch (_) {}
+      } catch (err) {
+        alert("设置失败: " + err);
+      }
+    });
+
+    // —— 观看历史 ——
+    let histKind = "resume";
+    async function loadHistory(kind) {
+      histKind = kind || "resume";
+      $("histTabResume").classList.toggle("primary", histKind === "resume");
+      $("histTabRecent").classList.toggle("primary", histKind === "recent");
+      $("histTabDone").classList.toggle("primary", histKind === "done");
+      const body = $("historyBody");
+      const rows = historyEntries(histKind).slice(0, 80);
+      if (!rows.length) {
+        body.textContent = histKind === "done" ? "还没有已看完的记录" : (histKind === "recent" ? "暂无观看记录" : "没有未看完的片");
+        return;
+      }
+      body.innerHTML = "加载中…";
+      try {
+        const data = await fetch("/api/videos-by-ids", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: rows.map((r) => r.id), hints: historyHints(rows) }),
+        }).then((r) => r.json());
+        const byId = {};
+        (data.videos || []).forEach((v) => { byId[v.id] = v; });
+        const offlineRoots = new Set(data.offline_roots || []);
+        body.innerHTML = rows.map((r) => {
+          const v = byId[r.id];
+          const title = escapeHtml((v && v.name) || r.name || r.id);
+          let meta;
+          if (v) {
+            const disk = (v.root || r.root || "").replace(/\\/g, "/");
+            const diskHint = disk ? disk.split("/").filter(Boolean)[0] || disk : "";
+            meta = `${escapeHtml(v.size_h || "")} · ${escapeHtml(v.folder || "")}` +
+              (diskHint ? ` · ${escapeHtml(diskHint)}` : "");
+          } else if (r.root && offlineRoots.has(r.root)) {
+            meta = escapeHtml("磁盘未连接：" + r.root);
+          } else if (r.root) {
+            meta = escapeHtml(r.folder || r.root || "（其他磁盘）");
+          } else {
+            meta = escapeHtml(r.folder || "（不在当前片库）");
+          }
+          const dur = Number(r.duration) || 0;
+          const pct = (!r.done && dur > 0) ? Math.min(99, Math.round((r.t / dur) * 100)) + "%" : (r.done ? "已看完" : "");
+          const thumbRoot = (v && v.root) || r.root || "";
+          const thumb = thumbHtml(r.id, v && v.thumb_v, v && v.has_thumb, thumbRoot);
+          return `<button type="button" class="media-row-btn" data-hist-id="${escapeAttr(r.id)}" data-hist-root="${escapeAttr(r.root || (v && v.root) || "")}">
+            ${thumb}
+            <span class="media-row-body">
+              <strong>${title} ${pct ? `<span style="opacity:.7;font-weight:400">${pct}</span>` : ""}</strong>
+              <span class="media-row-meta">${meta}</span>
+            </span>
+          </button>`;
+        }).join("");
+      } catch (err) {
+        body.textContent = "加载失败: " + err;
+      }
+    }
+    $("historyBtn").addEventListener("click", () => {
+      $("historyModal").classList.add("open");
+      loadHistory("resume");
+    });
+    $("historyModalClose").addEventListener("click", () => $("historyModal").classList.remove("open"));
+    $("historyModal").addEventListener("click", (e) => {
+      if (e.target === $("historyModal")) $("historyModal").classList.remove("open");
+    });
+    $("histTabResume").addEventListener("click", () => loadHistory("resume"));
+    $("histTabRecent").addEventListener("click", () => loadHistory("recent"));
+    $("histTabDone").addEventListener("click", () => loadHistory("done"));
+    $("histClearBtn").addEventListener("click", () => {
+      if (!confirm("清除本机全部观看进度/历史？")) return;
+      try { localStorage.removeItem(PLAY_PROG_KEY); } catch (_) {}
+      renderContinueBar();
+      loadHistory(histKind);
+    });
+    $("historyBody").addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-hist-id]");
+      if (!btn) return;
+      const id = btn.dataset.histId;
+      const root = btn.dataset.histRoot || "";
+      $("historyModal").classList.remove("open");
+      try {
+        await openFromHistory(id, root);
+      } catch (err) {
+        alert(err.message || "无法打开（可能已移出片库）");
+      }
+    });
+    $("continueBar").addEventListener("click", async (e) => {
+      const chip = e.target.closest("[data-play-id]");
+      if (!chip) return;
+      const id = chip.dataset.playId;
+      try {
+        await openFromHistory(id);
+      } catch (err) {
+        alert(err.message || "无法打开该条目");
+      }
+    });
+    renderContinueBar();
 
     $("btnLocalOpen").addEventListener("click", () => localAction("open"));
     $("btnFixAudio").addEventListener("click", () => startFixAudio());
@@ -2261,11 +3403,182 @@
     });
 
     $("scanDriveBtn").addEventListener("click", () => scanSelectedDrive(false));
+    if ($("libNav")) {
+      $("libNav").addEventListener("click", async (e) => {
+        const unmount = e.target.closest("[data-unmount]");
+        if (unmount) {
+          e.preventDefault();
+          e.stopPropagation();
+          const path = unmount.getAttribute("data-unmount");
+          if (!confirm("从片库移出：\n" + path + "\n（不删除磁盘文件）")) return;
+          try {
+            const r = await fetch("/api/roots", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "remove", path }),
+            });
+            const data = await r.json();
+            alert(data.msg || (data.ok ? "已移除" : "失败"));
+            if (state.lib === path) state.lib = "";
+            try { await refresh(); } catch (_) {}
+          } catch (err) {
+            alert("失败: " + err);
+          }
+          return;
+        }
+        const item = e.target.closest(".lib-nav-item[data-lib]");
+        if (!item) return;
+        selectLib(item.getAttribute("data-lib") || "");
+      });
+    }
 
     $("rescanBtn").addEventListener("click", async () => {
       if (!confirm("增量重新扫描？\n会对比文件变化（新增/删除/修改），未改动的复用缓存，比全盘重做更快。")) return;
       await scanSelectedDrive(true);
     });
+
+    // —— 转换队列 ——
+    let queuePollTimer = 0;
+    async function loadQueueModal() {
+      const body = $("queueBody");
+      if (!body) return;
+      try {
+        const data = await fetch("/api/convert/queue").then((r) => r.json());
+        const par = $("queueParallel");
+        if (par && data.parallel) par.value = String(data.parallel);
+        const jobs = data.jobs || [];
+        if (!jobs.length) {
+          body.textContent = "队列为空。播放页可「转成 MP4 / 修复声音」；清理页可批量加入。";
+          return;
+        }
+        body.innerHTML = jobs.map((j) => {
+          const st = j.status || "";
+          const canCancel = st === "queued" || st === "running";
+          const kind = j.kind === "fix_audio" ? "修声音" : "转MP4";
+          return `<div class="media-row">
+            <div class="media-row-body">
+              <strong>${escapeHtml(j.name || j.vid)} <span style="opacity:.7;font-weight:400">${kind} · ${escapeHtml(st)} ${j.percent ? j.percent + "%" : ""}</span></strong>
+              <div class="media-row-meta">${escapeHtml(j.msg || "")}</div>
+              <div class="media-row-actions">
+                ${canCancel ? `<button type="button" class="btn queue-cancel" data-jid="${escapeAttr(j.id)}">取消</button>` : ""}
+              </div>
+            </div>
+          </div>`;
+        }).join("");
+        const qbtn = $("queueBtn");
+        if (qbtn && data.active) qbtn.textContent = `队列(${data.active})`;
+        else if (qbtn) qbtn.textContent = "队列";
+      } catch (err) {
+        body.textContent = "加载失败: " + err;
+      }
+    }
+    function openQueueModal() {
+      $("queueModal").classList.add("open");
+      loadQueueModal();
+      if (queuePollTimer) clearInterval(queuePollTimer);
+      queuePollTimer = setInterval(loadQueueModal, 1500);
+    }
+    function closeQueueModal() {
+      $("queueModal").classList.remove("open");
+      if (queuePollTimer) { clearInterval(queuePollTimer); queuePollTimer = 0; }
+    }
+    if ($("queueBtn")) $("queueBtn").addEventListener("click", openQueueModal);
+    if ($("queueModalClose")) $("queueModalClose").addEventListener("click", closeQueueModal);
+    if ($("queueModal")) $("queueModal").addEventListener("click", (e) => {
+      if (e.target === $("queueModal")) closeQueueModal();
+    });
+    if ($("queueRefreshBtn")) $("queueRefreshBtn").addEventListener("click", loadQueueModal);
+    if ($("queueParallel")) {
+      $("queueParallel").addEventListener("change", async () => {
+        const parallel = Number($("queueParallel").value) || 1;
+        await fetch("/api/convert/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: [], kind: "mp4", parallel }),
+        }).catch(() => {});
+        loadQueueModal();
+      });
+    }
+    if ($("queueBody")) {
+      $("queueBody").addEventListener("click", async (e) => {
+        const btn = e.target.closest(".queue-cancel");
+        if (!btn) return;
+        const jid = btn.dataset.jid;
+        await fetch("/api/convert-mp4/job/" + encodeURIComponent(jid) + "/cancel", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        loadQueueModal();
+      });
+    }
+
+    // —— 换封面 ——
+    if ($("btnCover")) {
+      $("btnCover").addEventListener("click", () => {
+        const p = $("coverPanel");
+        if (!p) return;
+        p.style.display = p.style.display === "none" ? "flex" : "none";
+        const video = $("player");
+        if (video && $("coverSeek") && video.currentTime > 0) {
+          $("coverSeek").value = String(Math.floor(video.currentTime * 10) / 10);
+        }
+      });
+    }
+    async function applyCoverSeek(seek) {
+      if (!currentPlayId) return;
+      $("modalInfo").textContent = "正在截取封面…";
+      try {
+        const root = (currentPlayMeta && currentPlayMeta.root) || "";
+        const url = "/api/thumb/" + encodeURIComponent(currentPlayId) + (root ? ("?root=" + encodeURIComponent(root)) : "");
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ seek }),
+        });
+        const data = await r.json();
+        $("modalInfo").textContent = data.msg || (data.ok ? "封面已更新" : "失败");
+        if (data.ok) {
+          try { await refresh(); } catch (_) {}
+        }
+      } catch (e) {
+        $("modalInfo").textContent = "换封面失败: " + e;
+      }
+    }
+    if ($("btnCoverSeek")) {
+      $("btnCoverSeek").addEventListener("click", () => {
+        const seek = Number($("coverSeek") && $("coverSeek").value) || 3;
+        applyCoverSeek(seek);
+      });
+    }
+    if ($("btnCoverNow")) {
+      $("btnCoverNow").addEventListener("click", () => {
+        const video = $("player");
+        const seek = video ? (video.currentTime || 0) : 3;
+        if ($("coverSeek")) $("coverSeek").value = String(Math.floor(seek * 10) / 10);
+        applyCoverSeek(seek);
+      });
+    }
+    if ($("coverFile")) {
+      $("coverFile").addEventListener("change", async () => {
+        const f = $("coverFile").files && $("coverFile").files[0];
+        if (!f || !currentPlayId) return;
+        const fd = new FormData();
+        fd.append("file", f);
+        const root = (currentPlayMeta && currentPlayMeta.root) || "";
+        const url = "/api/thumb/" + encodeURIComponent(currentPlayId) + (root ? ("?root=" + encodeURIComponent(root)) : "");
+        $("modalInfo").textContent = "正在上传封面…";
+        try {
+          const r = await fetch(url, { method: "POST", body: fd });
+          const data = await r.json();
+          $("modalInfo").textContent = data.msg || (data.ok ? "封面已更新" : "失败");
+          if (data.ok) try { await refresh(); } catch (_) {}
+        } catch (e) {
+          $("modalInfo").textContent = "上传失败: " + e;
+        }
+        $("coverFile").value = "";
+      });
+    }
+
+    renderMountChips();
 
     $("exportStaticBtn").addEventListener("click", async () => {
       if (!state.root) {
@@ -2280,7 +3593,7 @@
         "（视频文件不会被复制，仍引用原路径。）"
       )) return;
       $("exportStaticBtn").disabled = true;
-      $("exportStaticBtn").textContent = "导出中…";
+      $("exportStaticBtn").textContent = "正在导出…";
       $("status").textContent = "正在导出静态站…";
       try {
         const r = await fetch("/api/export-static", {
@@ -2347,7 +3660,7 @@
       const n = (driveData.drives || state.drives || []).length;
       const letters = (state.drives || []).map((d) => d.letter).join("、");
       $("status").textContent = n
-        ? `已自动检测到 ${n} 个盘符${letters ? "：" + letters : ""}。点「打开此盘」用缓存秒开；有新增视频再点「重新扫描」。`
+        ? `已自动检测到 ${n} 个盘符${letters ? "：" + letters : ""}。选择盘符后点「扫描所选盘」，不同盘会自动加入同一片库。`
         : "未检测到盘符，请检查硬盘是否已连接，或重启 start.bat";
 
       await refreshTree();

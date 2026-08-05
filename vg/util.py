@@ -21,9 +21,14 @@ from vg.config import (
 from vg.state import STATE
 
 def log(msg: str) -> None:
-    """CMD 窗口可见日志（立即刷新）。"""
+    """CMD 窗口可见日志（立即刷新），并写入 startup.log。"""
     try:
         print(msg, flush=True)
+    except Exception:
+        pass
+    try:
+        from vg import bootlog
+        bootlog.write(msg)
     except Exception:
         pass
 
@@ -48,25 +53,19 @@ def safe_rel(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def resolve_under_root(rel: str) -> Path | None:
+def resolve_under_root(rel: str, root: Path | None = None) -> Path | None:
     """解析 root 下任意文件（含 m3u8 分片），防止路径穿越。"""
-    root = STATE["root"]
-    if root is None:
+    from vg.disk_libs import resolve_under_root_path
+
+    use_root = root if root is not None else STATE["root"]
+    if use_root is None:
         return None
-    rel = (rel or "").replace("\\", "/").lstrip("/")
-    if not rel or ".." in rel.split("/"):
-        return None
-    try:
-        full = (root / rel).resolve()
-        full.relative_to(root.resolve())
-        return full if full.is_file() else None
-    except (ValueError, OSError):
-        return None
+    return resolve_under_root_path(Path(use_root) if not isinstance(use_root, Path) else use_root, rel)
 
 
-def resolve_video_path(rel: str) -> Path | None:
+def resolve_video_path(rel: str, root: Path | None = None) -> Path | None:
     """把相对路径解析到 root 下，防止路径穿越。"""
-    return resolve_under_root(rel)
+    return resolve_under_root(rel, root=root)
 
 
 def video_id(rel: str) -> str:

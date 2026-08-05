@@ -247,6 +247,10 @@
           <div class="filter-label">排序</div>
           <div class="filter-tags" id="sortTags"></div>
         </div>
+        <div class="filter-row">
+          <div class="filter-label">视图</div>
+          <div class="filter-tags" id="viewTags"></div>
+        </div>
         <div class="filter-row" id="genreRow" style="display:none">
           <div class="filter-label">类型</div>
           <div class="filter-tags" id="genreTags"></div>
@@ -281,11 +285,18 @@
       <button type="button" id="btnReveal" title="打开视频所在文件夹">打开位置</button>
     </div>
   </div>
+  <div class="modal" id="seriesModal">
+    <div class="mbar">
+      <div class="t" id="seriesModalTitle">剧集</div>
+      <button type="button" id="seriesModalClose" title="关闭">关闭</button>
+    </div>
+    <div class="mi" id="seriesModalList" style="flex:1;overflow:auto;max-height:70vh"></div>
+  </div>
   <script src="_cache/hls.min.js"></script>
   <script src="data.js"></script>
   <script>
     const DATA = window.__VG_DATA__ || { videos: [], root: "", exported_at: "" };
-    const state = { cat: "", folder: "", folderAll: false, genre: "", ext: "", q: "", sort: "mtime_desc", cur: null };
+    const state = { cat: "", folder: "", folderAll: false, genre: "", ext: "", q: "", sort: "mtime_desc", view: "series", cur: null };
     let hls = null;
 
     const SORTS = [
@@ -367,6 +378,9 @@
       if (state.genre) {
         list = list.filter((v) => videoGenres(v).includes(state.genre));
       }
+      if ((state.view || "series") === "series") {
+        list = collapseToSeriesCards(list);
+      }
       const rev = state.sort !== "mtime_asc" && state.sort !== "name" && state.sort !== "duration_asc";
       list.sort((a, b) => {
         if (state.sort === "name") return (a.name || "").localeCompare(b.name || "", "zh");
@@ -376,6 +390,53 @@
       });
       if (rev) list.reverse();
       return list;
+    }
+
+    function collapseToSeriesCards(videos) {
+      const by = {};
+      const singles = [];
+      for (const v of videos) {
+        const sid = v.series_id || "";
+        if (sid) {
+          if (!by[sid]) by[sid] = [];
+          by[sid].push(v);
+        } else {
+          singles.push(v);
+        }
+      }
+      const cards = [];
+      for (const sid of Object.keys(by)) {
+        const items = by[sid].slice().sort((a, b) =>
+          (a.season || 0) - (b.season || 0) || (a.episode || 0) - (b.episode || 0)
+        );
+        if (items.length < 2) {
+          singles.push(...items);
+          continue;
+        }
+        const cover = items[items.length - 1];
+        const title = cover.series_title || cover.name || "剧集";
+        cards.push({
+          id: sid,
+          kind: "series",
+          name: title,
+          series_id: sid,
+          series_title: title,
+          ep_count: items.length,
+          folder: cover.folder || "",
+          size: items.reduce((s, x) => s + (x.size || 0), 0),
+          size_h: cover.size_h || "",
+          mtime: Math.max(...items.map((x) => x.mtime || 0)),
+          mtime_h: cover.mtime_h || "",
+          duration: items.reduce((s, x) => s + (x.duration || 0), 0) || null,
+          duration_h: "",
+          genres: cover.genres || [],
+          thumb: cover.thumb || "",
+          dup: items.some((x) => x.dup),
+          bad: items.some((x) => x.bad),
+          _episodes: items,
+        });
+      }
+      return cards.concat(singles);
     }
 
     function genreFacets(list) {
@@ -494,6 +555,15 @@
       $("sortTags").innerHTML = SORTS.map((s) =>
         `<button type="button" class="tag ${state.sort === s.id ? "active" : ""}" data-sort="${s.id}">${s.label}</button>`
       ).join("");
+      const vt = $("viewTags");
+      if (vt) {
+        vt.innerHTML = [
+          { id: "series", label: "合集" },
+          { id: "flat", label: "单集" },
+        ].map((s) =>
+          `<button type="button" class="tag ${state.view === s.id ? "active" : ""}" data-view="${s.id}">${s.label}</button>`
+        ).join("");
+      }
     }
 
     function renderGenreTags(list) {
@@ -608,16 +678,19 @@
     }
 
     function cardHtml(v) {
-      const mark = v.duration_h
-        ? v.duration_h
-        : (v.kind === "m3u8" ? "HLS" : (v.seg_count ? (v.seg_count + "段") : (v.ext || "").replace(".", "").toUpperCase()));
+      const isSeries = v.kind === "series";
+      const mark = isSeries
+        ? ((v.ep_count || 0) + "集")
+        : (v.duration_h
+          ? v.duration_h
+          : (v.kind === "m3u8" ? "HLS" : (v.seg_count ? (v.seg_count + "段") : (v.ext || "").replace(".", "").toUpperCase())));
       const gtxt = videoGenres(v).slice(0, 2).join("·");
       const thumb = v.thumb
         ? `<img src="${esc(v.thumb)}" alt="" loading="lazy" onerror="this.style.opacity=.2" />`
         : `<img alt="" style="opacity:.2" />`;
       const dup = !!v.dup;
       const bad = !!v.bad;
-      return `<div class="card" data-id="${esc(v.id)}">
+      return `<div class="card" data-id="${esc(v.id)}" data-kind="${esc(v.kind || "")}">
         <div class="thumb">
           ${thumb}
           ${dup ? `<span class="dup-badge" title="${esc(v.dup_reason || "重复")}">重复×${esc(v.dup_n || 0)}</span>` : ""}
@@ -625,10 +698,11 @@
           <span class="mark">${esc(mark)}</span>
         </div>
         <div class="body">
-          <div class="title">${esc(v.name)}</div>
+          <div class="title">${esc(v.name)}${isSeries ? " · 剧集" : ""}</div>
           <div class="meta">
             <span>${esc(v.size_h)}</span>
             <span>${esc(v.folder || "根目录")}</span>
+            ${isSeries ? `<span>${v.ep_count || 0} 集</span>` : ""}
             ${gtxt ? `<span>${esc(gtxt)}</span>` : ""}
             ${bad ? `<span>疑似损坏</span>` : ""}
           </div>
@@ -780,6 +854,7 @@
         genre: state.genre,
         ext: state.ext,
         sort: state.sort,
+        view: state.view || "series",
         q: state.q,
       };
       if (location.hash !== "#play") {
@@ -902,6 +977,7 @@
         genre: state.genre,
         ext: state.ext,
         sort: state.sort,
+        view: state.view || "series",
         q: state.q,
       };
       const q = new URLSearchParams();
@@ -929,6 +1005,7 @@
       state.genre = st.genre || "";
       state.ext = st.ext || "";
       state.sort = st.sort || "mtime_desc";
+      if (st.view === "flat" || st.view === "series") state.view = st.view;
       state.q = st.q || "";
       if ($("q")) $("q").value = state.q;
       refresh();
@@ -1055,6 +1132,13 @@
       state.sort = b.dataset.sort;
       onFilterChange(true);
     });
+    $("viewTags").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-view]");
+      if (!b) return;
+      state.view = b.dataset.view || "series";
+      try { localStorage.setItem("vg_static_view", state.view); } catch (_) {}
+      onFilterChange(true);
+    });
     $("genreTags").addEventListener("click", (e) => {
       const b = e.target.closest("[data-genre]");
       if (!b) return;
@@ -1107,7 +1191,40 @@
     $("grid").addEventListener("click", (e) => {
       const card = e.target.closest(".card");
       if (!card) return;
+      const kind = card.dataset.kind || "";
+      if (kind === "series") {
+        const cardData = cachedList.find((x) => x.id === card.dataset.id && x.kind === "series");
+        openSeriesModal(cardData);
+        return;
+      }
       const v = DATA.videos.find((x) => x.id === card.dataset.id);
+      if (v) openItem(v);
+    });
+
+    function openSeriesModal(card) {
+      const box = $("seriesModalList");
+      const title = $("seriesModalTitle");
+      if (!card || !box) return;
+      title.textContent = card.name || "剧集";
+      const eps = card._episodes || DATA.videos.filter((x) => (x.series_id || "") === card.series_id)
+        .sort((a, b) => (a.season || 0) - (b.season || 0) || (a.episode || 0) - (b.episode || 0));
+      box.innerHTML = eps.map((ep) => {
+        const label = (ep.season != null && ep.episode != null)
+          ? `S${String(ep.season).padStart(2, "0")}E${String(ep.episode).padStart(2, "0")} · ${esc(ep.name || "")}`
+          : esc(ep.name || "");
+        return `<button type="button" data-epid="${esc(ep.id)}" style="display:block;width:100%;text-align:left;margin:6px 0;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg3);color:var(--text);cursor:pointer">${label}<br><span style="opacity:.7;font-size:.8em">${esc(ep.size_h || "")} · ${esc(ep.folder || "")}</span></button>`;
+      }).join("") || "暂无分集";
+      $("seriesModal").classList.add("open");
+    }
+    $("seriesModalClose").addEventListener("click", () => $("seriesModal").classList.remove("open"));
+    $("seriesModal").addEventListener("click", (e) => {
+      if (e.target === $("seriesModal")) $("seriesModal").classList.remove("open");
+    });
+    $("seriesModalList").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-epid]");
+      if (!btn) return;
+      const v = DATA.videos.find((x) => x.id === btn.dataset.epid);
+      $("seriesModal").classList.remove("open");
       if (v) openItem(v);
     });
     $("btnClose").addEventListener("click", closePlayer);
@@ -1154,6 +1271,10 @@
         if (!Array.isArray(v.genres)) v.genres = [];
       }
       readFiltersFromUrl();
+      try {
+        const savedView = localStorage.getItem("vg_static_view");
+        if (savedView === "flat" || savedView === "series") state.view = savedView;
+      } catch (_) {}
       if (location.hash === "#play") {
         history.replaceState(null, "", location.pathname + location.search);
       }
