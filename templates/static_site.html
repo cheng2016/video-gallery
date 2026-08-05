@@ -232,7 +232,7 @@
   <header>
     <div class="brand">本地<span>视频库</span></div>
     <span class="badge">静态离线版</span>
-    <input type="search" id="q" placeholder="搜索片名…" />
+    <input type="search" id="q" placeholder="搜索：拼音/首字母，ext:mkv genre:动作" title="支持拼音与语法过滤" />
     <div class="export-tip" id="exportTip">
       <span>双击「打开图库.bat」或 index.html 即可浏览。</span>
       <button type="button" class="tip-x" id="tipDismiss" title="不再显示">×</button>
@@ -367,10 +367,54 @@
         list = list.filter((v) => (v.ext || "").toLowerCase() === ext.toLowerCase());
       }
       if (state.q) {
-        const q = state.q.toLowerCase();
-        list = list.filter((v) => (v.name + " " + (v.folder || "")).toLowerCase().includes(q));
+        const parsed = parseSearchQuery(state.q);
+        if (parsed.ext) {
+          const ext = parsed.ext.startsWith(".") ? parsed.ext : ("." + parsed.ext);
+          list = list.filter((v) => (v.ext || "").toLowerCase() === ext.toLowerCase());
+        }
+        if (parsed.genre) {
+          list = list.filter((v) => videoGenres(v).some((g) => String(g).toLowerCase().includes(parsed.genre)));
+        }
+        if (parsed.actor) {
+          const a = parsed.actor;
+          list = list.filter((v) => {
+            const actors = (v.actors || []).join(" ").toLowerCase();
+            const blob = (v.search_q || (v.name + " " + (v.folder || ""))).toLowerCase();
+            return actors.includes(a) || blob.includes(a);
+          });
+        }
+        if (parsed.category) {
+          const c = parsed.category;
+          list = list.filter((v) => String(v.category || "").toLowerCase().includes(c));
+        }
+        for (const term of parsed.terms) {
+          list = list.filter((v) => {
+            const blob = (v.search_q || (v.name + " " + (v.folder || "") + " " + (v.actors || []).join(" "))).toLowerCase();
+            return blob.includes(term);
+          });
+        }
       }
       return list;
+    }
+
+    function parseSearchQuery(q) {
+      const out = { terms: [], ext: "", genre: "", actor: "", category: "" };
+      const re = /(ext|type|genre|g|actor|a|cast|channel|cat):("[^"]+"|'[^']+'|\S+)|\S+/gi;
+      let m;
+      while ((m = re.exec(String(q || ""))) !== null) {
+        const raw = m[0];
+        if (m[1]) {
+          const field = m[1].toLowerCase();
+          let val = (m[2] || "").replace(/^["']|["']$/g, "");
+          if (field === "ext" || field === "type") out.ext = val.toLowerCase();
+          else if (field === "genre" || field === "g") out.genre = val.toLowerCase();
+          else if (field === "actor" || field === "a" || field === "cast") out.actor = val.toLowerCase();
+          else if (field === "channel" || field === "cat") out.category = val.toLowerCase();
+        } else if (raw && raw.indexOf(":") < 0) {
+          out.terms.push(raw.toLowerCase());
+        }
+      }
+      return out;
     }
 
     function filtered() {

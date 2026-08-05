@@ -17,7 +17,6 @@ from pathlib import Path
 from vg.cache import (
     decrypt_blob,
     encrypt_blob,
-    save_index,
     thumb_path,
 )
 from vg.config import (
@@ -349,24 +348,37 @@ def start_metadata_enrichment() -> None:
 
 
 def _bg_enrich_metadata() -> None:
+    from vg.disk_libs import save_library_item
     from vg.scan import rebuild_indexes
 
     try:
-        root = STATE.get("root")
-        cache = STATE.get("cache_dir")
         videos = STATE.get("videos") or []
         need = [v for v in videos if _needs_metadata_probe(v)]
         if not need:
-            # 可能只是给「已有时长」补了 probe_ver，仍落盘避免下次重复判断
-            if cache and root:
-                save_index(cache, Path(root), videos)
             STATE["meta_progress"] = ""
             return
         log(f"[元数据] 后台探测 {len(need)} 个…")
         ok_n, fail_n = enrich_metadata_parallel(need, label="后台")
-        rebuild_indexes(videos)
-        if cache and root:
-            save_index(cache, Path(root), videos)
+        current = list(STATE.get("videos") or [])
+        current_keys = {
+            (
+                (v.get("_lib_root") or v.get("root") or "").strip().casefold(),
+                (v.get("rel") or "").replace("\\", "/").strip("/").casefold(),
+            )
+            for v in current
+        }
+        rebuild_indexes(current)
+        for item in need:
+            key = (
+                (item.get("_lib_root") or item.get("root") or "").strip().casefold(),
+                (item.get("rel") or "").replace("\\", "/").strip("/").casefold(),
+            )
+            if key not in current_keys:
+                continue
+            try:
+                save_library_item(item)
+            except Exception as e:
+                log(f"[元数据] 保存单条索引失败: {e}")
         STATE["meta_progress"] = f"元数据完成：可读 {ok_n}，异常 {fail_n}"
         log(f"[元数据] 完成：可读 {ok_n}，异常 {fail_n}")
     except Exception as e:

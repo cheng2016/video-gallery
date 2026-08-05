@@ -21,26 +21,37 @@ from vg.config import (
 from vg.state import STATE, _thumb_jpeg_cache, _thumb_jpeg_lock
 from vg.util import _clear_path_attrs_windows, log
 
-def thumb_cache_get(vid: str) -> bytes | None:
+def _thumb_cache_key(vid: str, cache: Path | None = None) -> str:
+    return f"{str(cache.resolve()).casefold()}|{vid}" if cache else vid
+
+
+def thumb_cache_get(vid: str, cache: Path | None = None) -> bytes | None:
+    key = _thumb_cache_key(vid, cache)
     with _thumb_jpeg_lock:
-        raw = _thumb_jpeg_cache.get(vid)
+        raw = _thumb_jpeg_cache.get(key)
         if raw is not None:
-            _thumb_jpeg_cache.move_to_end(vid)
+            _thumb_jpeg_cache.move_to_end(key)
         return raw
 
 
-def thumb_cache_put(vid: str, raw: bytes) -> None:
+def thumb_cache_put(vid: str, raw: bytes, cache: Path | None = None) -> None:
+    key = _thumb_cache_key(vid, cache)
     with _thumb_jpeg_lock:
-        _thumb_jpeg_cache[vid] = raw
-        _thumb_jpeg_cache.move_to_end(vid)
+        _thumb_jpeg_cache[key] = raw
+        _thumb_jpeg_cache.move_to_end(key)
         while len(_thumb_jpeg_cache) > THUMB_JPEG_CACHE_MAX:
             _thumb_jpeg_cache.popitem(last=False)
 
 
-def thumb_cache_invalidate(vid: str | None = None) -> None:
+def thumb_cache_invalidate(vid: str | None = None, cache: Path | None = None) -> None:
     with _thumb_jpeg_lock:
         if vid:
-            _thumb_jpeg_cache.pop(vid, None)
+            if cache:
+                _thumb_jpeg_cache.pop(_thumb_cache_key(vid, cache), None)
+            else:
+                suffix = f"|{vid}"
+                for key in [k for k in _thumb_jpeg_cache if k == vid or k.endswith(suffix)]:
+                    _thumb_jpeg_cache.pop(key, None)
         else:
             _thumb_jpeg_cache.clear()
 
@@ -134,7 +145,7 @@ def thumb_file_ready(cache: Path | None, vid: str) -> bool:
 
 def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
     """读取并解密预览图；带内存 LRU。"""
-    cached = thumb_cache_get(vid)
+    cached = thumb_cache_get(vid, cache)
     if cached is not None:
         return cached
     p = thumb_path(cache, vid)
@@ -144,7 +155,7 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
         _clear_path_attrs_windows(p)
         raw = decrypt_blob(p.read_bytes())
         if raw and len(raw) > 100 and raw[:2] == b"\xff\xd8":
-            thumb_cache_put(vid, raw)
+            thumb_cache_put(vid, raw, cache)
             return raw
     except OSError as e:
         log(f"[预览图] 读取失败 {vid}: {e}")
@@ -153,7 +164,7 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
 
 def has_encrypted_thumb(cache: Path, vid: str) -> bool:
     """服务端校验：优先内存缓存，否则快速文件探测，必要时再解密。"""
-    if thumb_cache_get(vid) is not None:
+    if thumb_cache_get(vid, cache) is not None:
         return True
     if not thumb_file_ready(cache, vid):
         return False
@@ -196,7 +207,7 @@ def cleanup_legacy_disk_cache(root: Path) -> None:
             log(f"[清理] 删不掉旧缓存 {p}: {e}（可在资源管理器里手动删除）")
 
 
-def save_index(cache: Path, root: Path, videos: list[dict]) -> None:
+def save_index(cache: Path, root: Path, videos: list[dict]) -> bool:
     path = cache / INDEX_NAME
     tmp = cache / (INDEX_NAME + ".tmp")
     try:
@@ -211,12 +222,18 @@ def save_index(cache: Path, root: Path, videos: list[dict]) -> None:
             else:
                 clean.append(v)
         payload = json.dumps(
-            {"root": str(root), "videos": clean, "updated": datetime.now().isoformat()},
+            {
+                "schema_ver": 2,
+                "root": str(root.resolve()),
+                "videos": clean,
+                "updated": datetime.now().isoformat(),
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         )
         tmp.write_text(payload, encoding="utf-8")
         os.replace(tmp, path)
+        return True
     except OSError as e:
         print(f"提示: 保存索引失败: {e}")
         print(f"       路径: {path}")
@@ -225,6 +242,7 @@ def save_index(cache: Path, root: Path, videos: list[dict]) -> None:
                 tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        return False
 
 def attach_thumb_meta(v: dict) -> dict:
     """给列表项补 has_thumb / thumb_v（只看文件是否存在，避免列表接口解密过慢）。"""
@@ -233,7 +251,7 @@ def attach_thumb_meta(v: dict) -> dict:
 
     cache = cache_dir_for_item(v) or STATE.get("cache_dir")
     vid = thumb_id_for_item(v) or (v.get("id") or "")
-    if cache and vid and (thumb_cache_get(vid) is not None or thumb_file_ready(cache, vid)):
+    if cache and vid and (thumb_cache_get(vid, cache) is not None or thumb_file_ready(cache, vid)):
         v["has_thumb"] = True
         v["thumb_v"] = thumb_version(cache, vid) or 1
         v["thumb_id"] = vid

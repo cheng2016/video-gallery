@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from vg.cache import save_index, thumb_file_ready, thumb_path, thumb_version
+from vg.cache import thumb_file_ready, thumb_path, thumb_version
 from vg.config import (
     CONVERT_MAX_PARALLEL,
     PROBE_META_VER,
@@ -20,7 +20,13 @@ from vg.config import (
     THUMB_EXT,
     VGDATA_DIR,
 )
-from vg.disk_libs import cache_dir_for_item, resolve_item_rel, root_for_item
+from vg.disk_libs import (
+    cache_dir_for_item,
+    resolve_item_rel,
+    root_for_item,
+    save_library_item,
+    save_root_library,
+)
 from vg.genres import detect_genres
 from vg.media import (
     _apply_probe_to_item,
@@ -81,6 +87,7 @@ def _convert_job_public(job: dict) -> dict:
     return {
         "id": job.get("id") or "",
         "vid": job.get("vid") or "",
+        "root": job.get("root") or "",
         "kind": job.get("kind") or "mp4",
         "name": job.get("name") or "",
         "status": job.get("status") or "error",
@@ -98,19 +105,39 @@ def list_convert_jobs(limit: int = 40) -> list[dict]:
     return [_convert_job_public(j) for j in jobs[:limit]]
 
 
-def enqueue_convert_job(vid: str, kind: str = "mp4", name: str = "") -> tuple[bool, str, str]:
+def enqueue_convert_job(
+    vid: str,
+    kind: str = "mp4",
+    name: str = "",
+    root: str | None = None,
+) -> tuple[bool, str, str]:
     """Enqueue convert/fix-audio job. Returns (ok, msg, job_id)."""
     kind = (kind or "mp4").strip().lower()
     if kind not in ("mp4", "fix_audio"):
         return False, "未知任务类型", ""
+    try:
+        root = str(Path(root).expanduser().resolve()) if root else None
+    except OSError:
+        root = str(root).strip() if root else None
     with _convert_lock:
         for jid, job in STATE["convert_jobs"].items():
-            if job.get("vid") == vid and job.get("kind", "mp4") == kind and job.get("status") in ("queued", "running"):
+            job_root = job.get("root") or ""
+            try:
+                job_root = str(Path(job_root).expanduser().resolve()) if job_root else ""
+            except OSError:
+                job_root = str(job_root).strip()
+            if (
+                job.get("vid") == vid
+                and job_root.casefold() == (root or "").casefold()
+                and job.get("kind", "mp4") == kind
+                and job.get("status") in ("queued", "running")
+            ):
                 return True, "已有同类任务在队列中", jid
         job_id = hashlib.md5(f"{kind}-{vid}-{datetime.now().timestamp()}".encode()).hexdigest()[:12]
         STATE["convert_jobs"][job_id] = {
             "id": job_id,
             "vid": vid,
+            "root": root or "",
             "kind": kind,
             "name": name or vid,
             "status": "queued",
@@ -147,19 +174,20 @@ def pump_convert_queue() -> None:
     for job in to_start:
         jid = job["id"]
         vid = job["vid"]
+        root = job.get("root") or None
         kind = job.get("kind") or "mp4"
         target = _fix_audio_worker if kind == "fix_audio" else _convert_worker
         threading.Thread(
             target=_run_convert_job_wrapper,
-            args=(target, jid, vid),
+            args=(target, jid, vid, root),
             daemon=True,
             name=f"convert-{kind}-{vid[:8]}",
         ).start()
 
 
-def _run_convert_job_wrapper(worker, job_id: str, vid: str) -> None:
+def _run_convert_job_wrapper(worker, job_id: str, vid: str, root: str | None) -> None:
     try:
-        worker(job_id, vid)
+        worker(job_id, vid, root)
     finally:
         pump_convert_queue()
 
@@ -266,20 +294,10 @@ def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> di
         item["audio_hard"] = False
         item["probe_ver"] = PROBE_META_VER
 
-    # 写回该根的索引（disk_libs / 若是当前单根则 STATE）
+    # 写回所属根的索引，不能把统一片库写入单盘。
     root_s = str(Path(root).resolve())
-    libs = STATE.setdefault("disk_libs", {})
-    lib = libs.get(root_s) or {"root": root_s, "cache_dir": str(cache) if cache else None, "by_id": {}, "updated": time.time()}
-    by_id = dict(lib.get("by_id") or {})
-    by_id[vid] = item
-    lib["by_id"] = by_id
-    lib["updated"] = time.time()
-    libs[root_s] = lib
-    if cache:
-        try:
-            save_index(Path(cache), Path(root), list(by_id.values()))
-        except Exception as e:
-            log(f"[转MP4] 保存索引失败: {e}")
+    if not save_library_item(item, allow_insert=True):
+        raise OSError(f"无法保存转换结果索引: {root_s}")
 
     # 刷新统一片库视图
     try:
@@ -300,8 +318,7 @@ def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> di
             STATE["videos"] = videos
             STATE["tree"] = build_tree(Path(root), videos)
             rebuild_indexes(videos)
-            if cache:
-                save_index(cache, Path(root), videos)
+            save_root_library(root_s, videos)
     except Exception as e:
         log(f"[转MP4] 刷新片库失败: {e}")
 
@@ -524,10 +541,10 @@ def _convert_mp4_base_name(item: dict) -> str:
     return item.get("name") or Path(item.get("filename") or "video").stem
 
 
-def _convert_worker(job_id: str, vid: str) -> None:
+def _convert_worker(job_id: str, vid: str, root: str | None = None) -> None:
     tmp_path: Path | None = None
     try:
-        item = find_video_by_id(vid)
+        item = find_video_by_id(vid, prefer_root=root)
         if not item:
             _convert_job_update(job_id, status="error", msg="未找到视频", percent=0)
             return
@@ -602,9 +619,9 @@ def _convert_worker(job_id: str, vid: str) -> None:
                 pass
 
 
-def _fix_audio_worker(job_id: str, vid: str) -> None:
+def _fix_audio_worker(job_id: str, vid: str, root: str | None = None) -> None:
     try:
-        item = find_video_by_id(vid)
+        item = find_video_by_id(vid, prefer_root=root)
         if not item:
             _convert_job_update(job_id, status="error", msg="未找到视频", percent=0)
             return

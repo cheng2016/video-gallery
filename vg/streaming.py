@@ -12,7 +12,12 @@ from flask import Response, abort, request, send_file
 
 from vg.segments import _normalize_playlist_rel
 
-def rewrite_m3u8_for_proxy(text: str, playlist_rel: str, vid: str) -> str:
+def rewrite_m3u8_for_proxy(
+    text: str,
+    playlist_rel: str,
+    vid: str,
+    root: str | None = None,
+) -> str:
     """把 m3u8 里的相对分片改写到本服务 /hls/<vid>/file?rel=..."""
     from urllib.parse import quote
 
@@ -29,7 +34,8 @@ def rewrite_m3u8_for_proxy(text: str, playlist_rel: str, vid: str) -> str:
             lines.append(line)
             continue
         seg_rel = _normalize_playlist_rel(base_dir, raw)
-        lines.append(f"/hls/{vid}/file?rel={quote(seg_rel, safe='')}")
+        root_q = f"&root={quote(root, safe='')}" if root else ""
+        lines.append(f"/hls/{vid}/file?rel={quote(seg_rel, safe='')}{root_q}")
     return "\n".join(lines) + "\n"
 
 def _stream_file(path: Path, mime: str | None = None):

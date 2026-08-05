@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from vg.cache import ensure_cache_dir
+from vg.cache import ensure_cache_dir, save_index
 from vg.config import INDEX_NAME, VGDATA_DIR
 from vg.state import STATE
 from vg.util import log
@@ -15,6 +15,20 @@ from vg.util import log
 _MAX_DISK_LIBS = 12
 _libs_lock = threading.RLock()
 _scanned_caches = False
+
+_RUNTIME_INDEX_FIELDS = {
+    "_q",
+    "_thumb_id",
+    "_lib_label",
+    "dup",
+    "dup_n",
+    "dup_reason",
+    "series_id",
+    "series_title",
+    "series_n",
+    "cover_id",
+    "is_series",
+}
 
 
 def _root_key(root: Path | str) -> str:
@@ -55,6 +69,155 @@ def stamp_lib_meta(
             v["_lib_cache"] = cache_s
 
 
+def _disk_item(item: dict, root_s: str, cache: Path) -> dict:
+    """Return a canonical per-disk record from a possibly merged runtime item."""
+    out = {k: val for k, val in item.items() if k not in _RUNTIME_INDEX_FIELDS}
+    # A merged id may be remapped to avoid a collision with another disk. The
+    # original id remains the thumbnail/source id and is what belongs on disk.
+    source_id = (item.get("_thumb_id") or item.get("id") or "").strip()
+    if source_id:
+        out["id"] = source_id
+    out["_lib_root"] = root_s
+    out["_lib_cache"] = str(cache)
+    out["root"] = root_s
+    if "_folder_raw" not in out:
+        out["_folder_raw"] = (out.get("folder") or "").replace("\\", "/").strip("/")
+    return out
+
+
+def item_belongs_to_root(item: dict, root: Path | str) -> bool:
+    """Legacy untagged items are accepted; explicitly foreign items are not."""
+    tagged = (item.get("_lib_root") or item.get("root") or "").strip()
+    if not tagged:
+        return True
+    try:
+        return _norm_root_str(tagged).lower() == _norm_root_str(root).lower()
+    except Exception:
+        return tagged.lower() == str(root).strip().lower()
+
+
+def read_root_library(root: Path | str) -> list[dict] | None:
+    """Read one complete per-disk index, or None when no valid index exists."""
+    root_s = _norm_root_str(root)
+    cache = ensure_cache_dir(Path(root_s))
+    index_path = cache / INDEX_NAME
+    if not index_path.is_file():
+        return None
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"[索引] 读取失败 {index_path}: {e}")
+        return None
+    videos = payload.get("videos")
+    if not isinstance(videos, list):
+        return None
+    return [
+        _disk_item(v, root_s, cache)
+        for v in videos
+        if isinstance(v, dict) and v.get("id") and item_belongs_to_root(v, root_s)
+    ]
+
+
+def save_root_library(root: Path | str, videos: list[dict]) -> list[dict]:
+    """Persist exactly one root's catalog and refresh its in-memory archive.
+
+    Foreign-root records are rejected so a unified STATE catalog can never be
+    written wholesale into one disk's index.
+    """
+    root_s = _norm_root_str(root)
+    cache = ensure_cache_dir(Path(root_s))
+    clean: list[dict] = []
+    for item in videos:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        tagged = (item.get("_lib_root") or item.get("root") or "").strip()
+        if tagged:
+            if not item_belongs_to_root(item, root_s):
+                continue
+        else:
+            # Untagged records are only safe when the caller explicitly passes
+            # a single-root list; stamp them to that root here.
+            item["_lib_root"] = root_s
+            item["root"] = root_s
+        clean.append(_disk_item(item, root_s, cache))
+
+    by_id = {v["id"]: v for v in clean if v.get("id")}
+    with _libs_lock:
+        if not save_index(cache, Path(root_s), list(by_id.values())):
+            raise OSError(f"保存片库索引失败: {cache / INDEX_NAME}")
+        _store_lib(root_s, cache, by_id)
+    return list(by_id.values())
+
+
+def save_libraries_by_root(
+    videos: list[dict],
+    *,
+    fallback_root: Path | str | None = None,
+) -> dict[str, int]:
+    """Split a runtime catalog by ownership and persist each disk separately."""
+    fallback = _norm_root_str(fallback_root) if fallback_root else ""
+    groups: dict[str, list[dict]] = {}
+    for item in videos:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        raw = (item.get("_lib_root") or item.get("root") or fallback or "").strip()
+        if not raw:
+            log(f"[索引] 跳过无磁盘归属条目: {item.get('rel') or item.get('id')}")
+            continue
+        try:
+            root_s = _norm_root_str(raw)
+        except Exception:
+            root_s = raw
+        groups.setdefault(root_s, []).append(item)
+
+    saved: dict[str, int] = {}
+    for root_s, items in groups.items():
+        saved[root_s] = len(save_root_library(root_s, items))
+    return saved
+
+
+def save_library_item(item: dict, *, allow_insert: bool = False) -> bool:
+    """Persist one changed item without touching other disks.
+
+    Existing records are updated by source id or relative path. Insertion is
+    opt-in so a late metadata/thumbnail worker cannot resurrect an item that
+    was deleted while that worker was running.
+    """
+    raw_root = (item.get("_lib_root") or item.get("root") or "").strip()
+    if not raw_root or not item.get("id"):
+        return False
+    root_s = _norm_root_str(raw_root)
+    cache = ensure_cache_dir(Path(root_s))
+    with _libs_lock:
+        current: list[dict] = []
+        index_path = cache / INDEX_NAME
+        try:
+            if index_path.is_file():
+                payload = json.loads(index_path.read_text(encoding="utf-8"))
+                if isinstance(payload.get("videos"), list):
+                    current = [v for v in payload["videos"] if isinstance(v, dict)]
+        except (OSError, json.JSONDecodeError) as e:
+            log(f"[索引] 读取旧索引失败，未覆盖 {root_s}: {e}")
+            return False
+
+        source_id = (item.get("_thumb_id") or item.get("id") or "").strip()
+        rel = (item.get("rel") or "").replace("\\", "/").strip("/").casefold()
+        replaced = False
+        for i, old in enumerate(current):
+            old_rel = (old.get("rel") or "").replace("\\", "/").strip("/").casefold()
+            if old.get("id") == source_id or (rel and old_rel == rel):
+                current[i] = item
+                replaced = True
+                break
+        if not replaced and allow_insert:
+            current.append(item)
+            replaced = True
+        if not replaced:
+            return False
+        save_root_library(root_s, current)
+    return True
+
+
 def archive_current_library() -> None:
     """Snapshot active library before switching disks.
 
@@ -71,6 +234,11 @@ def archive_current_library() -> None:
     fallback_cache = STATE.get("cache_dir")
     groups: dict[str, dict[str, dict]] = {}
     cache_by_root: dict[str, Path | str | None] = {}
+    tagged_roots = {
+        _norm_root_str(v.get("_lib_root"))
+        for v in videos
+        if (v.get("_lib_root") or "").strip()
+    }
 
     for v in videos:
         if not v.get("id"):
@@ -82,10 +250,16 @@ def archive_current_library() -> None:
             except Exception:
                 pass
         else:
+            if len(tagged_roots) > 1 or (
+                tagged_roots and fallback_root and fallback_root not in tagged_roots
+            ):
+                log(f"[跨盘] 跳过无归属条目: {v.get('rel') or v.get('id')}")
+                continue
             root_s = fallback_root
         if not root_s:
             continue
-        groups.setdefault(root_s, {})[v["id"]] = v
+        source_id = v.get("_thumb_id") or v["id"]
+        groups.setdefault(root_s, {})[source_id] = v
         if root_s not in cache_by_root:
             cache_by_root[root_s] = v.get("_lib_cache") or (
                 fallback_cache if root_s == fallback_root else None
@@ -123,8 +297,19 @@ def archive_current_library() -> None:
                 libs.pop(k, None)
 
 
-def _store_lib(root_s: str, cache: Path | None, by_id: dict[str, dict]) -> None:
+def _store_lib(
+    root_s: str,
+    cache: Path | None,
+    by_id: dict[str, dict],
+    *,
+    index_mtime: float | None = None,
+) -> None:
     stamp_lib_meta(list(by_id.values()), root=root_s, cache=cache)
+    if index_mtime is None and cache:
+        try:
+            index_mtime = (Path(cache) / INDEX_NAME).stat().st_mtime
+        except OSError:
+            index_mtime = 0
     with _libs_lock:
         libs = STATE.setdefault("disk_libs", {})
         libs[root_s] = {
@@ -132,6 +317,7 @@ def _store_lib(root_s: str, cache: Path | None, by_id: dict[str, dict]) -> None:
             "cache_dir": str(cache) if cache else None,
             "by_id": by_id,
             "updated": time.time(),
+            "index_mtime": float(index_mtime or 0),
         }
 
 
@@ -144,13 +330,13 @@ def load_library_from_index(root: Path | str) -> bool:
     if not root_p.is_dir():
         return False
     root_s = str(root_p)
-    with _libs_lock:
-        existing = (STATE.get("disk_libs") or {}).get(root_s)
-        if existing and existing.get("by_id"):
-            return True
     # already the active root
     cur = STATE.get("root")
-    if cur and _norm_root_str(cur) == root_s and (STATE.get("by_id") or STATE.get("videos")):
+    if (
+        cur
+        and _norm_root_str(cur).lower() == root_s.lower()
+        and (STATE.get("by_id") or STATE.get("videos"))
+    ):
         archive_current_library()
         return True
 
@@ -159,6 +345,18 @@ def load_library_from_index(root: Path | str) -> bool:
     if not index_path.is_file():
         return False
     try:
+        index_mtime = index_path.stat().st_mtime
+    except OSError:
+        index_mtime = 0
+    with _libs_lock:
+        existing = (STATE.get("disk_libs") or {}).get(root_s)
+        if (
+            existing
+            and existing.get("by_id")
+            and float(existing.get("index_mtime") or 0) == index_mtime
+        ):
+            return True
+    try:
         data = json.loads(index_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         log(f"[跨盘] 读索引失败 {index_path}: {e}")
@@ -166,11 +364,27 @@ def load_library_from_index(root: Path | str) -> bool:
     videos = data.get("videos")
     if not isinstance(videos, list):
         return False
-    # root in index may differ slightly; prefer actual path
-    by_id = {v["id"]: v for v in videos if isinstance(v, dict) and v.get("id")}
+    # Normalize legacy records on every load; actual mounted path is canonical.
+    clean = []
+    for raw in videos:
+        if not isinstance(raw, dict) or not raw.get("id"):
+            continue
+        if not item_belongs_to_root(raw, root_s):
+            log(f"[跨盘] 忽略索引中的外盘条目: {raw.get('rel') or raw.get('id')}")
+            continue
+        clean.append(_disk_item(raw, root_s, cache))
+    by_id = {v["id"]: v for v in clean}
     if not by_id:
         return False
-    _store_lib(root_s, cache, by_id)
+    try:
+        final_mtime = index_path.stat().st_mtime
+    except OSError:
+        final_mtime = index_mtime
+    if final_mtime != index_mtime:
+        # Atomic writer replaced the file while it was being read. Do not tag
+        # the old content with the new mtime; the next lookup will reload it.
+        return False
+    _store_lib(root_s, cache, by_id, index_mtime=final_mtime)
     log(f"[跨盘] 已加载历史盘索引: {root_s}（{len(by_id)} 部）")
     return True
 
@@ -227,9 +441,9 @@ def find_in_disk_libs(vid: str, prefer_root: str | None = None) -> dict | None:
                 hit = (lib.get("by_id") or {}).get(vid)
                 if hit is not None:
                     return hit
+            # A root hint is an ownership constraint, not just ordering.
+            return None
         for key, lib in libs.items():
-            if prefer and key == prefer:
-                continue
             hit = (lib.get("by_id") or {}).get(vid)
             if hit is not None:
                 return hit
@@ -244,12 +458,10 @@ def cache_dir_for_item(item: dict | None) -> Path | None:
         p = Path(raw)
         if p.is_dir():
             return p
-    root = (item.get("_lib_root") or "").strip()
+    root = (item.get("_lib_root") or item.get("root") or "").strip()
     if root:
         try:
-            rp = Path(root)
-            if rp.is_dir():
-                return ensure_cache_dir(rp)
+            return ensure_cache_dir(Path(root))
         except OSError:
             pass
     cache = STATE.get("cache_dir")
@@ -262,8 +474,10 @@ def root_for_item(item: dict | None) -> Path | None:
     raw = (item.get("_lib_root") or "").strip()
     if raw:
         try:
-            p = Path(raw)
-            return p if p.is_dir() else None
+            # Keep ownership even while a removable disk is offline. Returning
+            # None would make callers fall back to the active disk and resolve
+            # the same relative path against the wrong library.
+            return Path(raw)
         except OSError:
             return None
     root = STATE.get("root")

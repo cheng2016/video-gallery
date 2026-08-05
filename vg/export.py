@@ -20,13 +20,27 @@ from vg.cache import (
     thumb_file_ready,
 )
 from vg.config import APP_DIR, BROWSER_HARD_EXTS, STATIC_EXPORT_DIRNAME
+from vg.disk_libs import cache_dir_for_item, item_belongs_to_root, root_for_item
 from vg.drives import save_prefs
 from vg.genres import ensure_video_genres
+from vg.search import ensure_video_actors
 from vg.state import STATE
 from vg.util import _hide_path_windows, log, video_id
 
 def _rel_between(from_dir: Path, to_path: Path) -> str:
-    return Path(os.path.relpath(str(to_path), str(from_dir))).as_posix()
+    """Relative path for same-drive files; empty string when mounts differ."""
+    try:
+        return Path(os.path.relpath(str(to_path), str(from_dir))).as_posix()
+    except ValueError:
+        # Windows: cannot relativize across drives (C: vs D:)
+        return ""
+
+
+def _same_export_root(item: dict, root: Path) -> bool:
+    tagged = (item.get("_lib_root") or item.get("root") or "").strip()
+    if not tagged:
+        return True
+    return item_belongs_to_root(item, root)
 
 
 def _ensure_hls_js(dest: Path) -> bool:
@@ -134,9 +148,26 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
     root = Path(root or STATE.get("root") or "")
     if not root.is_dir():
         return False, "请先打开/扫描一个盘", ""
-    videos = list(videos if videos is not None else (STATE.get("videos") or []))
+    try:
+        root = root.resolve()
+    except OSError:
+        pass
+    all_videos = list(videos if videos is not None else (STATE.get("videos") or []))
+    # 静态站落在当前盘根目录，只能导出本盘影片；跨盘无法生成相对路径
+    videos = [v for v in all_videos if _same_export_root(v, root)]
+    skipped = len(all_videos) - len(videos)
     if not videos:
-        return False, "当前没有可导出的视频，请先扫描", ""
+        # 多盘合并态：若 STATE 缺本盘标记，按盘索引再取一次
+        try:
+            from vg.roots import videos_for_scope
+
+            videos = list(videos_for_scope(str(root)))
+            skipped = max(0, len(all_videos) - len(videos))
+        except Exception:
+            pass
+    if not videos:
+        tip = "（其它盘的片请切到该盘后再导出）" if skipped else ""
+        return False, f"当前盘没有可导出的视频{tip}", ""
 
     cleanup_legacy_disk_cache(root)
 
@@ -183,19 +214,23 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
     thumb_ok = thumb_fail = 0
     for i, v in enumerate(videos, 1):
         vid = v.get("id") or video_id(v.get("rel") or str(i))
+        thumb_id = v.get("_thumb_id") or vid
+        item_root = root_for_item(v) or root
+        item_cache = cache_dir_for_item(v) or cache
         rel = (v.get("rel") or "").replace("\\", "/")
         folder = (v.get("folder") or "").strip("/")
         category = folder.split("/")[0] if folder else ""
         kind = v.get("kind") or ""
         abs_path = None
         if kind == "ts_set" and v.get("segments"):
-            abs_path = root / v["segments"][0]
+            abs_path = item_root / v["segments"][0]
         else:
-            abs_path = root / rel if rel else None
+            abs_path = item_root / rel if rel else None
 
         src_rel = ""
         file_url = ""
         path_str = ""
+        note = ""
         if abs_path and abs_path.is_file():
             src_rel = _rel_between(export_dir, abs_path)
             try:
@@ -203,12 +238,14 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
             except OSError:
                 file_url = ""
             path_str = str(abs_path)
+            if not src_rel:
+                note = "跨盘文件，请用「打开文件」/系统播放器"
 
         # 预览图：只拷贝已有缓存图，改个看不出的文件名（不做重加密，避免导出卡死）
         thumb_rel = ""
         raw = None
-        if cache and thumb_file_ready(cache, vid):
-            raw = read_thumb_jpeg(cache, vid)
+        if item_cache and thumb_file_ready(item_cache, thumb_id):
+            raw = read_thumb_jpeg(item_cache, thumb_id)
         if raw:
             try:
                 fname = obscure_thumb_name(vid)
@@ -221,12 +258,16 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
             thumb_fail += 1
 
         playlist = None
-        note = ""
         if kind in ("ts_set", "m3u8") or (v.get("ext") or "").lower() == ".m3u8":
-            playlist = _export_playlist_files(export_dir, root, v)
-            note = "HLS/分片，建议 Firefox 或系统播放器"
+            playlist = _export_playlist_files(export_dir, item_root, v)
+            note = note or "HLS/分片，建议 Firefox 或系统播放器"
         elif (v.get("ext") or "").lower() in BROWSER_HARD_EXTS:
-            note = "浏览器可能无法内嵌播放，请用「打开文件」"
+            note = note or "浏览器可能无法内嵌播放，请用「打开文件」"
+
+        ensure_video_actors(v)
+        from vg.scan import _video_search_text
+        v.pop("_q", None)
+        search_q = _video_search_text(v)
 
         exported.append({
             "id": vid,
@@ -242,6 +283,8 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
             "duration": v.get("duration"),
             "duration_h": v.get("duration_h") or "",
             "genres": ensure_video_genres(v),
+            "actors": list(v.get("actors") or []),
+            "search_q": search_q,
             "seg_count": int(v.get("seg_count") or 0),
             "dup": bool(v.get("dup")),
             "dup_n": int(v.get("dup_n") or 0),
@@ -346,10 +389,12 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
     )
 
     save_prefs(last_static_export=str(export_dir))
+    skip_tip = f"\n（已跳过其它盘 {skipped} 个，可切换到对应盘再导出）" if skipped else ""
     msg = (
         f"已导出 {len(exported)} 个到：\n{export_dir}\n"
         f"预览图成功 {thumb_ok}，缺图 {thumb_fail}。\n"
         "双击该目录下「打开图库.bat」即可离线浏览。"
+        f"{skip_tip}"
     )
-    log(f"[静态导出] 完成：{export_dir}")
-
+    log(f"[静态导出] 完成：{export_dir}（{len(exported)} 个，跳过外盘 {skipped}）")
+    return True, msg, str(export_dir)

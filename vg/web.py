@@ -13,7 +13,9 @@ import subprocess
 import sys
 import threading
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from flask import Flask, Response, abort, jsonify, render_template, request, send_file
@@ -31,7 +33,6 @@ from vg.cache import (
     attach_thumb_meta,
     ensure_cache_dir,
     read_thumb_jpeg,
-    save_index,
     thumb_cache_invalidate,
     thumb_path,
     thumb_version,
@@ -41,6 +42,7 @@ from vg.config import (
     BROWSER_FRIENDLY_EXTS,
     BROWSER_HARD_EXTS,
     GENRE_DEFS,
+    MIN_VIDEO_FILE_BYTES,
     PROBE_META_VER,
     STATIC_EXPORT_DIRNAME,
 )
@@ -55,7 +57,10 @@ from vg.disk_libs import (
     cache_dir_for_item,
     ensure_library,
     offline_roots,
+    read_root_library,
     resolve_item_rel,
+    save_library_item,
+    save_root_library,
 )
 from vg.drives import list_drives_info, list_lan_ipv4, load_prefs, save_prefs
 from vg.export import export_static_site
@@ -79,6 +84,7 @@ from vg.roots import (
     set_mounted_roots,
     thumb_id_for_item,
     tree_for_scope,
+    videos_for_scope,
 )
 from vg.scan import (
     _video_category,
@@ -88,6 +94,7 @@ from vg.scan import (
     rebuild_indexes,
     start_scan,
 )
+from vg.search import parse_search_query, video_matches_query
 from vg.series import collapse_to_series_cards, series_episodes
 from vg.state import STATE, _convert_lock
 from vg.streaming import _stream_file, rewrite_m3u8_for_proxy
@@ -101,6 +108,19 @@ from vg.util import (
 )
 
 app = Flask(__name__, template_folder=str(APP_DIR / "templates"))
+_delete_lock = threading.RLock()
+
+
+def _serialized(lock: threading.RLock):
+    def decorate(func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            with lock:
+                return func(*args, **kwargs)
+
+        return wrapped
+
+    return decorate
 
 
 def _client_ip() -> str:
@@ -163,7 +183,7 @@ def api_tree():
     root = STATE["root"]
     lib = (request.args.get("lib") or "").strip()
     all_videos = STATE["videos"] or []
-    videos = filter_videos_by_lib(all_videos, lib) if lib else list(all_videos)
+    videos = videos_for_scope(lib or None)
     tree = tree_for_scope(lib or None)
 
     # 按当前范围重算侧面（多根「全部」或选中某一根）
@@ -333,13 +353,18 @@ def api_videos_by_ids():
                     miss["offline"] = True
             missing.append(miss)
             continue
-        row = {k: v[k] for k in v if k not in ("segments", "_q", "_lib_root", "_lib_cache")}
+        enriched = dict(v)
+        attach_thumb_meta(enriched)
+        row = {
+            k: enriched[k]
+            for k in enriched
+            if k not in ("segments", "_q", "_lib_root", "_lib_cache", "_thumb_id")
+        }
         # 给前端存盘符用
         if v.get("_lib_root"):
             row["root"] = v["_lib_root"]
         elif STATE.get("root"):
             row["root"] = str(STATE["root"])
-        attach_thumb_meta(row)
         out.append(row)
     return jsonify({
         "ok": True,
@@ -458,12 +483,21 @@ def api_videos():
     folder = request.args.get("folder", "").strip().strip("/")
     category = request.args.get("category", "").strip().strip("/")
     genre = request.args.get("genre", "").strip()
-    q = request.args.get("q", "").strip().lower()
-    ext = request.args.get("ext", "").strip().lower()
+    q_raw = request.args.get("q", "").strip()
+    parsed = parse_search_query(q_raw)
+    # 搜索语法里的 field 覆盖独立筛选项
+    if parsed.get("ext"):
+        ext = parsed["ext"]
+    else:
+        ext = request.args.get("ext", "").strip().lower()
+    if parsed.get("genre") and not genre:
+        genre = parsed["genre"]
+    if parsed.get("category") and not category:
+        category = parsed["category"]
     sort = request.args.get("sort", "mtime_desc").strip().lower()
     lib = (request.args.get("lib") or "").strip()
 
-    videos = filter_videos_by_lib(STATE.get("videos") or [], lib)
+    videos = videos_for_scope(lib or None)
 
     # 频道：在当前 lib 范围内按一级目录
     if category == "__root__":
@@ -473,13 +507,16 @@ def api_videos():
 
     # 多层子类用「频道内全部片」统计各层兄弟项
     cat_videos = videos
-    if ext or q:
+    if ext or q_raw:
         cat_videos = list(videos)
         if ext:
             ext_n = ext if ext.startswith(".") else "." + ext
             cat_videos = [v for v in cat_videos if (v.get("ext") or "").lower() == ext_n]
-        if q:
-            cat_videos = [v for v in cat_videos if q in _video_search_text(v)]
+        if q_raw:
+            cat_videos = [
+                v for v in cat_videos
+                if video_matches_query(v, parsed, _video_search_text)
+            ]
 
     subfolder_levels = _subfolder_levels(cat_videos, category, folder)
 
@@ -502,8 +539,8 @@ def api_videos():
         if not ext.startswith("."):
             ext = "." + ext
         videos = [v for v in videos if (v.get("ext") or "").lower() == ext]
-    if q:
-        videos = [v for v in videos if q in _video_search_text(v)]
+    if q_raw:
+        videos = [v for v in videos if video_matches_query(v, parsed, _video_search_text)]
 
     scoped_genres = _genre_facets(videos)
     scoped_subs = _subfolder_facets(videos, category, folder)
@@ -511,6 +548,7 @@ def api_videos():
     if genre:
         videos = [v for v in videos if genre in ensure_video_genres(v)]
 
+    raw_count = len(videos)
     view = (request.args.get("view") or "series").strip().lower()
     if view == "series":
         videos = collapse_to_series_cards(videos)
@@ -557,12 +595,15 @@ def api_videos():
             row = {k: v[k] for k in v if k not in ("_q", "_lib_root", "_lib_cache", "_folder_raw", "_thumb_id")}
             cover_id = v.get("cover_id") or ""
             if cover_id:
-                cover = find_video_by_id(cover_id)
+                cover = find_video_by_id(
+                    cover_id,
+                    prefer_root=v.get("_lib_root") or v.get("root") or None,
+                )
                 if cover:
                     attach_thumb_meta(cover)
                     row["has_thumb"] = cover.get("has_thumb")
                     row["thumb_v"] = cover.get("thumb_v")
-                    row["thumb_id"] = cover_id
+                    row["thumb_id"] = cover.get("thumb_id") or thumb_id_for_item(cover) or cover_id
             # 剧集来源盘
             eps = v.get("episodes") or []
             if eps and eps[0].get("lib_label"):
@@ -571,19 +612,24 @@ def api_videos():
                 row["lib_label"] = eps[0].get("_lib_label")
             slim.append(row)
             continue
-        row = {k: v[k] for k in v if k not in ("segments", "_q", "_lib_root", "_lib_cache", "_folder_raw", "_thumb_id")} if (
-            v.get("kind") == "ts_set" and v.get("segments")
-        ) else {k: v[k] for k in v if k not in ("_q", "_lib_root", "_lib_cache", "_folder_raw", "_thumb_id")}
+        enriched = dict(v)
+        attach_thumb_meta(enriched)
+        excluded = {"_q", "_lib_root", "_lib_cache", "_folder_raw", "_thumb_id"}
+        if v.get("kind") == "ts_set" and v.get("segments"):
+            excluded.add("segments")
+        row = {k: enriched[k] for k in enriched if k not in excluded}
         if v.get("_lib_root") and not row.get("root"):
             row["root"] = v["_lib_root"]
         if v.get("_lib_label") and not row.get("lib_label"):
             row["lib_label"] = v["_lib_label"]
-        attach_thumb_meta(row)
+        if v.get("actors"):
+            row["actors"] = list(v["actors"])
         slim.append(row)
 
     return jsonify({
         "videos": slim,
         "count": total,
+        "raw_count": raw_count,
         "offset": offset,
         "limit": limit,
         "has_more": offset + len(slim) < total,
@@ -717,6 +763,10 @@ def thumb(vid: str):
                 if raw:
                     item["has_thumb"] = True
                     item["thumb_v"] = thumb_version(cache, file_id)
+                    try:
+                        save_library_item(item)
+                    except Exception as e:
+                        log(f"[预览图] 单条索引保存失败: {e}")
                     return Response(
                         raw,
                         mimetype="image/jpeg",
@@ -751,7 +801,8 @@ def playlist_m3u8(vid: str):
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             abort(404)
-        body = rewrite_m3u8_for_proxy(text, item["rel"], vid)
+        item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
+        body = rewrite_m3u8_for_proxy(text, item["rel"], vid, item_root or None)
         return Response(
             body,
             mimetype="application/vnd.apple.mpegurl",
@@ -770,9 +821,11 @@ def playlist_m3u8(vid: str):
         "#EXT-X-MEDIA-SEQUENCE:0",
         "#EXT-X-PLAYLIST-TYPE:VOD",
     ]
+    item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
+    root_q = f"?root={quote(item_root, safe='')}" if item_root else ""
     for i in range(len(segments)):
         lines.append("#EXTINF:10.0,")
-        lines.append(f"/stream/{vid}/seg/{i}")
+        lines.append(f"/stream/{vid}/seg/{i}{root_q}")
     lines.append("#EXT-X-ENDLIST")
     return Response(
         "\n".join(lines) + "\n",
@@ -808,7 +861,8 @@ def hls_proxy_file(vid: str):
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             abort(404)
-        body = rewrite_m3u8_for_proxy(text, rel, vid)
+        item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
+        body = rewrite_m3u8_for_proxy(text, rel, vid, item_root or None)
         return Response(
             body,
             mimetype="application/vnd.apple.mpegurl",
@@ -864,17 +918,25 @@ def api_info(vid: str):
             or (not item.get("duration") and not item.get("bad"))
         )
     )
+    metadata_changed = False
     if need_probe:
         path = _item_probe_path(item)
         if path and path.is_file() and path.suffix.lower() != ".m3u8":
             info = probe_media_info(STATE["ffmpeg"], path)
             _apply_probe_to_item(item, info)
+            metadata_changed = True
         elif not path or not path.is_file():
             kind = item.get("kind") or ""
             if kind not in ("m3u8", "ts_set") and (item.get("ext") or "").lower() != ".m3u8":
                 item["probe_ver"] = PROBE_META_VER
                 item["bad"] = True
                 item["bad_reason"] = "文件不存在"
+                metadata_changed = True
+    if metadata_changed:
+        try:
+            save_library_item(item)
+        except Exception as e:
+            log(f"[元数据] 单条索引保存失败: {e}")
     payload = {k: v for k, v in item.items() if k not in ("_q", "segments", "_lib_root", "_lib_cache")}
     # 本地路径（供复制 / 系统播放器）
     local = _local_path_for_item(item)
@@ -907,10 +969,13 @@ def _local_path_for_item(item: dict) -> Path | None:
 @app.route("/api/local/<vid>", methods=["POST"])
 def api_local(vid: str):
     """本机操作：open=系统播放器打开，reveal=资源管理器定位，path=仅返回路径。"""
-    item = find_video_by_id(vid)
+    data = request.get_json(silent=True) or {}
+    prefer_root = (
+        request.args.get("root") or data.get("root") or ""
+    ).strip() or None
+    item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
         return jsonify({"ok": False, "msg": "未找到视频"}), 404
-    data = request.get_json(silent=True) or {}
     action = (data.get("action") or "path").strip().lower()
     path = _local_path_for_item(item)
     if not path:
@@ -953,7 +1018,7 @@ def api_series(sid: str):
     """合集分集列表。"""
     if not re.fullmatch(r"s[a-f0-9]{15}", sid or ""):
         return jsonify({"ok": False, "msg": "无效合集 id"}), 400
-    items = series_episodes(STATE.get("videos") or [], sid)
+    items = series_episodes(videos_for_scope(None), sid)
     if not items:
         return jsonify({"ok": False, "msg": "未找到合集"}), 404
     slim = []
@@ -975,12 +1040,19 @@ def api_series(sid: str):
 def api_cleanup():
     """重复 / 损坏列表。?type=dup|bad"""
     kind = (request.args.get("type") or "dup").strip().lower()
-    videos = STATE.get("videos") or []
+    # 与浏览一致：多盘时用合并片库，并当场重算重复标记
+    videos = list(videos_for_scope(None))
+    if kind != "bad":
+        from vg.scan import mark_duplicates
+        mark_duplicates(videos)
 
     def _row(v: dict, extra: dict | None = None) -> dict:
+        enriched = dict(v)
+        attach_thumb_meta(enriched)
         row = {
             "id": v.get("id"),
             "name": v.get("name"),
+            "rel": v.get("rel") or "",
             "path": str(_local_path_for_item(v) or ""),
             "size": int(v.get("size") or 0),
             "size_h": v.get("size_h") or "",
@@ -989,10 +1061,14 @@ def api_cleanup():
             "mtime_h": v.get("mtime_h") or "",
             "ext": v.get("ext") or "",
             "kind": v.get("kind") or "",
+            "root": v.get("root") or v.get("_lib_root") or "",
+            "lib_label": v.get("lib_label") or v.get("_lib_label") or "",
+            "has_thumb": bool(enriched.get("has_thumb")),
+            "thumb_v": int(enriched.get("thumb_v") or 0),
+            "thumb_id": enriched.get("thumb_id") or v.get("_thumb_id") or v.get("id"),
         }
         if extra:
             row.update(extra)
-        attach_thumb_meta(row)
         return row
 
     if kind == "bad":
@@ -1003,43 +1079,66 @@ def api_cleanup():
             rows.append(_row(v, {"reason": v.get("bad_reason") or "无法读取"}))
         return jsonify({"ok": True, "type": "bad", "groups": [{"reason": "损坏", "items": rows}], "count": len(rows)})
 
-    # dup groups by name_key / size
+    # 直接按同名 / 同体积分组（不依赖可能过期的 dup 标记）
+    from vg.scan import duplicate_name_key
+
     by_name: dict[str, list] = {}
     by_size: dict[int, list] = {}
     for v in videos:
-        if not v.get("dup"):
+        if (v.get("kind") or "") in ("m3u8", "ts_set", "series"):
             continue
-        if (v.get("kind") or "") in ("m3u8", "ts_set"):
-            continue
-        nk = (v.get("name") or "").strip().casefold()
-        if nk and "同名" in str(v.get("dup_reason") or ""):
+        nk = duplicate_name_key(v)
+        if nk:
             by_name.setdefault(nk, []).append(v)
         sz = int(v.get("size") or 0)
-        if sz and "同体积" in str(v.get("dup_reason") or ""):
+        if sz >= 1:
             by_size.setdefault(sz, []).append(v)
 
     groups = []
-    seen_ids: set[str] = set()
+    seen_keys: set[str] = set()
+
+    def _uniq_path(v: dict) -> str:
+        root = (v.get("_lib_root") or v.get("root") or "").strip().lower()
+        rel = (v.get("rel") or "").replace("\\", "/").strip("/").lower()
+        return f"{root}|{rel}|{v.get('id') or ''}"
 
     def _pack(label: str, items: list) -> None:
+        # 去重视频 id，至少 2 个不同文件
+        uniq: dict[str, dict] = {}
+        for x in items:
+            uniq[_uniq_path(x)] = x
+        items = list(uniq.values())
         if len(items) < 2:
             return
         ids = tuple(sorted(x.get("id") or "" for x in items))
         key = label + "|" + ",".join(ids)
-        if key in seen_ids:
+        if key in seen_keys:
             return
-        seen_ids.add(key)
+        seen_keys.add(key)
         groups.append({
             "reason": label,
             "items": [_row(x) for x in items],
         })
 
     for items in by_name.values():
-        _pack("同名", items)
-    for items in by_size.values():
-        _pack("同体积", items)
+        if len(items) >= 2:
+            _pack("同名", items)
+    for sz, items in by_size.items():
+        if sz < MIN_VIDEO_FILE_BYTES:
+            continue
+        # 不同盘即使 rel 相同也算不同文件
+        paths = {_uniq_path(g) for g in items}
+        if len(paths) >= 2:
+            _pack("同体积", items)
 
-    return jsonify({"ok": True, "type": "dup", "groups": groups, "count": sum(len(g["items"]) for g in groups)})
+    # 只保留真正有条目的组
+    groups = [g for g in groups if (g.get("items") or [])]
+    return jsonify({
+        "ok": True,
+        "type": "dup",
+        "groups": groups,
+        "count": sum(len(g["items"]) for g in groups),
+    })
 
 
 def _paths_for_delete(item: dict) -> list[Path]:
@@ -1057,37 +1156,104 @@ def _paths_for_delete(item: dict) -> list[Path]:
 
 
 @app.route("/api/delete", methods=["POST"])
+@_serialized(_delete_lock)
 def api_delete():
-    """移到回收站并从片库移除。body: { ids: [], trash: true }"""
+    """移到回收站并从所属磁盘索引移除。
+
+    Preferred body: {items: [{id, root, rel}], trash: true}. ``ids`` remains
+    supported for older clients, but root+rel is required to disambiguate an
+    id collision across disks.
+    """
     data = request.get_json(silent=True) or {}
-    ids = data.get("ids") or []
-    if not isinstance(ids, list) or not ids:
+    requested = data.get("items")
+    legacy_ids = not isinstance(requested, list)
+    if not isinstance(requested, list):
+        ids = data.get("ids") or []
+        requested = [{"id": vid} for vid in ids] if isinstance(ids, list) else []
+    if not requested:
         return jsonify({"ok": False, "msg": "请选择要删除的条目"}), 400
     if data.get("trash") is False:
         return jsonify({"ok": False, "msg": "仅支持移到回收站，请勿关闭 trash"}), 400
-    if not STATE.get("root"):
+    if not (STATE.get("root") or get_mounted_roots()):
         return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
+    if legacy_ids and len(get_mounted_roots()) > 1:
+        return jsonify({"ok": False, "msg": "多盘删除必须携带每项的 root 和 rel"}), 400
 
     removed = []
     errors = []
-    videos = list(STATE.get("videos") or [])
-    by_id = {v.get("id"): v for v in videos if v.get("id")}
+    catalog = list(videos_for_scope(None))
+    removed_keys: set[tuple[str, str]] = set()
+    affected_roots: set[str] = set()
 
-    for vid in ids:
-        vid = str(vid or "")
+    def _root_s(item: dict) -> str:
+        raw = (item.get("_lib_root") or item.get("root") or "").strip()
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).expanduser().resolve())
+        except OSError:
+            return raw
+
+    def _rel_key(item: dict) -> str:
+        return (item.get("rel") or "").replace("\\", "/").strip("/").casefold()
+
+    for raw in requested:
+        req = raw if isinstance(raw, dict) else {"id": raw}
+        vid = str(req.get("id") or "")
         if not re.fullmatch(r"[a-f0-9]{16}", vid):
             errors.append({"id": vid, "msg": "无效 id"})
             continue
-        item = by_id.get(vid)
+        prefer_root = str(req.get("root") or "").strip()
+        prefer_rel = str(req.get("rel") or "").replace("\\", "/").strip("/").casefold()
+        if len(get_mounted_roots()) > 1 and (not prefer_root or not prefer_rel):
+            errors.append({"id": vid, "msg": "多盘删除缺少 root 或 rel"})
+            continue
+        item = None
+        for candidate in catalog:
+            if prefer_root:
+                try:
+                    same_root = _root_s(candidate).lower() == str(Path(prefer_root).expanduser().resolve()).lower()
+                except OSError:
+                    same_root = _root_s(candidate).lower() == prefer_root.lower()
+                if not same_root:
+                    continue
+            if (
+                prefer_rel
+                and _rel_key(candidate) == prefer_rel
+                and (candidate.get("id") == vid or candidate.get("_thumb_id") == vid)
+            ):
+                item = candidate
+                break
+            if not prefer_rel and (
+                candidate.get("id") == vid or candidate.get("_thumb_id") == vid
+            ):
+                item = candidate
+                break
+        if item is None:
+            item = find_video_by_id(vid, prefer_root=prefer_root or None)
         if not item:
             errors.append({"id": vid, "msg": "未找到"})
             continue
+        item_root = _root_s(item)
+        if prefer_root and item_root:
+            try:
+                wanted_root = str(Path(prefer_root).expanduser().resolve())
+            except OSError:
+                wanted_root = prefer_root
+            if item_root.lower() != wanted_root.lower():
+                errors.append({"id": vid, "msg": "磁盘归属不匹配"})
+                continue
+        if not item_root:
+            errors.append({"id": vid, "msg": "缺少磁盘归属，未删除"})
+            continue
+
         paths = _paths_for_delete(item)
         if not paths:
             errors.append({"id": vid, "msg": "文件不存在"})
             # 仍从索引去掉
-            videos = [v for v in videos if v.get("id") != vid]
             removed.append(vid)
+            removed_keys.add((item_root.lower(), _rel_key(item)))
+            affected_roots.add(item_root)
             continue
         ok_all = True
         for p in paths:
@@ -1097,17 +1263,34 @@ def api_delete():
                 errors.append({"id": vid, "msg": msg, "path": str(p)})
                 break
         if ok_all:
-            videos = [v for v in videos if v.get("id") != vid]
             removed.append(vid)
-            thumb_cache_invalidate(vid)
+            removed_keys.add((item_root.lower(), _rel_key(item)))
+            affected_roots.add(item_root)
+            thumb_cache_invalidate(item.get("_thumb_id") or item.get("id") or vid)
 
-    STATE["videos"] = videos
-    if STATE.get("root"):
-        STATE["tree"] = build_tree(Path(STATE["root"]), videos)
-    rebuild_indexes(videos)
-    cache = STATE.get("cache_dir") or ensure_cache_dir(Path(STATE["root"])) if STATE.get("root") else None
-    if cache and STATE.get("root"):
-        save_index(cache, Path(STATE["root"]), videos)
+    def _was_removed(item: dict) -> bool:
+        return (_root_s(item).lower(), _rel_key(item)) in removed_keys
+
+    remaining = [v for v in catalog if not _was_removed(v)]
+    STATE["videos"] = remaining
+    for root_s in affected_roots:
+        try:
+            root_catalog = read_root_library(root_s)
+            if root_catalog is None:
+                root_catalog = [
+                    v for v in catalog if _root_s(v).lower() == root_s.lower()
+                ]
+            save_root_library(
+                root_s,
+                [v for v in root_catalog if not _was_removed(v)],
+            )
+        except Exception as e:
+            errors.append({"root": root_s, "msg": f"索引保存失败: {e}"})
+
+    if get_mounted_roots():
+        publish_unified_library()
+    else:
+        rebuild_indexes(remaining)
 
     return jsonify({
         "ok": True,
@@ -1126,13 +1309,19 @@ def api_convert_mp4_start(vid: str):
         return jsonify({"ok": False, "msg": "未找到 ffmpeg，请先安装后再试"}), 400
     if not (STATE.get("root") or get_mounted_roots()):
         return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
-    item = find_video_by_id(vid)
+    prefer_root = (request.args.get("root") or "").strip() or None
+    if len(get_mounted_roots()) > 1 and not prefer_root:
+        return jsonify({"ok": False, "msg": "多盘转换必须指定 root"}), 400
+    item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
         return jsonify({"ok": False, "msg": "未找到视频"}), 404
     kind = item.get("kind") or ""
     if kind not in ("m3u8", "ts_set") and (item.get("ext") or "").lower() != ".m3u8":
         return jsonify({"ok": False, "msg": "仅支持 m3u8 / TS 合集"}), 400
-    ok, msg, job_id = enqueue_convert_job(vid, kind="mp4", name=item.get("name") or "")
+    item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
+    ok, msg, job_id = enqueue_convert_job(
+        vid, kind="mp4", name=item.get("name") or "", root=item_root or None
+    )
     return jsonify({"ok": ok, "job_id": job_id, "msg": msg, "status": "queued"})
 
 
@@ -1187,13 +1376,19 @@ def api_fix_audio_start(vid: str):
         return jsonify({"ok": False, "msg": "未找到 ffmpeg，请先安装后再试"}), 400
     if not (STATE.get("root") or get_mounted_roots()):
         return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
-    item = find_video_by_id(vid)
+    prefer_root = (request.args.get("root") or "").strip() or None
+    if len(get_mounted_roots()) > 1 and not prefer_root:
+        return jsonify({"ok": False, "msg": "多盘修复必须指定 root"}), 400
+    item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
         return jsonify({"ok": False, "msg": "未找到视频"}), 404
     kind = item.get("kind") or ""
     if kind in ("m3u8", "ts_set") or (item.get("ext") or "").lower() == ".m3u8":
         return jsonify({"ok": False, "msg": "流媒体请用「转成 MP4」"}), 400
-    ok, msg, job_id = enqueue_convert_job(vid, kind="fix_audio", name=item.get("name") or "")
+    item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
+    ok, msg, job_id = enqueue_convert_job(
+        vid, kind="fix_audio", name=item.get("name") or "", root=item_root or None
+    )
     return jsonify({"ok": ok, "job_id": job_id, "msg": msg, "status": "queued"})
 
 
@@ -1211,9 +1406,13 @@ def api_convert_queue():
 
 @app.route("/api/convert/batch", methods=["POST"])
 def api_convert_batch():
-    """批量加入转换队列。body: { ids: [], kind: "mp4"|"fix_audio", parallel?: 1-4 }"""
+    """批量加入转换队列，支持 items: [{id, root}] 精确定位磁盘。"""
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
+    requested = data.get("items")
+    legacy_ids = not isinstance(requested, list)
+    if not isinstance(requested, list):
+        requested = [{"id": vid} for vid in ids] if isinstance(ids, list) else []
     kind = (data.get("kind") or "mp4").strip().lower()
     if kind not in ("mp4", "fix_audio"):
         return jsonify({"ok": False, "msg": "kind 应为 mp4 或 fix_audio"}), 400
@@ -1225,10 +1424,12 @@ def api_convert_batch():
             pump_convert_queue()
         except (TypeError, ValueError):
             pass
-    if not isinstance(ids, list):
-        return jsonify({"ok": False, "msg": "ids 无效"}), 400
+    if not isinstance(requested, list):
+        return jsonify({"ok": False, "msg": "items 无效"}), 400
+    if legacy_ids and ids and len(get_mounted_roots()) > 1:
+        return jsonify({"ok": False, "msg": "多盘批量转换必须携带每项 root"}), 400
     # 仅改并发
-    if not ids:
+    if not requested:
         return jsonify({
             "ok": True,
             "queued": [],
@@ -1241,12 +1442,17 @@ def api_convert_batch():
 
     queued = []
     skipped = []
-    for vid in ids[:80]:
-        vid = str(vid or "")
+    for raw in requested[:80]:
+        req = raw if isinstance(raw, dict) else {"id": raw}
+        vid = str(req.get("id") or "")
+        prefer_root = str(req.get("root") or "").strip() or None
+        if len(get_mounted_roots()) > 1 and not prefer_root:
+            skipped.append({"id": vid, "msg": "缺少 root"})
+            continue
         if not re.fullmatch(r"[a-f0-9]{16}", vid):
             skipped.append({"id": vid, "msg": "无效 id"})
             continue
-        item = find_video_by_id(vid)
+        item = find_video_by_id(vid, prefer_root=prefer_root)
         if not item:
             skipped.append({"id": vid, "msg": "未找到"})
             continue
@@ -1263,7 +1469,10 @@ def api_convert_batch():
             if not item.get("audio_hard"):
                 skipped.append({"id": vid, "msg": "无需修声音"})
                 continue
-        ok, msg, job_id = enqueue_convert_job(vid, kind=kind, name=item.get("name") or "")
+        item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
+        ok, msg, job_id = enqueue_convert_job(
+            vid, kind=kind, name=item.get("name") or "", root=item_root or None
+        )
         if ok:
             queued.append({"id": vid, "job_id": job_id, "name": item.get("name") or ""})
         else:
@@ -1325,6 +1534,7 @@ def api_thumb_set(vid: str):
         thumb_cache_invalidate(file_id)
         item["has_thumb"] = True
         item["thumb_v"] = thumb_version(cache, file_id) or int(datetime.now().timestamp())
+        save_library_item(item)
         return jsonify({"ok": True, "msg": "封面已更新", "thumb_v": item["thumb_v"], "thumb_id": file_id})
 
     data = request.get_json(silent=True) or {}
@@ -1348,6 +1558,7 @@ def api_thumb_set(vid: str):
     item["has_thumb"] = True
     item["thumb_v"] = thumb_version(cache, file_id) or int(datetime.now().timestamp())
     item["thumb_seek"] = seek
+    save_library_item(item)
     return jsonify({
         "ok": True,
         "msg": f"已截取 {seek:.1f}s 处画面为封面",

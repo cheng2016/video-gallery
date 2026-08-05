@@ -25,7 +25,12 @@ from vg.config import (
     THUMB_EXT,
     VIDEO_EXTS,
 )
-from vg.disk_libs import archive_current_library, find_in_disk_libs, stamp_lib_meta
+from vg.disk_libs import (
+    archive_current_library,
+    find_in_disk_libs,
+    save_library_item,
+    stamp_lib_meta,
+)
 from vg.drives import save_prefs
 from vg.genres import detect_genres, ensure_video_genres
 from vg.segments import collapse_segment_sets
@@ -48,13 +53,32 @@ from vg.media import (
 )
 
 
+def _same_root(a: str | Path | None, b: str | Path | None) -> bool:
+    if not a or not b:
+        return False
+    try:
+        return str(Path(a).expanduser().resolve()).casefold() == str(
+            Path(b).expanduser().resolve()
+        ).casefold()
+    except OSError:
+        return str(a).replace("/", "\\").rstrip("\\").casefold() == str(b).replace(
+            "/", "\\"
+        ).rstrip("\\").casefold()
+
+
 def _video_search_text(v: dict) -> str:
     cached = v.get("_q")
     if cached is not None:
         return cached
-    text = f"{v.get('name') or ''} {v.get('rel') or ''}".lower()
+    from vg.search import build_search_text
+
+    text = build_search_text(v)
     v["_q"] = text
     return text
+
+
+def duplicate_name_key(v: dict) -> str:
+    return (v.get("name") or Path(v.get("filename") or "").stem or "").strip().casefold()
 
 
 def mark_duplicates(videos: list[dict]) -> None:
@@ -75,7 +99,7 @@ def mark_duplicates(videos: list[dict]) -> None:
         kind = v.get("kind") or ""
         if kind in ("m3u8", "ts_set"):
             continue
-        name_key = (v.get("name") or Path(v.get("filename") or "").stem or "").strip().casefold()
+        name_key = duplicate_name_key(v)
         if name_key:
             by_name.setdefault(name_key, []).append(v)
         size = int(v.get("size") or 0)
@@ -98,8 +122,15 @@ def mark_duplicates(videos: list[dict]) -> None:
     for group in by_name.values():
         _flag(group, "同名")
     for group in by_size.values():
-        # 同体积且路径不同才算；同名组已标过也叠加原因
-        paths = {(g.get("rel") or "") for g in group}
+        # 同体积且「盘+相对路径」不同才算（跨盘同 rel 也算重复）
+        paths = {
+            (
+                (g.get("_lib_root") or g.get("root") or "").strip().lower(),
+                (g.get("rel") or "").replace("\\", "/").strip("/").lower(),
+                g.get("id") or "",
+            )
+            for g in group
+        }
         if len(paths) >= 2:
             _flag(group, "同体积")
 
@@ -119,6 +150,7 @@ def rebuild_indexes(videos: list[dict] | None = None) -> None:
         vid = v.get("id")
         if vid:
             by_id[vid] = v
+        v.pop("_q", None)  # 强制重算拼音/演员搜索串
         _video_search_text(v)
         cat = _video_category(v)
         by_cat.setdefault(cat, []).append(v)
@@ -353,7 +385,7 @@ def _load_old_video_map(cache: Path, root: Path) -> dict[str, dict]:
         return old_map
     try:
         data = json.loads(index_path.read_text(encoding="utf-8"))
-        if data.get("root") != str(root) or not isinstance(data.get("videos"), list):
+        if not _same_root(data.get("root"), root) or not isinstance(data.get("videos"), list):
             return old_map
         for v in data["videos"]:
             if v.get("kind") == "ts_set":
@@ -567,14 +599,31 @@ def scan_videos(
             STATE["thumb_progress"] = f"预览图全部来自加密缓存（{cached_n} 个），无需重建"
             log(f"[预览图] 全部命中缓存（{cached_n}），无需重建")
         save_index(cache, root, found)
-        rebuild_indexes(found)
+        try:
+            from vg.roots import get_mounted_roots, publish_unified_library
+
+            if len(get_mounted_roots()) > 1:
+                publish_unified_library()
+            else:
+                rebuild_indexes(found)
+        except Exception as e:
+            log(f"[多根] 预览图完成后合并失败: {e}")
+            rebuild_indexes(found)
     elif not ffmpeg:
         STATE["thumb_progress"] = "未找到 ffmpeg，已跳过预览图（安装后重启可生成）"
         log("[预览图] 未找到 ffmpeg，已跳过")
     elif not quiet:
         STATE["thumb_progress"] = ""
 
-    STATE["tree"] = build_tree(root, found)
+    try:
+        from vg.roots import get_mounted_roots, publish_unified_library
+
+        if len(get_mounted_roots()) > 1:
+            publish_unified_library()
+        else:
+            STATE["tree"] = build_tree(root, found)
+    except Exception:
+        STATE["tree"] = build_tree(root, found)
     if not quiet:
         STATE["scanning"] = False
     log("[扫描] 全部结束，可在浏览器浏览")
@@ -591,7 +640,7 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
     if not force and index_path.exists():
         try:
             data = json.loads(index_path.read_text(encoding="utf-8"))
-            if data.get("root") == str(root) and isinstance(data.get("videos"), list):
+            if _same_root(data.get("root"), root) and isinstance(data.get("videos"), list):
                 videos = []
                 for v in data["videos"]:
                     if v.get("kind") == "m3u8":
@@ -713,7 +762,11 @@ def _fill_missing_thumbs(missing: list[dict]) -> None:
     if root and cache:
         STATE["tree"] = build_tree(root, STATE["videos"])
         rebuild_indexes(STATE["videos"])
-        save_index(cache, root, STATE["videos"])
+        for item in missing:
+            try:
+                save_library_item(item)
+            except Exception as e:
+                log(f"[预览图] 保存单条索引失败: {e}")
 
 
 
@@ -722,7 +775,7 @@ def find_video_by_id(vid: str, prefer_root: str | None = None) -> dict | None:
 
     prefer_root: when history remembers which disk, prefer that library (avoids id collision).
     """
-    from vg.disk_libs import ensure_cached_indexes_scanned, ensure_library
+    from vg.disk_libs import ensure_cached_indexes_scanned, ensure_library, read_root_library
 
     prefer = (prefer_root or "").strip() or None
     if prefer:
@@ -730,16 +783,25 @@ def find_video_by_id(vid: str, prefer_root: str | None = None) -> dict | None:
         hit = find_in_disk_libs(vid, prefer_root=prefer)
         if hit is not None:
             return hit
-        # same as active?
-        cur = STATE.get("root")
-        try:
-            if cur and str(Path(cur).resolve()) == str(Path(prefer).expanduser().resolve()):
-                by_id = STATE.get("by_id") or {}
-                hit = by_id.get(vid)
-                if hit is not None:
-                    return hit
-        except OSError:
-            pass
+        for item in STATE.get("videos") or []:
+            item_root = item.get("_lib_root") or item.get("root") or ""
+            if not _same_root(item_root, prefer):
+                continue
+            if item.get("id") == vid or item.get("_thumb_id") == vid:
+                return item
+        saved = read_root_library(prefer)
+        if saved is not None:
+            hit = next(
+                (
+                    item
+                    for item in saved
+                    if item.get("id") == vid or item.get("_thumb_id") == vid
+                ),
+                None,
+            )
+            if hit is not None:
+                return hit
+        return None
 
     by_id = STATE.get("by_id") or {}
     hit = by_id.get(vid)

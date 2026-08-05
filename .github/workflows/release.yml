@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to create/publish (e.g. v1.2.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm video_gallery.spec
+          if (!(Test-Path "dist\VideoGallery\Start-VideoGallery.bat")) {
+            Copy-Item "Start-VideoGallery.bat" "dist\VideoGallery\Start-VideoGallery.bat"
+          }
+          Copy-Item "docs\how-it-works.md" "dist\VideoGallery\HOW_IT_WORKS.md" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "dist\VideoGallery\docs\images" | Out-Null
+          Copy-Item "docs\images\*" "dist\VideoGallery\docs\images\" -ErrorAction SilentlyContinue
+
+      - name: Zip package
+        shell: pwsh
+        run: |
+          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "dev" }
+          $name = "VideoGallery-$ver-windows-x64.zip"
+          Compress-Archive -Path "dist\VideoGallery\*" -DestinationPath $name -Force
+          echo "ASSET_NAME=$name" >> $env:GITHUB_ENV
+          Get-Item $name | Format-List Name,Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoGallery-windows
+          path: VideoGallery-*.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: VideoGallery-*.zip
+          body: |
+            ## 本地视频库 ${{ github.ref_name }}
+
+            **三步：扫盘 → 封面墙 → 点播**
+
+            1. 解压后双击 `Start-VideoGallery.bat`
+            2. 浏览器打开 http://127.0.0.1:8765
+            3. 选盘 →「扫描所选盘」
+
+            推荐安装 ffmpeg：`winget install ffmpeg`（封面与转码需要）
+
+            说明图与用法见仓库 [`docs/how-it-works.md`](https://github.com/cheng2016/video-gallery/blob/main/docs/how-it-works.md)
+
+            ### 搜索提示
+            - 拼音 / 首字母：`xingji` / `xj`
+            - 语法：`ext:mkv` `genre:动作` `actor:周迅`
+          draft: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

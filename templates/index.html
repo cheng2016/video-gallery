@@ -641,19 +641,32 @@
       padding: 8px 20px;
       font-size: 0.8rem;
       color: var(--muted);
-      min-height: 28px;
+      line-height: 1.45;
+      flex-shrink: 0;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      word-break: break-all;
+      border-bottom: 1px solid transparent;
     }
     .continue-bar {
-      padding: 4px 20px 10px;
+      padding: 8px 20px 12px;
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
       align-items: center;
+      flex-shrink: 0;
+      position: relative;
+      z-index: 1;
+      background: var(--bg);
     }
     .continue-bar .cont-label {
       font-size: 0.8rem;
       color: var(--muted);
       margin-right: 4px;
+      flex-shrink: 0;
     }
     .continue-chip {
       border: 1px solid var(--border);
@@ -1026,7 +1039,7 @@
       <span class="drive-hint" id="driveHint">正在检测盘符…</span>
     </div>
     <div class="search-wrap">
-      <input type="search" id="search" placeholder="搜索…" autocomplete="off" />
+      <input type="search" id="search" placeholder="搜索：拼音/首字母，ext:mkv genre:动作 actor:周迅" autocomplete="off" title="支持拼音与首字母；语法：ext:mkv  genre:动作  actor:姓名  channel:电影" />
     </div>
     <div class="meta" id="countLabel">—</div>
     <div class="header-actions">
@@ -1200,6 +1213,7 @@
       pageSize: 60,
       hasMore: false,
       totalCount: 0,
+      rawCount: 0,
       lastPlayId: "",
       loadedVideos: [],
       virtualEnabled: false,
@@ -1630,10 +1644,11 @@
       imgs.forEach((img) => {
         const card = img.closest(".card");
         if (!card) return;
-        const id = card.dataset.id;
+        const id = card.dataset.cover || card.dataset.id;
+        const root = card.dataset.root || "";
         if (!id) return;
         img.dataset.retried = "";
-        img.src = "/thumb/" + id + "?v=" + Date.now();
+        img.src = "/thumb/" + id + "?v=" + Date.now() + (root ? ("&root=" + encodeURIComponent(root)) : "");
       });
     }
 
@@ -2033,7 +2048,11 @@
       if (state.genre) html += `<span class="sep">·</span><span>${escapeHtml(state.genre)}</span>`;
       if (state.query) html += `<span class="sep">·</span><span>“${escapeHtml(state.query)}”</span>`;
       if (state.totalCount != null) {
-        html += `<span class="sep">·</span><span class="count">当前 ${state.totalCount}</span>`;
+        if (state.view === "series" && state.rawCount != null && state.rawCount !== state.totalCount) {
+          html += `<span class="sep">·</span><span class="count">合集 ${state.totalCount} · 共 ${state.rawCount} 部</span>`;
+        } else {
+          html += `<span class="sep">·</span><span class="count">当前 ${state.rawCount != null ? state.rawCount : state.totalCount}</span>`;
+        }
       }
       $("crumb").innerHTML = html;
     }
@@ -2064,7 +2083,8 @@
     function cardHtml(v) {
       const year = v.mtime_h ? String(v.mtime_h).slice(0, 4) : "";
       const isSeries = v.kind === "series";
-      const thumbId = isSeries ? (v.thumb_id || v.cover_id || v.id) : v.id;
+      const thumbId = v.thumb_id || (isSeries ? (v.cover_id || v.id) : v.id);
+      const thumbRootQ = v.root ? `&root=${encodeURIComponent(v.root)}` : "";
       const tv = v.thumb_v || (v.has_thumb ? 1 : 0);
       const dup = !!v.dup;
       const dupN = v.dup_n || 0;
@@ -2076,10 +2096,10 @@
         ? `<span class="dur">${v.ep_count || 0} 集</span>`
         : (v.seg_count ? `<span class="dur">${v.seg_count} 段</span>` : (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8" ? `<span class="dur">HLS</span>` : (v.duration_h ? `<span class="dur">${escapeHtml(v.duration_h)}</span>` : `<span class="dur">${escapeHtml((v.ext || "").toUpperCase())}</span>`)));
       return `
-        <div class="card" data-id="${v.id}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}">
+        <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}">
           <div class="thumb">
-            <img src="/thumb/${thumbId}?v=${tv}" alt="" loading="lazy" decoding="async"
-              onerror="if(!this.dataset.retried){this.dataset.retried=1;this.src='/thumb/${thumbId}?v='+Date.now()}" />
+            <img src="/thumb/${thumbId}?v=${tv}${thumbRootQ}" alt="" loading="lazy" decoding="async"
+              onerror="if(!this.dataset.retried){this.dataset.retried=1;this.src='/thumb/${thumbId}?v='+Date.now()+'${thumbRootQ}'}" />
             <div class="play"><div class="play-icon"></div></div>
             ${dup ? `<span class="dup-badge" title="${escapeAttr(dupReason)}">重复×${dupN}</span>` : ""}
             ${bad ? `<span class="bad-badge" title="${escapeAttr(badReason)}">损坏</span>` : ""}
@@ -2263,6 +2283,7 @@
         renderGenreTags(data.genres || []);
       }
       state.totalCount = data.count || 0;
+      state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
       state.hasMore = !!data.has_more;
       state.offset = (data.videos || []).length;
       // 记忆的频道/子类若在当前盘无效，导致空列表时自动清空
@@ -2287,9 +2308,28 @@
         saveUiPrefs();
         data = await fetchVideos(0);
         state.totalCount = data.count || 0;
+        state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
         state.hasMore = !!data.has_more;
         state.offset = (data.videos || []).length;
         renderGenreTags(data.genres || []);
+      }
+      // 选中某盘但内容为空，而侧栏该盘有数量：清残留筛选后再取一次
+      if (state.totalCount === 0 && state.lib) {
+        const mount = (state.mountedRoots || []).find((r) => sameLibPath(r.path, state.lib));
+        if (mount && (mount.count || 0) > 0 && (state.ext || state.genre || state.category || state.folder)) {
+          state.category = "";
+          state.folder = "";
+          state.folderAll = false;
+          state.ext = "";
+          state.genre = "";
+          saveUiPrefs();
+          data = await fetchVideos(0);
+          state.totalCount = data.count || 0;
+          state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
+          state.hasMore = !!data.has_more;
+          state.offset = (data.videos || []).length;
+          renderGenreTags(data.genres || []);
+        }
       }
       renderSubTags(data.subfolder_levels || []);
       renderCrumb();
@@ -2297,9 +2337,10 @@
       const libTip = state.lib
         ? ((state.mountedRoots.find((r) => sameLibPath(r.path, state.lib)) || {}).label || state.lib)
         : (state.multi ? "全部目录" : "");
+      const showN = (data.raw_count != null ? data.raw_count : data.count) || 0;
       $("countLabel").textContent = lastScanning
-        ? `扫描中… ${data.count} 个`
-        : (libTip ? `${libTip} · ${data.count} 个` : `${data.count} 个视频`);
+        ? `扫描中… ${showN} 个`
+        : (libTip ? `${libTip} · ${showN} 个` : `${showN} 个视频`);
     }
 
     async function loadMore() {
@@ -2340,29 +2381,36 @@
         status += `片库: ${names || "多目录"}`;
         if (state.lib) {
           const cur = (data.roots || []).find((r) => sameLibPath(r.path, state.lib));
-          status += ` · 正在看 ${cur ? cur.label : state.lib}`;
+          status += ` · ${cur ? cur.label : state.lib}`;
         } else {
-          status += " · 正在看全部";
+          status += " · 全部";
         }
       } else if (data.root) {
         status += `当前: ${data.root}`;
       }
-      if (data.scan_progress) status += (status ? " · " : "") + data.scan_progress;
-      if (data.thumb_progress) status += (status ? " · " : "") + data.thumb_progress;
-      if (data.meta_progress) status += (status ? " · " : "") + data.meta_progress;
-      if (data.exporting && data.export_msg) status += (status ? " · " : "") + data.export_msg;
-      else if (data.export_ok === true && data.export_path) status += (status ? " · " : "") + "静态站已导出";
-      if (!data.has_ffmpeg) status += (status ? " · " : "") + "无 ffmpeg（预览/转码不可用，可运行 winget install ffmpeg）";
+      // 状态栏只保留短摘要，完整信息放 title 悬停查看，避免顶栏撑爆盖住「继续看」
+      const bits = [];
+      if (data.scan_progress) bits.push(data.scan_progress);
+      if (data.thumb_progress) bits.push(data.thumb_progress);
+      if (data.meta_progress) bits.push(data.meta_progress);
+      if (data.exporting && data.export_msg) bits.push(data.export_msg);
+      else if (data.export_ok === true && data.export_path) bits.push("静态站已导出");
+      if (!data.has_ffmpeg) bits.push("无 ffmpeg");
+      let lanShort = "";
       if (data.lan_share && data.lan_urls && data.lan_urls.length) {
-        const share = data.lan_urls.filter((u) => !u.includes("127.0.0.1")).slice(0, 2).join(" · ");
-        status += (status ? " · " : "") + "局域网: " + (share || data.lan_urls[0]);
+        const share = data.lan_urls.filter((u) => !u.includes("127.0.0.1")).slice(0, 2);
+        bits.push("局域网 " + share.join(" · "));
         if ($("lanBtn")) $("lanBtn").classList.add("primary");
       } else if ($("lanBtn")) {
         $("lanBtn").classList.remove("primary");
       }
+      const detail = bits.join(" · ");
+      if (detail) status += (status ? " · " : "") + detail;
       state.hasFfmpeg = !!data.has_ffmpeg;
       state.lanShare = !!data.lan_share;
-      $("status").textContent = status;
+      const statusEl = $("status");
+      statusEl.textContent = status;
+      statusEl.title = status;
       $("rescanBtn").disabled = data.scanning;
       $("scanDriveBtn").disabled = data.scanning;
       $("driveSelect").disabled = data.scanning;
@@ -2398,7 +2446,7 @@
       segPlay = null;
     }
 
-    function playTsSetSequential(id, total, startIndex) {
+    function playTsSetSequential(id, total, startIndex, root) {
       const video = $("player");
       segPlay = { id, index: startIndex || 0, total };
       const go = (i) => {
@@ -2406,7 +2454,8 @@
         segPlay.index = i;
         $("modalInfo").textContent =
           `TS 分片 ${i + 1}/${total}（浏览器原生接力播放）· 也可点「系统播放器」`;
-        video.src = `/stream/${id}/seg/${i}`;
+        const rootQ = root ? `?root=${encodeURIComponent(root)}` : "";
+        video.src = `/stream/${id}/seg/${i}${rootQ}`;
         video.play().catch(() => {});
       };
       video.onended = () => {
@@ -2565,7 +2614,9 @@
       if (btn) btn.textContent = "转换中…";
       $("modalInfo").textContent = "正在提交转换任务…";
       try {
-        const r = await fetch("/api/convert-mp4/" + encodeURIComponent(currentPlayId), {
+        const root = (currentPlayMeta && currentPlayMeta.root) || "";
+        const rootQ = root ? ("?root=" + encodeURIComponent(root)) : "";
+        const r = await fetch("/api/convert-mp4/" + encodeURIComponent(currentPlayId) + rootQ, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: "{}",
@@ -2593,7 +2644,9 @@
       if (btn) btn.textContent = "修复中…";
       $("modalInfo").textContent = "正在提交修复任务…";
       try {
-        const r = await fetch("/api/fix-audio/" + encodeURIComponent(currentPlayId), {
+        const root = (currentPlayMeta && currentPlayMeta.root) || "";
+        const rootQ = root ? ("?root=" + encodeURIComponent(root)) : "";
+        const r = await fetch("/api/fix-audio/" + encodeURIComponent(currentPlayId) + rootQ, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: "{}",
@@ -2698,17 +2751,20 @@
       bindPlayProgress(video);
 
       if (kind === "m3u8") {
-        playHls(`/playlist/${id}.m3u8`);
+        const rootQ = currentPlayMeta.root ? `?root=${encodeURIComponent(currentPlayMeta.root)}` : "";
+        playHls(`/playlist/${id}.m3u8${rootQ}`);
         resumePlayback(video, id);
         return;
       }
       if (kind === "ts_set") {
-        playHls(`/playlist/${id}.m3u8`, () => playTsSetSequential(id, segCount || 1, 0));
+        const rootQ = currentPlayMeta.root ? `?root=${encodeURIComponent(currentPlayMeta.root)}` : "";
+        playHls(`/playlist/${id}.m3u8${rootQ}`, () => playTsSetSequential(id, segCount || 1, 0, currentPlayMeta.root));
         resumePlayback(video, id);
         return;
       }
 
-      video.src = "/stream/" + id;
+      const rootQ = currentPlayMeta.root ? `?root=${encodeURIComponent(currentPlayMeta.root)}` : "";
+      video.src = "/stream/" + id + rootQ;
       resumePlayback(video, id);
       video.play().catch(() => {});
     }
@@ -2719,7 +2775,7 @@
         const r = await fetch("/api/local/" + currentPlayId, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action }),
+          body: JSON.stringify({ action, root: (currentPlayMeta && currentPlayMeta.root) || "" }),
         });
         const data = await r.json();
         if (!r.ok || !data.ok) {
@@ -2822,10 +2878,16 @@
       const item = e.target.closest(".channel-item");
       if (!item || !item.hasAttribute("data-cat")) return;
       const nextLib = item.getAttribute("data-lib");
+      const prevLib = state.lib || "";
       state.lib = nextLib == null ? (state.lib || "") : (nextLib || "");
       state.category = item.dataset.cat || "";
       state.folder = "";
       state.folderAll = false;
+      // 换盘时清掉上一盘残留的格式/类型，避免「该盘全部」被滤成空白
+      if (!sameLibPath(prevLib, state.lib)) {
+        state.ext = "";
+        state.genre = "";
+      }
       if (state.lib) {
         if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
         state.libExpanded.add(state.lib);
@@ -2921,10 +2983,15 @@
       if (!item) return;
       const lib = item.getAttribute("data-lib") || "";
       const path = item.getAttribute("data-path") || "";
+      const prevLib = state.lib || "";
       if (lib) {
         state.lib = lib;
         if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
         state.libExpanded.add(lib);
+      }
+      if (lib && !sameLibPath(prevLib, lib)) {
+        state.ext = "";
+        state.genre = "";
       }
       state.folder = path;
       state.folderAll = !!path;
@@ -2955,13 +3022,14 @@
       const card = e.target.closest(".card");
       if (!card) return;
       const id = card.dataset.id;
+      const root = card.dataset.root || "";
       const kind = card.dataset.kind || "";
       if (kind === "series") {
         openSeries(id);
         return;
       }
       try {
-        const info = await fetch("/api/info/" + id).then((r) => {
+        const info = await fetch(infoUrl(id, root)).then((r) => {
           if (!r.ok) throw new Error("not found");
           return r.json();
         });
@@ -3004,7 +3072,7 @@
           const label = (ep.season != null && ep.episode != null)
             ? `S${String(ep.season).padStart(2, "0")}E${String(ep.episode).padStart(2, "0")} · ${escapeHtml(ep.name || "")}`
             : escapeHtml(ep.name || "");
-          return `<button type="button" class="btn" style="display:block;width:100%;text-align:left;margin:6px 0" data-epid="${ep.id}">${label}<br><span style="opacity:.7;font-size:.8em">${escapeHtml(ep.size_h || "")} · ${escapeHtml(ep.folder || "")}</span></button>`;
+          return `<button type="button" class="btn" style="display:block;width:100%;text-align:left;margin:6px 0" data-epid="${ep.id}" data-eproot="${escapeAttr(ep.root || ep._lib_root || "")}">${label}<br><span style="opacity:.7;font-size:.8em">${escapeHtml(ep.size_h || "")} · ${escapeHtml(ep.folder || "")}</span></button>`;
         }).join("") || "暂无分集";
       } catch (err) {
         box.textContent = "加载失败: " + err;
@@ -3019,9 +3087,10 @@
       const btn = e.target.closest("[data-epid]");
       if (!btn) return;
       const id = btn.dataset.epid;
+      const root = btn.dataset.eproot || "";
       $("seriesModal").classList.remove("open");
       try {
-        const info = await fetch("/api/info/" + id).then((r) => r.json());
+        const info = await fetch(infoUrl(id, root)).then((r) => r.json());
         openPlayer(
           id,
           info.name,
@@ -3082,8 +3151,8 @@
           body.textContent = data.msg || "加载失败";
           return;
         }
-        const groups = data.groups || [];
-        if (!groups.length || !(groups[0].items || []).length) {
+        const groups = (data.groups || []).filter((g) => (g.items || []).length);
+        if (!groups.length) {
           body.textContent = cleanupType === "bad" ? "没有标记为损坏的文件" : "没有发现重复组";
           return;
         }
@@ -3095,15 +3164,16 @@
             const checked = cleanupType === "bad" ? "checked" : (isKeep ? "" : "checked");
             const keepTag = isKeep ? ` <span style="color:var(--accent)">保留·最新</span>` : "";
             const reason = it.reason ? ` · ${escapeHtml(it.reason)}` : "";
+            const lib = it.lib_label ? ` · ${escapeHtml(it.lib_label)}` : "";
             return `
             <div class="media-row">
-              <input type="checkbox" class="cleanup-check media-row-check" data-id="${escapeAttr(it.id)}" ${checked} />
-              ${thumbHtml(it.id, it.thumb_v, it.has_thumb)}
+              <input type="checkbox" class="cleanup-check media-row-check" data-id="${escapeAttr(it.id)}" data-root="${escapeAttr(it.root || "")}" data-rel="${escapeAttr(it.rel || "")}" ${checked} />
+              ${thumbHtml(it.thumb_id || it.id, it.thumb_v, it.has_thumb, it.root)}
               <div class="media-row-body">
                 <strong title="${escapeAttr(it.name || "")}">${escapeHtml(it.name || "")}${keepTag}</strong>
-                <div class="media-row-meta">${escapeHtml(it.size_h || "")} · ${escapeHtml(it.mtime_h || "")} · ${escapeHtml(it.folder || "")}${reason}<br>${escapeHtml(it.path || "")}</div>
+                <div class="media-row-meta">${escapeHtml(it.size_h || "")} · ${escapeHtml(it.mtime_h || "")} · ${escapeHtml(it.folder || "")}${lib}${reason}<br>${escapeHtml(it.path || "")}</div>
                 <div class="media-row-actions">
-                  <button type="button" class="btn cleanup-reveal" data-id="${escapeAttr(it.id)}">打开位置</button>
+                  <button type="button" class="btn cleanup-reveal" data-id="${escapeAttr(it.id)}" data-root="${escapeAttr(it.root || "")}">打开位置</button>
                   ${cleanupType === "dup" ? `<button type="button" class="btn cleanup-keep-one" data-id="${escapeAttr(it.id)}">只留这个</button>` : ""}
                 </div>
               </div>
@@ -3139,18 +3209,20 @@
     $("cleanupTabDup").addEventListener("click", () => loadCleanup("dup"));
     $("cleanupTabBad").addEventListener("click", () => loadCleanup("bad"));
     async function cleanupBatchConvert(kind) {
-      const ids = Array.from(document.querySelectorAll(".cleanup-check:checked")).map((el) => el.dataset.id).filter(Boolean);
-      if (!ids.length) {
+      const items = Array.from(document.querySelectorAll(".cleanup-check:checked"))
+        .map((el) => ({ id: el.dataset.id, root: el.dataset.root || "", rel: el.dataset.rel || "" }))
+        .filter((it) => it.id);
+      if (!items.length) {
         alert("请先勾选要处理的条目");
         return;
       }
       const label = kind === "fix_audio" ? "修声音" : "转 MP4";
-      if (!confirm(`将 ${ids.length} 项加入「${label}」队列？\n默认同时只跑 1 个，避免打满 CPU。`)) return;
+      if (!confirm(`将 ${items.length} 项加入「${label}」队列？\n默认同时只跑 1 个，避免打满 CPU。`)) return;
       try {
         const r = await fetch("/api/convert/batch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids, kind }),
+          body: JSON.stringify({ items, kind }),
         });
         const data = await r.json();
         alert(data.msg || (data.ok ? "已加入队列" : "失败"));
@@ -3166,11 +3238,12 @@
       if (reveal) {
         e.preventDefault();
         const id = reveal.dataset.id;
+        const root = reveal.dataset.root || "";
         try {
           await fetch("/api/local/" + id, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "reveal" }),
+            body: JSON.stringify({ action: "reveal", root }),
           });
         } catch (_) {}
         return;
@@ -3202,25 +3275,27 @@
       const del = e.target.closest(".cleanup-del-group");
       if (!del) return;
       const panel = del.closest(".cleanup-group") || del.closest("div");
-      const ids = [...panel.querySelectorAll(".cleanup-check:checked")].map((c) => c.dataset.id).filter(Boolean);
-      if (!ids.length) {
+      const items = [...panel.querySelectorAll(".cleanup-check:checked")]
+        .map((c) => ({ id: c.dataset.id, root: c.dataset.root || "", rel: c.dataset.rel || "" }))
+        .filter((it) => it.id);
+      if (!items.length) {
         alert("请先勾选要删除的文件");
         return;
       }
       if (cleanupType === "dup") {
         const total = panel.querySelectorAll(".cleanup-check").length;
-        if (ids.length >= total) {
+        if (items.length >= total) {
           if (!confirm("将删除该组全部文件。确定都不要保留吗？")) return;
-        } else if (total - ids.length < 1) {
+        } else if (total - items.length < 1) {
           if (!confirm("未保留任何一份，确定继续？")) return;
         }
       }
-      if (!confirm(`将 ${ids.length} 个文件移到回收站，并从片库移除。继续？`)) return;
+      if (!confirm(`将 ${items.length} 个文件移到回收站，并从片库移除。继续？`)) return;
       try {
         const r = await fetch("/api/delete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids, trash: true }),
+          body: JSON.stringify({ items, trash: true }),
         });
         const data = await r.json();
         alert(data.msg || (data.ok ? "完成" : "失败"));

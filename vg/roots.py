@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import threading
 from pathlib import Path
 
 from vg.cache import ensure_cache_dir
-from vg.config import INDEX_NAME
 from vg.disk_libs import (
     archive_current_library,
     ensure_library,
     load_library_from_index,
+    read_root_library,
     stamp_lib_meta,
     _norm_root_str,
 )
@@ -107,36 +106,18 @@ def _restore_folder(item: dict, root_s: str, label: str) -> str:
     return folder
 
 
-def _read_index_videos(root_s: str) -> list[dict]:
-    """Read videos from that disk's on-disk index.json (source of truth)."""
-    try:
-        root_p = Path(root_s)
-        cache = ensure_cache_dir(root_p)
-        index_path = cache / INDEX_NAME
-        if not index_path.is_file():
-            return []
-        data = json.loads(index_path.read_text(encoding="utf-8"))
-        videos = data.get("videos")
-        if not isinstance(videos, list):
-            return []
-        out = []
-        for v in videos:
-            if isinstance(v, dict) and v.get("id"):
-                item = dict(v)
-                stamp_lib_meta([item], root=root_s, cache=cache, overwrite=True)
-                out.append(item)
-        return out
-    except Exception as e:
-        log(f"[多根] 读盘索引失败 {root_s}: {e}")
-        return []
-
-
 def _videos_from_root(root_s: str) -> list[dict]:
-    """Videos belonging to one root (active STATE, then disk index, then disk_libs)."""
+    """Videos belonging to one root; complete disk index beats partial scan STATE."""
     root_s_l = root_s.lower()
     vids = list(STATE.get("videos") or [])
 
-    # 1) 统一片库里已正确打标的条目（扫描刚完成的盘也走这里）
+    # A saved per-root index is complete. STATE may be a partial ``found`` list
+    # while a background scan is publishing progress.
+    from_disk = read_root_library(root_s)
+    if from_disk is not None:
+        return from_disk
+
+    # No saved index yet: use correctly tagged in-memory entries.
     scoped = [
         dict(v) for v in vids
         if (v.get("_lib_root") or v.get("root") or "").strip()
@@ -145,7 +126,7 @@ def _videos_from_root(root_s: str) -> list[dict]:
     if scoped:
         return scoped
 
-    # 2) 刚扫完、尚未打标：STATE.root 就是该盘，且库里没有其它盘的标记
+    # 刚扫完、尚未打标：STATE.root 就是该盘，且库里没有其它盘的标记
     try:
         cur = STATE.get("root")
         if cur and _norm_root_str(cur).lower() == root_s_l and vids:
@@ -161,12 +142,7 @@ def _videos_from_root(root_s: str) -> list[dict]:
     except OSError:
         pass
 
-    # 3) 磁盘上的 index.json（可靠，不被错误内存归档污染）
-    from_disk = _read_index_videos(root_s)
-    if from_disk:
-        return from_disk
-
-    # 4) 内存 disk_libs 兜底
+    # 内存 disk_libs 兜底
     libs = STATE.get("disk_libs") or {}
     lib = libs.get(root_s)
     if not lib:
@@ -224,6 +200,72 @@ def filter_videos_by_lib(videos: list[dict] | None, lib: str | None) -> list[dic
             if r.lower() == key_l:
                 out.append(v)
     return out
+
+
+def videos_for_scope(lib: str | None = None) -> list[dict]:
+    """
+    API 用片源：
+    - 选中某一盘：该盘完整目录（STATE / index / disk_libs）
+    - 未选盘 + 多盘：按盘合并，数量与侧栏「全部视频」合计一致
+      （不能只用可能漏盘的 STATE.videos）
+    - 未选盘 + 单盘：STATE.videos
+    """
+    lib = (lib or "").strip()
+    if lib:
+        try:
+            key = _norm_root_str(lib)
+        except Exception:
+            key = lib
+        disk = _videos_from_root(key)
+        if disk:
+            return disk
+        return filter_videos_by_lib(STATE.get("videos") or [], key)
+
+    roots = get_mounted_roots()
+    state_vids = list(STATE.get("videos") or [])
+    if len(roots) <= 1:
+        return state_vids
+
+    per_lists: list[tuple[str, list[dict]]] = [(r, _videos_from_root(r)) for r in roots]
+    expected = sum(len(items) for _, items in per_lists)
+
+    # STATE 已覆盖各盘则直接用（快）
+    if state_vids and expected > 0:
+        covered = True
+        for root_s, subset in per_lists:
+            if not subset:
+                continue
+            if len(filter_videos_by_lib(state_vids, root_s)) < len(subset):
+                covered = False
+                break
+        if covered and len(state_vids) >= expected:
+            return state_vids
+
+    # 按盘合并，与侧栏「全部视频」合计一致（不在此写回 STATE，避免与扫描抢写）
+    used_ids: dict[str, str] = {}
+    merged: list[dict] = []
+    for root_s, subset in per_lists:
+        cache = None
+        try:
+            cache = ensure_cache_dir(Path(root_s))
+        except OSError:
+            pass
+        label = root_label(root_s)
+        for raw in subset:
+            item = dict(raw)
+            if not (item.get("_lib_root") or "").strip():
+                stamp_lib_meta([item], root=root_s, cache=cache, overwrite=True)
+            else:
+                stamp_lib_meta([item], root=root_s, cache=cache, overwrite=False)
+            folder = _restore_folder(item, root_s, label)
+            item["_folder_raw"] = item.get("_folder_raw") or folder
+            item["folder"] = folder
+            item["_lib_label"] = item.get("_lib_label") or label
+            item["lib_label"] = item.get("lib_label") or label
+            item["root"] = item.get("root") or root_s
+            _dedupe_id(item, root_s, used_ids)
+            merged.append(item)
+    return merged or state_vids
 
 
 def roots_summary(videos: list[dict] | None = None) -> list[dict]:
