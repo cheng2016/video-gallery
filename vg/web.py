@@ -943,8 +943,7 @@ def api_local(vid: str):
                 "path": play_url,
                 "title": item.get("name") or item.get("filename") or vid,
                 "msg": (
-                    "局域网访问：请用本机播放器打开下载的播放列表，"
-                    "或把地址粘贴到 VLC / PotPlayer"
+                    "局域网访问：已返回本机播放地址，请用 PotPlayer / VLC 打开"
                     if action == "open"
                     else "已返回局域网播放地址（非服务端磁盘路径）"
                 ),

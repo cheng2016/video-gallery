@@ -2868,18 +2868,41 @@
       video.play().catch(() => {});
     }
 
-    function openRemoteWithClientPlayer(playUrl, title) {
-      const safe = String(title || "video").replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || "video";
-      const m3u = `#EXTM3U\n#EXTINF:-1,${safe}\n${playUrl}\n`;
-      const blob = new Blob([m3u], { type: "audio/x-mpegurl" });
-      const href = URL.createObjectURL(blob);
+    function launchClientPlayerScheme(schemeUrl) {
       const a = document.createElement("a");
-      a.href = href;
-      a.download = safe + ".m3u";
+      a.href = schemeUrl;
+      a.rel = "noopener";
+      a.style.display = "none";
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(href), 3000);
+    }
+
+    function preferredLanPlayer() {
+      try {
+        return localStorage.getItem("vg_lan_player") || "potplayer";
+      } catch (_) {
+        return "potplayer";
+      }
+    }
+
+    function setPreferredLanPlayer(name) {
+      try { localStorage.setItem("vg_lan_player", name); } catch (_) {}
+    }
+
+    function openRemoteWithClientPlayer(playUrl) {
+      const pref = preferredLanPlayer();
+      const scheme = pref === "vlc" ? "vlc://" : "potplayer://";
+      launchClientPlayerScheme(scheme + playUrl);
+      const escapeAttr = (s) => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+      const urlAttr = escapeAttr(playUrl);
+      $("modalInfo").innerHTML =
+        "已请求打开本机播放器（" + (pref === "vlc" ? "VLC" : "PotPlayer") + "）。浏览器可能会询问是否允许。<br>" +
+        "若没反应，可切换： " +
+        '<button type="button" class="btn" data-lan-player="potplayer" data-play-url="' + urlAttr + '">PotPlayer</button> ' +
+        '<button type="button" class="btn" data-lan-player="vlc" data-play-url="' + urlAttr + '">VLC</button> ' +
+        '<button type="button" class="btn" data-copy-play-url="' + urlAttr + '">复制地址</button><br>' +
+        "<code style='word-break:break-all'>" + escapeHtml(playUrl) + "</code>";
     }
 
     async function localAction(action) {
@@ -2896,10 +2919,7 @@
           return;
         }
         if (data.remote && action === "open" && data.url) {
-          openRemoteWithClientPlayer(data.url, data.title || (currentPlayMeta && currentPlayMeta.name) || "");
-          $("modalInfo").textContent =
-            (data.msg || "已生成本机播放列表") + "\n" + data.url +
-            "\n用 VLC / PotPlayer 打开下载的 .m3u，或直接粘贴上面的地址";
+          openRemoteWithClientPlayer(data.url);
           return;
         }
         if (action === "path" && data.path) {
@@ -3677,6 +3697,28 @@
     $("btnCancelMp4").addEventListener("click", () => cancelConvertMp4());
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
     $("btnReveal").addEventListener("click", () => localAction("reveal"));
+    $("modalInfo").addEventListener("click", async (e) => {
+      const playerBtn = e.target.closest("[data-lan-player]");
+      if (playerBtn) {
+        const name = playerBtn.dataset.lanPlayer;
+        const playUrl = playerBtn.dataset.playUrl || "";
+        if (!playUrl) return;
+        setPreferredLanPlayer(name);
+        launchClientPlayerScheme((name === "vlc" ? "vlc://" : "potplayer://") + playUrl);
+        return;
+      }
+      const copyBtn = e.target.closest("[data-copy-play-url]");
+      if (copyBtn) {
+        const playUrl = copyBtn.dataset.copyPlayUrl || "";
+        if (!playUrl) return;
+        try {
+          await navigator.clipboard.writeText(playUrl);
+          alert("已复制播放地址");
+        } catch (_) {
+          prompt("复制播放地址：", playUrl);
+        }
+      }
+    });
 
     $("modalClose").addEventListener("click", closePlayer);
     $("modal").addEventListener("click", (e) => {
