@@ -59,7 +59,23 @@ def move_to_trash(path: Path) -> tuple[bool, str]:
     # macOS
     if sys.platform == "darwin":
         try:
-            subprocess.run(["osascript", "-e", f'tell app "Finder" to delete POSIX file "{path_str}"'], check=True, timeout=30)
+            # 路径作为 argv 传给 AppleScript，避免引号、反斜杠等字符被当脚本解析。
+            result = subprocess.run(
+                [
+                    "osascript",
+                    "-e", "on run argv",
+                    "-e", 'tell application "Finder" to delete POSIX file (item 1 of argv)',
+                    "-e", "end run",
+                    path_str,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if path.exists():
+                detail = (result.stderr or result.stdout or "").strip()
+                return False, detail[:300] or "Finder 未能把文件移到废纸篓"
             return True, "已移到废纸篓"
         except Exception as e:
             return False, str(e)

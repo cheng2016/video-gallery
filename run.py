@@ -8,7 +8,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VENV_PY = ROOT / ".venv" / "Scripts" / "python.exe"
+
+
+def venv_python_path(root: Path, platform: str | None = None) -> Path:
+    platform = platform or sys.platform
+    if platform == "win32":
+        return root / ".venv" / "Scripts" / "python.exe"
+    return root / ".venv" / "bin" / "python"
+
+
+VENV_PY = venv_python_path(ROOT)
 REQ = ROOT / "requirements.txt"
 APP = ROOT / "app.py"
 

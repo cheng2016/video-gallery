@@ -16,6 +16,15 @@ from vg.state import STATE
 from vg.util import log
 
 
+def _open_folder(path: str) -> None:
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
 def register(app) -> None:
     @app.route("/api/export-static", methods=["POST"])
     def api_export_static():
@@ -48,10 +57,7 @@ def register(app) -> None:
                 STATE["export_path"] = path or ""
                 if ok and open_folder and path:
                     try:
-                        if sys.platform == "win32":
-                            os.startfile(path)  # type: ignore[attr-defined]
-                        else:
-                            subprocess.Popen(["xdg-open", path])
+                        _open_folder(path)
                     except Exception as error:
                         log(f"[静态导出] 打开目录失败: {error}")
             except Exception as error:
@@ -90,12 +96,7 @@ def register(app) -> None:
         if not path or not Path(path).is_dir():
             return jsonify({"ok": False, "msg": "尚未导出，或目录不存在"}), 404
         try:
-            if sys.platform == "win32":
-                os.startfile(path)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
+            _open_folder(path)
             return jsonify({"ok": True, "path": path})
         except Exception as error:
             return jsonify({"ok": False, "msg": str(error), "path": path}), 500

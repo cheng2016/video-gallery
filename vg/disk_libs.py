@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -23,9 +24,10 @@ _RUNTIME_INDEX_FIELDS = RUNTIME_ONLY_FIELDS
 
 def _root_key(root: Path | str) -> str:
     try:
-        return str(Path(root).expanduser().resolve())
+        value = str(Path(root).expanduser().resolve())
     except OSError:
-        return str(Path(root)).replace("/", "\\").rstrip("\\").lower()
+        value = str(Path(root).expanduser())
+    return os.path.normcase(os.path.normpath(value))
 
 
 def _norm_root_str(root: str | Path | None) -> str:

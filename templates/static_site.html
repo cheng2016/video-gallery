@@ -234,7 +234,7 @@
     <span class="badge">静态离线版</span>
     <input type="search" id="q" placeholder="搜索：拼音/首字母，ext:mkv genre:动作" title="支持拼音与语法过滤" />
     <div class="export-tip" id="exportTip">
-      <span>双击「打开图库.bat」或 index.html 即可浏览。</span>
+      <span>请运行「打开图库.bat」（Windows）或「打开图库.command」（macOS）浏览。</span>
       <button type="button" class="tip-x" id="tipDismiss" title="不再显示">×</button>
     </div>
     <div class="hint" id="fileWarn" style="display:none;color:#ffb4a2"></div>
@@ -984,6 +984,14 @@
       }
 
       if (action === "reveal") {
+        try {
+          const data = await tryBridgePost("reveal", path, v.id);
+          bridgeReady = true;
+          $("minfo").textContent = (data.msg || "已在文件夹中显示") + "\n" + (data.path || path);
+          return;
+        } catch (_) {
+          bridgeReady = false;
+        }
         // 优先用相对目录（http / file 都能打开所在文件夹页）
         let url = "";
         if (v.src) {
@@ -1000,8 +1008,16 @@
         return;
       }
 
-      // 系统播放器：浏览器新标签打开视频文件
       if (action === "open") {
+        try {
+          const data = await tryBridgePost("open", path, v.id);
+          bridgeReady = true;
+          $("minfo").textContent = (data.msg || "已调用系统播放器") + "\n" + (data.path || path);
+          return;
+        } catch (_) {
+          bridgeReady = false;
+        }
+        // 助手不可用时降级为浏览器新标签播放。
         // http 下优先相对路径；file:// 下优先 file:/// 绝对路径
         const url = (ON_HTTP && v.src) ? v.src : (fileUrl || v.src || "");
         if (!openInBrowser(url)) {

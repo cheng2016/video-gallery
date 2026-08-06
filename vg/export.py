@@ -27,6 +27,31 @@ from vg.search import ensure_video_actors
 from vg.state import STATE
 from vg.util import _hide_path_windows, log, video_id
 
+
+def _write_macos_launcher(export_dir: Path) -> Path:
+    command = export_dir / "打开图库.command"
+    command.write_text(
+        "#!/bin/sh\n"
+        "SCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n"
+        "cd \"$SCRIPT_DIR\" || exit 1\n"
+        "export VG_STATIC_PORT=8767\n"
+        "if ! command -v python3 >/dev/null 2>&1; then\n"
+        "  echo \"未找到 Python 3，请先安装 Python 3.10 或更高版本。\"\n"
+        "  printf \"按回车键退出…\"\n"
+        "  read answer\n"
+        "  exit 1\n"
+        "fi\n"
+        "exec python3 \"_cache/static_bridge.py\"\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    try:
+        command.chmod(command.stat().st_mode | 0o111)
+    except OSError:
+        pass
+    return command
+
+
 def _rel_between(from_dir: Path, to_path: Path) -> str:
     """Relative path for same-drive files; empty string when mounts differ."""
     try:
@@ -372,19 +397,21 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
         "pause\r\n",
         encoding="utf-8",
     )
+    _write_macos_launcher(export_dir)
     readme = export_dir / "说明.txt"
     readme.write_text(
         "本地视频库 · 静态离线版\n"
         "====================\n"
-        "【重要】请双击「打开图库.bat」，不要双击 index.html。\n"
+        "【重要】请运行与系统对应的“打开图库”启动器，不要直接打开 index.html。\n"
         "\n"
-        "1. 打开图库.bat：启动本地助手 + 浏览器（系统播放器可用）\n"
-        "2. 打开图库.hta：无 Python 时的备用（系统播放器也可用）\n"
-        "3. 地址栏应是 http://127.0.0.1:8767/ 才正常\n"
-        "4. 预览图在 _cache\\thumbs\\，勿删 _cache\n"
-        "5. 影片仍在原位置，未复制\n"
-        f"6. 导出时间：{datetime.now().isoformat(timespec='seconds')}\n"
-        f"7. 视频根目录：{root}\n",
+        "1. Windows：双击「打开图库.bat」；无 Python 时可使用「打开图库.hta」\n"
+        "2. macOS：双击「打开图库.command」（首次可能需要右键 → 打开）\n"
+        "3. 启动器会启动本地助手和浏览器，系统播放器功能可用\n"
+        "4. 地址栏应是 http://127.0.0.1:8767/ 才正常\n"
+        "5. 预览图在 _cache/thumbs/，勿删 _cache\n"
+        "6. 影片仍在原位置，未复制\n"
+        f"7. 导出时间：{datetime.now().isoformat(timespec='seconds')}\n"
+        f"8. 视频根目录：{root}\n",
         encoding="utf-8",
     )
 
@@ -393,7 +420,7 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
     msg = (
         f"已导出 {len(exported)} 个到：\n{export_dir}\n"
         f"预览图成功 {thumb_ok}，缺图 {thumb_fail}。\n"
-        "双击该目录下「打开图库.bat」即可离线浏览。"
+        "运行该目录下与系统对应的“打开图库”启动器即可离线浏览。"
         f"{skip_tip}"
     )
     log(f"[静态导出] 完成：{export_dir}（{len(exported)} 个，跳过外盘 {skipped}）")

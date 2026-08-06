@@ -27,7 +27,7 @@
 | **硬盘随便插** | 换盘符、换移动硬盘都能扫；删了的片自动从列表消失 |
 | **难播格式也能管** | 浏览器播不了？一键系统播放器；m3u8 / TS 流还能一键转成同目录 MP4 |
 | **能导出纯静态站** | 生成 `index.html`，U 盘拷走、别的电脑直接打开浏览——**不用再装 Python** |
-| **安装极简** | Windows：免安装包双击 `Start-VideoGallery.bat`，或源码双击 `start.bat` |
+| **安装极简** | Windows 有免安装包；Windows/macOS 源码模式均提供双击启动器 |
 
 一句话：**把「文件夹」升级成「片库」**，隐私、速度、可控，全在你手上。
 
@@ -61,11 +61,11 @@
 
 | 项目 | 要求 |
 |------|------|
-| 系统 | **Windows 10 / 11** |
+| 系统 | **Windows 10 / 11**；**macOS 13+**（Intel / Apple Silicon，源码模式） |
 | Python | **3.10+**（源码模式；免安装版不需要） |
-| 依赖 | 首次运行 `start.bat` 自动安装（Flask、waitress） |
-| ffmpeg | **强烈推荐**（预览图 + m3u8/TS 一键转 MP4）；`winget install ffmpeg`。没有也能播，只是没有封面、不能转码 |
-| 浏览器 | Chrome / Edge 等；部分 mkv/avi 建议用页面里的系统播放器 |
+| 依赖 | 首次运行 Windows `start.bat` 或 macOS `start.command` 自动安装 |
+| ffmpeg | **强烈推荐**；Windows：`winget install ffmpeg`，macOS：`brew install ffmpeg` |
+| 浏览器 | Chrome / Edge / Safari 等；部分 mkv/avi 建议用页面里的系统播放器 |
 | 网络 | **不需要外网** |
 
 电脑能跑 Python 就行；盘接本机或 USB 最快，网络盘也能扫会慢一些。
@@ -84,7 +84,7 @@
 > 发布包**不内置** ffmpeg（体积与许可原因）。未安装时仍可浏览与播放，状态栏会提示。
 > 多块盘可分别扫描，会自动加入同一片库；侧栏频道按盘分组。
 
-### 方式 B：源码 / 开发者
+### 方式 B：源码 / Windows
 
 1. 装 [Python 3.10+](https://www.python.org/downloads/)（勾选 Add to PATH）  
 2. （推荐）`winget install ffmpeg`  
@@ -92,6 +92,16 @@
 4. 打开 http://127.0.0.1:8765 → 选盘 →「扫描所选盘」  
 
 关掉黑色窗口 = 停止服务。
+
+### 方式 C：源码 / macOS
+
+1. 安装 [Python 3.10+](https://www.python.org/downloads/macos/)。
+2. 推荐先安装 Homebrew，再运行 `brew install ffmpeg`。
+3. Finder 中双击 **`start.command`**；若被 Gatekeeper 拦截，右键该文件选择“打开”。
+4. 也可在终端运行 `./start.sh ~/Movies`。
+5. 页面会列出 `~/Movies`、`~/Videos`（存在时）和 `/Volumes` 下的外置卷。
+
+首次扫描受保护目录时，请按 macOS 提示允许访问。开启局域网分享后若其它设备无法连接，请在“系统设置 → 网络 → 防火墙 → 选项”中允许 Python 接收传入连接。
 
 ### 自行打包免安装版
 
@@ -106,7 +116,7 @@ build.bat
 
 ## 功能一览
 
-- 盘符：**扫描所选盘**（新盘自动加入片库）/ **重新扫描**（增量）  
+- 磁盘/目录：**扫描所选项**（新磁盘自动加入片库）/ **重新扫描**（增量）
 - 左侧频道：多盘时按盘展开；单盘时按一级文件夹（电影、电视剧、动漫…）  
 - 筛选：排序、**合集 / 单集**视图、类型（动作/恐怖/爱情…有片才显示）、格式、**多层子类**  
   - 合集视图：识别 `S01E02` / `第2集` / `EP02` 等，≥2 集合成一张卡，点开再选分集  
@@ -134,7 +144,7 @@ build.bat
 - **损坏检测**：扫描后后台用 ffprobe 轻量探测，打不开的片标「损坏」  
 - **时长进列表**：自动补时长，可按「最长 / 最短」排序；封面角标优先显示时长  
 - **超大库更流畅**：片多时只渲染可视区域封面（虚拟列表），滚动更轻  
-- 本地操作：系统播放器、资源管理器定位、复制路径  
+- 本地操作：系统播放器、Finder/文件管理器定位、复制路径
 - **导出静态站**：封面规则与动态站一致，同样支持合集/单集切换，拷走即用  
 - 侧栏可隐藏，专注刷片  
 - 扫描时自动跳过过小的假视频（如几 KB 的 `.mp4`）；`.m3u8` 与正常 TS 分片不受影响  
@@ -145,7 +155,7 @@ build.bat
 
 | 操作 | 行为 |
 |------|------|
-| 重启 / 扫描所选盘 | 读缓存索引，不重复截图 |
+| 重启 / 扫描所选项 | 读缓存索引，不重复截图 |
 | 重新扫描 | 全盘重扫；已有预览图仍复用 |
 | 导出静态站 | 已有缩略图直接复用 |
 | 删了的视频 | 加载时自动从列表去掉 |
@@ -201,6 +211,8 @@ https://github.com/cheng2016/video-gallery/issues/new/choose
 
 ## 命令行（可选）
 
+Windows：
+
 ```bat
 start.bat
 start.bat E:\电影
@@ -208,7 +220,16 @@ start.bat E:\电影
 .venv\Scripts\python.exe app.py --rescan
 ```
 
-核心逻辑在 `vg/` 包（扫描、转换、路由等）；根目录 `app.py` 只做启动入口，`start.bat` / `run.py` 用法不变。
+macOS：
+
+```sh
+./start.sh
+./start.sh ~/Movies
+.venv/bin/python app.py "/Volumes/Media" --port 8765
+.venv/bin/python app.py --rescan
+```
+
+核心逻辑在 `vg/` 包（扫描、转换、路由等）；根目录 `app.py` 只做启动入口，`run.py` 负责两种系统的源码环境。
 
 ---
 
@@ -222,4 +243,4 @@ mp4 / mkv / avi / mov / wmv / flv / webm / m4v / ts / m3u8 …
 ---
 
 **硬盘已经替你囤好了世界，缺的只是一个像样的入口。**  
-双击 `start.bat`，开始建造你的私人影院。
+运行 Windows `start.bat` 或 macOS `start.command`，开始建造你的私人影院。

@@ -64,15 +64,42 @@ def _drive_entry(letter: str, dtype: int | None = None) -> dict | None:
     }
 
 
+def _mounted_entry(path: Path, label: str | None = None) -> dict | None:
+    """Build a drive-style entry for a POSIX mount or user media directory."""
+    try:
+        path = path.expanduser().resolve()
+        if not path.is_dir():
+            return None
+    except OSError:
+        return None
+    free_h = total_h = ""
+    try:
+        usage = shutil.disk_usage(path)
+        free_h = _fmt_bytes(usage.free)
+        total_h = _fmt_bytes(usage.total)
+    except OSError:
+        pass
+    name = label or path.name or str(path)
+    return {
+        "letter": name,
+        "path": str(path),
+        "label": name,
+        "type": "目录" if path.is_relative_to(Path.home()) else "挂载卷",
+        "free_h": free_h,
+        "total_h": total_h,
+        "display": name,
+    }
+
+
 def list_drives_info() -> list[dict]:
-    """供前端选择的盘符列表（尽量简单可靠）。"""
+    """供前端选择的磁盘/媒体目录列表（尽量简单可靠）。"""
     drives: list[dict] = []
     seen: set[str] = set()
 
     def add(entry: dict | None) -> None:
         if not entry:
             return
-        key = entry["letter"].upper()
+        key = os.path.normcase(os.path.abspath(entry["path"]))
         if key in seen:
             return
         seen.add(key)
@@ -102,22 +129,30 @@ def list_drives_info() -> list[dict]:
         if not drives:
             for letter in string.ascii_uppercase:
                 add(_drive_entry(letter, 3))
+    elif sys.platform == "darwin":
+        # 用户视频目录是 Mac 上最常见的源码模式入口；外置盘统一挂在
+        # /Volumes。不要枚举 /，否则会把 System、Applications 等当片库。
+        for folder_name in ("Movies", "Videos"):
+            add(_mounted_entry(Path.home() / folder_name, folder_name))
+        volumes = Path("/Volumes")
+        if volumes.is_dir():
+            try:
+                for p in sorted(volumes.iterdir(), key=lambda item: item.name.casefold()):
+                    try:
+                        if p.resolve() == Path("/").resolve():
+                            continue
+                    except OSError:
+                        pass
+                    add(_mounted_entry(p))
+            except OSError:
+                pass
     else:
-        for base in (Path("/media"), Path("/mnt"), Path("/Volumes"), Path("/")):
+        for base in (Path("/media"), Path("/mnt")):
             if not base.is_dir():
                 continue
             try:
                 for p in sorted(base.iterdir()):
-                    if p.is_dir():
-                        add({
-                            "letter": p.name,
-                            "path": str(p),
-                            "label": p.name,
-                            "type": "挂载",
-                            "free_h": "",
-                            "total_h": "",
-                            "display": p.name,
-                        })
+                    add(_mounted_entry(p))
             except OSError:
                 continue
 
@@ -182,7 +217,7 @@ def save_prefs(**kwargs) -> None:
 
 
 def default_scan_root() -> Path:
-    """优先上次打开的盘；否则扫「最后一个盘」。"""
+    """优先上次打开的目录；否则选择安全的默认媒体目录。"""
     prefs = load_prefs()
     last = (prefs.get("last_root") or "").strip()
     if last:
@@ -196,12 +231,16 @@ def default_scan_root() -> Path:
     drives = list_ready_drives()
     if not drives:
         raise SystemExit("未检测到可用硬盘")
-    last_drive = drives[-1]
-    print(f"检测到盘符: {', '.join(str(d) for d in drives)}")
-    print(f"默认扫描最后一个盘: {last_drive}")
-    if len(drives) == 1 and str(last_drive).upper().startswith("C:"):
+    if sys.platform == "darwin":
+        movies = (Path.home() / "Movies").resolve()
+        default_drive = movies if movies in drives else drives[0]
+    else:
+        default_drive = drives[-1]
+    print(f"检测到磁盘/目录: {', '.join(str(d) for d in drives)}")
+    print(f"默认扫描: {default_drive}")
+    if len(drives) == 1 and str(default_drive).upper().startswith("C:"):
         print("提示: 当前只有 C 盘，整盘扫描可能较慢，且会跳过 Windows 系统目录。")
         print('      若视频在子文件夹，建议指定目录: python app.py "C:\\Videos"')
-    return last_drive
+    return default_drive
 
 

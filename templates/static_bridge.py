@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 静态图库本地小助手：服务本目录，并提供系统播放器 / 打开位置。
-由「打开图库.bat」启动；启动后自动打开浏览器。
+由 Windows「打开图库.bat」或 macOS「打开图库.command」启动；
+启动后自动打开浏览器。
 """
 from __future__ import annotations
 
@@ -206,7 +207,7 @@ def main() -> None:
         httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     except OSError as e:
         print(f"端口 {PORT} 无法使用: {e}")
-        print("请关闭占用该端口的程序，或修改 _cache\\bridge.json 的 port")
+        print("请关闭占用该端口的程序，或修改 _cache/bridge.json 的 port")
         input("按回车退出…")
         sys.exit(1)
 

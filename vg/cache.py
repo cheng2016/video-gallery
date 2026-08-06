@@ -221,7 +221,7 @@ def cleanup_legacy_disk_cache(root: Path) -> None:
             shutil.rmtree(p)
             log(f"[清理] 已删除旧版盘根缓存（现已改到程序目录 preview_cache）: {p}")
         except OSError as e:
-            log(f"[清理] 删不掉旧缓存 {p}: {e}（可在资源管理器里手动删除）")
+            log(f"[清理] 删不掉旧缓存 {p}: {e}（可在文件管理器里手动删除）")
 
 
 def save_index(cache: Path, root: Path, videos: list[dict]) -> bool:

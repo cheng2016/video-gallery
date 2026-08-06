@@ -23,8 +23,12 @@ except ImportError:
     print("=" * 50)
     print("【错误】未安装依赖 Flask")
     print("请在本目录运行:")
-    print(r'  .venv\Scripts\pip.exe install -r requirements.txt')
-    print("或重新双击 start.bat")
+    if sys.platform == "win32":
+        print(r"  .venv\Scripts\pip.exe install -r requirements.txt")
+        print("或重新双击 start.bat")
+    else:
+        print("  .venv/bin/pip install -r requirements.txt")
+        print("或重新运行 ./start.sh")
     print("=" * 50)
     input("按回车键退出…")
     sys.exit(1)

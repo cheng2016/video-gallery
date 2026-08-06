@@ -84,7 +84,7 @@ def main():
             bootlog.write(f"chdir failed: {e}")
 
     parser = argparse.ArgumentParser(description="本地视频库 — 浏览器分类浏览播放")
-    parser.add_argument("root", nargs="?", help="视频根目录，例如 D:\\Videos")
+    parser.add_argument("root", nargs="?", help="视频根目录，例如 D:\\Videos 或 ~/Movies")
     parser.add_argument("--port", type=int, default=8765, help="端口，默认 8765")
     parser.add_argument(
         "--host",
@@ -147,7 +147,12 @@ def main():
         next(root.iterdir(), None)
         bootlog.step("root_readable", str(root))
     except PermissionError:
-        fail("没有权限读取该盘/目录", f"路径: {root}\n请用管理员运行，或换一个目录。")
+        permission_hint = (
+            "请在“系统设置 → 隐私与安全性”中授予终端/Python 文件访问权限，或换一个目录。"
+            if sys.platform == "darwin"
+            else "请用管理员运行，或换一个目录。"
+        )
+        fail("没有权限读取该盘/目录", f"路径: {root}\n{permission_hint}")
     except OSError as e:
         fail("无法读取该盘/目录", f"路径: {root}\n原因: {e}")
 
@@ -156,7 +161,12 @@ def main():
     bootlog.write(f"ffmpeg={STATE['ffmpeg']!r}")
     if not STATE["ffmpeg"]:
         print("提示: 未检测到 ffmpeg，将无法生成预览图（不影响播放）。")
-        print("  安装方式: winget install ffmpeg  或从 https://ffmpeg.org 下载")
+        if sys.platform == "darwin":
+            print("  安装方式: brew install ffmpeg")
+        elif sys.platform == "win32":
+            print("  安装方式: winget install ffmpeg  或从 https://ffmpeg.org 下载")
+        else:
+            print("  请使用系统包管理器安装 ffmpeg")
     else:
         print(f"ffmpeg: {STATE['ffmpeg']}")
 
@@ -228,7 +238,7 @@ def main():
             if msg:
                 print(msg)
             if not ok:
-                print("若手机/电视打不开，请用管理员权限运行一次或手动放行防火墙。")
+                print("若手机/电视打不开，请按上方提示手动放行防火墙。")
         except Exception:
             pass
     else:
@@ -255,7 +265,7 @@ def main():
             )
             fail(
                 f"端口 {args.port} 已被占用",
-                f"可能已有一个视频库在运行（请关掉旧的黑窗口）。\n"
+                f"可能已有一个视频库在运行（请关闭旧的启动窗口）。\n"
                 f"或换端口启动:\n  {alt}",
             )
         fail("无法启动网页服务", str(e))

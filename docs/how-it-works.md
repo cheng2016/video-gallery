@@ -4,7 +4,7 @@
 
 ## 1. 扫盘
 
-选盘符后点 **扫描所选盘**。新盘会自动加入统一片库，多块盘可以一起挂着。
+选择磁盘或媒体目录后点 **扫描所选项**。新磁盘会自动加入统一片库，多块盘可以一起挂着。macOS 会显示 `~/Movies`、`~/Videos` 和 `/Volumes` 下的外置卷。
 
 ![扫盘](images/01-scan.jpg)
 
@@ -26,10 +26,11 @@
 
 ---
 
-下载免安装包见 [Releases](https://github.com/cheng2016/video-gallery/releases)。  
+Windows 免安装包见 [Releases](https://github.com/cheng2016/video-gallery/releases)；macOS 源码模式双击仓库中的 `start.command`（首次可右键选择“打开”）。
 示例目录结构见 [`samples/demo-library`](../samples/demo-library/)。
 
 ### 隐私与反馈
 
 - 顶栏 **隐私**：可关预览图加密；可选缓存写在程序目录或视频盘 `.video_gallery_cache`。  
+- macOS 预览图/转码推荐先运行 `brew install ffmpeg`；局域网被拦截时在系统防火墙中允许 Python 接收连接。
 - 顶栏 **反馈** → [中文 Issues 模板](https://github.com/cheng2016/video-gallery/issues/new/choose)（扫不到 / 没声音 / 封面错）。

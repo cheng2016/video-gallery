@@ -1037,12 +1037,12 @@
     <button class="menu-toggle" id="menuBtn" title="显示/隐藏目录">☰</button>
     <div class="brand">本地<span>视频库</span></div>
     <div class="drive-bar">
-      <label for="driveSelect">盘符 <span id="driveCountBadge" class="drive-count">0</span></label>
+      <label for="driveSelect">磁盘/目录 <span id="driveCountBadge" class="drive-count">0</span></label>
       <select id="driveSelect" title="选择要扫描的硬盘">
         <option value="">检测中…</option>
       </select>
-      <button class="btn primary" id="scanDriveBtn" title="扫描所选盘；新盘会自动加入现有片库">扫描所选盘</button>
-      <span class="drive-hint" id="driveHint">正在检测盘符…</span>
+      <button class="btn primary" id="scanDriveBtn" title="扫描所选磁盘或目录；新磁盘会自动加入现有片库">扫描所选项</button>
+      <span class="drive-hint" id="driveHint">正在检测磁盘和媒体目录…</span>
     </div>
     <div class="search-wrap">
       <input type="search" id="search" placeholder="搜索：拼音/首字母，ext:mkv genre:动作 actor:周迅" autocomplete="off" title="支持拼音与首字母；语法：ext:mkv  genre:动作  actor:姓名  channel:电影" />
@@ -1131,7 +1131,7 @@
       <button type="button" class="btn" id="btnCancelMp4" title="取消正在进行的转换" style="display:none">取消转换</button>
       <button type="button" class="btn" id="btnCover" title="用当前画面或指定时间截帧换封面">换封面</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
-      <button type="button" class="btn" id="btnReveal" title="在资源管理器中显示">打开位置</button>
+      <button type="button" class="btn" id="btnReveal" title="在文件管理器中显示">打开位置</button>
     </div>
     <div id="coverPanel" class="cover-panel" style="display:none">
       <label>截帧时间（秒） <input type="number" id="coverSeek" min="0" step="0.5" value="3" style="width:5em" /></label>
@@ -1157,7 +1157,7 @@
       <button class="modal-close" id="privacyModalClose" title="关闭">×</button>
     </div>
     <div class="modal-info" style="line-height:1.6;max-width:36rem">
-      <p style="margin:0 0 12px;opacity:.85">囤片场景常用：预览图不想被资源管理器直接打开看；缓存不想写到视频盘占空间或暴露目录。</p>
+      <p style="margin:0 0 12px;opacity:.85">囤片场景常用：预览图不想被文件管理器直接打开看；缓存不想写到视频盘占空间或暴露目录。</p>
       <label style="display:flex;align-items:flex-start;gap:10px;margin:12px 0;cursor:pointer">
         <input type="checkbox" id="privacyEncrypt" style="margin-top:4px" />
         <span>
@@ -1578,7 +1578,7 @@
 
     async function loadDrives() {
       const sel = $("driveSelect");
-      $("driveHint").textContent = "正在检测盘符…";
+      $("driveHint").textContent = "正在检测磁盘和媒体目录…";
 
       const apply = (data) => {
         state.drives = data.drives || [];
@@ -1586,8 +1586,8 @@
         const n = state.drives.length;
         $("driveCountBadge").textContent = String(n);
         if (!n) {
-          sel.innerHTML = '<option value="">未检测到盘符</option>';
-          $("driveHint").textContent = "未检测到可用盘符";
+          sel.innerHTML = '<option value="">未检测到磁盘或媒体目录</option>';
+          $("driveHint").textContent = "未检测到可用磁盘或媒体目录";
           return;
         }
         const prev = sel.value;
@@ -1595,18 +1595,18 @@
         sel.innerHTML = state.drives.map((d) => {
           const free = d.free_h ? ("（剩余 " + d.free_h + "）") : "";
           const text = (d.display || d.letter) + free;
-          const val = d.letter || d.path;
+          const val = d.path;
           return '<option value="' + escapeAttr(val) + '">' + escapeHtml(text) + "</option>";
         }).join("");
         const active = state.drives.find((d) => d.active);
-        const pick = (d) => d.letter || d.path;
+        const pick = (d) => d.path;
         const prefer = state._preferDrive;
         if (prefer && [...sel.options].some((o) => o.value === prefer)) sel.value = prefer;
         else if (active) sel.value = pick(active);
         else if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
-        else sel.value = pick(state.drives[n - 1]);
+        else sel.value = pick(state.drives[0]);
         state._preferDrive = sel.value;
-        $("driveHint").textContent = "已检测到 " + n + " 个盘符：" + letters;
+        $("driveHint").textContent = "已检测到 " + n + " 个磁盘/目录：" + letters;
         updateDriveHint(true);
         saveUiPrefs();
         const scanning = !!data.scanning;
@@ -1630,9 +1630,9 @@
         apply(data);
         return data;
       } catch (e) {
-        console.warn("加载盘符失败", e);
+        console.warn("加载磁盘/目录失败", e);
         if (!(window.__BOOT_DRIVES__ && window.__BOOT_DRIVES__.drives && window.__BOOT_DRIVES__.drives.length)) {
-          $("driveHint").textContent = "盘符检测失败，请关闭黑窗口后重新运行 start.bat";
+          $("driveHint").textContent = "磁盘检测失败，请重启应用";
         }
         return window.__BOOT_DRIVES__ || { drives: [] };
       }
@@ -1640,16 +1640,16 @@
 
     function updateDriveHint(keepCountText) {
       const val = $("driveSelect").value;
-      const d = state.drives.find((x) => x.letter === val || x.path === val);
+      const d = state.drives.find((x) => x.path === val);
       if (!d) return;
       const parts = [];
       if (!keepCountText) {
-        parts.push(`已检测到 ${state.drives.length} 个盘符`);
+        parts.push(`已检测到 ${state.drives.length} 个磁盘/目录`);
       } else {
         // 保留「已检测到 N 个」前缀，后面追加当前盘信息
         const letters = state.drives.map((x) => x.letter).join("、");
         $("driveHint").textContent =
-          `已检测到 ${state.drives.length} 个盘符：${letters}` +
+          `已检测到 ${state.drives.length} 个磁盘/目录：${letters}` +
           (d.type ? ` · 当前 ${d.letter} ${d.type}` : "") +
           (d.total_h ? ` 共${d.total_h}` : "");
         return;
@@ -1661,7 +1661,7 @@
 
     function selectedDrivePath() {
       const val = $("driveSelect").value;
-      const d = state.drives.find((x) => x.letter === val || x.path === val);
+      const d = state.drives.find((x) => x.path === val);
       return d ? d.path : val;
     }
 
@@ -1767,7 +1767,7 @@
     async function scanSelectedDrive(force) {
       const path = selectedDrivePath();
       if (!path) {
-        alert("请先选择盘符");
+        alert("请先选择磁盘或目录");
         return;
       }
       $("scanDriveBtn").disabled = true;
@@ -3589,7 +3589,7 @@
           try { await refreshTree(); } catch (_) {}
           return;
         }
-        if (!confirm("开启后，同一 WiFi 下的手机/电视可立刻用浏览器打开（无需重启）。\n若仍连不上，多半是 Windows 防火墙，程序会尝试自动放行。继续？")) return;
+        if (!confirm("开启后，同一 WiFi 下的手机/电视可立刻用浏览器打开（无需重启）。\nWindows 会尝试自动放行防火墙；macOS 可能要求在系统设置中允许 Python 传入连接。继续？")) return;
         const r = await fetch("/api/share", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3984,7 +3984,7 @@
         "导出纯静态站？\n\n" +
         "会生成到当前盘根目录下的 _video_gallery_static/\n" +
         "内含 index.html、预览图、data.js。\n" +
-        "之后双击「打开图库.bat」即可浏览，无需启动本服务。\n" +
+        "之后运行目录中的「打开图库」启动器即可浏览，无需启动本服务。\n" +
         "（视频文件不会被复制，仍引用原路径。）"
       )) return;
       $("exportStaticBtn").disabled = true;
@@ -4048,26 +4048,26 @@
 
     setupScopeSticky();
 
-    // 打开页面：先自动检测盘符数量，再刷新列表
+    // 打开页面：先自动检测磁盘/媒体目录数量，再刷新列表
     (async () => {
-      $("status").textContent = "正在自动检测本机盘符…";
+      $("status").textContent = "正在自动检测本机磁盘和媒体目录…";
       const driveData = await loadDrives();
       const n = (driveData.drives || state.drives || []).length;
       const letters = (state.drives || []).map((d) => d.letter).join("、");
       $("status").textContent = n
-        ? `已自动检测到 ${n} 个盘符${letters ? "：" + letters : ""}。选择盘符后点「扫描所选盘」，不同盘会自动加入同一片库。`
-        : "未检测到盘符，请检查硬盘是否已连接，或重启 start.bat";
+        ? `已自动检测到 ${n} 个磁盘/目录${letters ? "：" + letters : ""}。选择后点「扫描所选项」，不同磁盘会自动加入同一片库。`
+        : "未检测到磁盘或媒体目录，请检查硬盘是否已连接，或重启应用";
 
       await refreshTree();
       await refresh();
       const d = await fetchTree();
       startPoll();
       if (!d.scanning && n) {
-        // 若服务端还没在扫，状态里保留盘符检测结果
+        // 若服务端还没在扫，状态里保留磁盘检测结果
         const cur = $("status").textContent || "";
         if (!cur.includes("扫描")) {
           $("status").textContent =
-            `已自动检测到 ${n} 个盘符${letters ? "：" + letters : ""} · 当前 ${d.root || selectedDrivePath() || ""}`;
+            `已自动检测到 ${n} 个磁盘/目录${letters ? "：" + letters : ""} · 当前 ${d.root || selectedDrivePath() || ""}`;
         }
       }
     })();

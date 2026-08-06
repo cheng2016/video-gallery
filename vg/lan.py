@@ -39,6 +39,11 @@ def ensure_firewall_allow(port: int) -> tuple[bool, str]:
     规则覆盖公用网络，但把来源限制为本地子网，避免在不可信网络上
     向所有远端地址暴露服务。仅在用户主动开启局域网分享时调用。
     """
+    if sys.platform == "darwin":
+        return True, (
+            "macOS 若弹出网络连接提示，请选择“允许”。若其它设备仍无法连接，"
+            "请前往“系统设置 → 网络 → 防火墙 → 选项”，允许 Python 接收传入连接。"
+        )
     if sys.platform != "win32":
         return True, ""
     port = int(port)

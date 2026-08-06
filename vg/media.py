@@ -38,12 +38,19 @@ def find_ffmpeg() -> str | None:
     exe = shutil.which("ffmpeg")
     if exe:
         return exe
-    # 常见 Windows 安装位置
-    candidates = [
-        r"C:\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe"),
-    ]
+    if sys.platform == "darwin":
+        # Finder 启动的进程通常没有 Homebrew/MacPorts 的 shell PATH。
+        candidates = [
+            "/opt/homebrew/bin/ffmpeg",  # Apple Silicon Homebrew
+            "/usr/local/bin/ffmpeg",     # Intel Homebrew
+            "/opt/local/bin/ffmpeg",     # MacPorts
+        ]
+    else:
+        candidates = [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe"),
+        ]
     for c in candidates:
         if os.path.isfile(c):
             return c
