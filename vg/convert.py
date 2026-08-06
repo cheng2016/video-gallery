@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 from vg.cache import thumb_file_ready, thumb_path, thumb_version
+from vg.catalog import build_tree, rebuild_indexes
+from vg.catalog_repository import find_video_by_id
 from vg.config import (
     CONVERT_MAX_PARALLEL,
     PROBE_META_VER,
@@ -34,7 +36,6 @@ from vg.media import (
     probe_duration,
     probe_media_info,
 )
-from vg.scan import build_tree, find_video_by_id, rebuild_indexes
 from vg.state import STATE, _convert_lock
 from vg.util import (
     format_size,

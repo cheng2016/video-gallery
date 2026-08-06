@@ -18,6 +18,7 @@ from vg.config import (
     THUMB_JPEG_CACHE_MAX,
     VGDATA_DIR,
 )
+from vg.schema import INDEX_SCHEMA_VERSION, serialize_video_item
 from vg.state import STATE, _thumb_jpeg_cache, _thumb_jpeg_lock
 from vg.util import _clear_path_attrs_windows, log
 
@@ -230,16 +231,11 @@ def save_index(cache: Path, root: Path, videos: list[dict]) -> bool:
         cache.mkdir(parents=True, exist_ok=True)
         _clear_path_attrs_windows(path)
         _clear_path_attrs_windows(tmp)
-        # 去掉运行期字段，减小索引体积
-        clean = []
-        for v in videos:
-            if "_q" in v:
-                clean.append({k: val for k, val in v.items() if k != "_q"})
-            else:
-                clean.append(v)
+        # 所有落盘路径统一使用 schema 契约，避免运行期字段泄漏。
+        clean = [serialize_video_item(v) for v in videos]
         payload = json.dumps(
             {
-                "schema_ver": 2,
+                "schema_ver": INDEX_SCHEMA_VERSION,
                 "root": str(root.resolve()),
                 "videos": clean,
                 "updated": datetime.now().isoformat(),

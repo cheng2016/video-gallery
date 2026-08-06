@@ -9,6 +9,7 @@ from pathlib import Path
 
 from vg.cache import ensure_cache_dir, save_index
 from vg.config import INDEX_NAME, VGDATA_DIR
+from vg.schema import RUNTIME_ONLY_FIELDS, serialize_video_item
 from vg.state import STATE
 from vg.util import log
 
@@ -16,19 +17,8 @@ _MAX_DISK_LIBS = 12
 _libs_lock = threading.RLock()
 _scanned_caches = False
 
-_RUNTIME_INDEX_FIELDS = {
-    "_q",
-    "_thumb_id",
-    "_lib_label",
-    "dup",
-    "dup_n",
-    "dup_reason",
-    "series_id",
-    "series_title",
-    "series_n",
-    "cover_id",
-    "is_series",
-}
+# Backward-compatible private alias; schema.py is the single source of truth.
+_RUNTIME_INDEX_FIELDS = RUNTIME_ONLY_FIELDS
 
 
 def _root_key(root: Path | str) -> str:
@@ -71,18 +61,7 @@ def stamp_lib_meta(
 
 def _disk_item(item: dict, root_s: str, cache: Path) -> dict:
     """Return a canonical per-disk record from a possibly merged runtime item."""
-    out = {k: val for k, val in item.items() if k not in _RUNTIME_INDEX_FIELDS}
-    # A merged id may be remapped to avoid a collision with another disk. The
-    # original id remains the thumbnail/source id and is what belongs on disk.
-    source_id = (item.get("_thumb_id") or item.get("id") or "").strip()
-    if source_id:
-        out["id"] = source_id
-    out["_lib_root"] = root_s
-    out["_lib_cache"] = str(cache)
-    out["root"] = root_s
-    if "_folder_raw" not in out:
-        out["_folder_raw"] = (out.get("folder") or "").replace("\\", "/").strip("/")
-    return out
+    return serialize_video_item(item, root=root_s, cache=cache)
 
 
 def item_belongs_to_root(item: dict, root: Path | str) -> bool:

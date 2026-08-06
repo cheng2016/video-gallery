@@ -17,17 +17,20 @@ from vg.cache import (
     thumb_path,
     thumb_version,
 )
+from vg.catalog import (
+    build_tree,
+    rebuild_indexes,
+    video_category as _video_category,
+    video_search_text as _video_search_text,
+)
 from vg.config import (
-    GENRE_DEFS,
     INDEX_NAME,
-    MIN_VIDEO_FILE_BYTES,
     PLAYLIST_EXTS,
     THUMB_EXT,
     VIDEO_EXTS,
 )
 from vg.disk_libs import (
     archive_current_library,
-    find_in_disk_libs,
     save_library_item,
     stamp_lib_meta,
     store_live_library,
@@ -36,7 +39,6 @@ from vg.disk_libs import (
 from vg.drives import save_prefs
 from vg.genres import detect_genres, ensure_video_genres
 from vg.segments import collapse_segment_sets
-from vg.series import attach_series
 from vg.state import STATE, _scan_lock
 from vg.util import (
     format_size,
@@ -66,150 +68,6 @@ def _same_root(a: str | Path | None, b: str | Path | None) -> bool:
         return str(a).replace("/", "\\").rstrip("\\").casefold() == str(b).replace(
             "/", "\\"
         ).rstrip("\\").casefold()
-
-
-def _video_search_text(v: dict) -> str:
-    cached = v.get("_q")
-    if cached is not None:
-        return cached
-    from vg.search import build_search_text
-
-    text = build_search_text(v)
-    v["_q"] = text
-    return text
-
-
-def duplicate_name_key(v: dict) -> str:
-    return (v.get("name") or Path(v.get("filename") or "").stem or "").strip().casefold()
-
-
-def mark_duplicates(videos: list[dict]) -> None:
-    """
-    标记疑似重复片：
-    - 同名（忽略大小写/首尾空格）且均非 m3u8；
-    - 或体积完全相同且 ≥ MIN_VIDEO_FILE_BYTES（排除小文件噪声）。
-    写入 dup / dup_n / dup_reason，供前端展示。
-    """
-    for v in videos:
-        v.pop("dup", None)
-        v.pop("dup_n", None)
-        v.pop("dup_reason", None)
-
-    by_name: dict[str, list[dict]] = {}
-    by_size: dict[int, list[dict]] = {}
-    for v in videos:
-        kind = v.get("kind") or ""
-        if kind in ("m3u8", "ts_set"):
-            continue
-        name_key = duplicate_name_key(v)
-        if name_key:
-            by_name.setdefault(name_key, []).append(v)
-        size = int(v.get("size") or 0)
-        if size >= MIN_VIDEO_FILE_BYTES:
-            by_size.setdefault(size, []).append(v)
-
-    def _flag(group: list[dict], reason: str) -> None:
-        if len(group) < 2:
-            return
-        n = len(group)
-        for v in group:
-            prev = int(v.get("dup_n") or 0)
-            v["dup"] = True
-            v["dup_n"] = max(prev, n)
-            reasons = set(str(v.get("dup_reason") or "").split("+")) if v.get("dup_reason") else set()
-            reasons.discard("")
-            reasons.add(reason)
-            v["dup_reason"] = "+".join(sorted(reasons))
-
-    for group in by_name.values():
-        _flag(group, "同名")
-    for group in by_size.values():
-        # 同体积且「盘+相对路径」不同才算（跨盘同 rel 也算重复）
-        paths = {
-            (
-                (g.get("_lib_root") or g.get("root") or "").strip().lower(),
-                (g.get("rel") or "").replace("\\", "/").strip("/").lower(),
-                g.get("id") or "",
-            )
-            for g in group
-        }
-        if len(paths) >= 2:
-            _flag(group, "同体积")
-
-
-def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> None:
-    """扫描结束后预计算频道索引与侧面统计，加速 /api/tree、/api/videos。
-
-    heavy=False：跳过重复检测与强制重算拼音（扫描中途/轻量刷新用）。
-    """
-    videos = videos if videos is not None else STATE.get("videos") or []
-    if heavy:
-        mark_duplicates(videos)
-        attach_series(videos)
-    else:
-        # 剧集折叠仍需要 series 字段；重复标记可延后到完整重建
-        attach_series(videos)
-    by_cat: dict[str, list] = {}
-    by_id: dict[str, dict] = {}
-    type_counts: dict[str, int] = {}
-    cat_counts: dict[str, int] = {}
-    genre_counts: dict[str, int] = {}
-
-    for v in videos:
-        vid = v.get("id")
-        if vid:
-            by_id[vid] = v
-        if heavy:
-            v.pop("_q", None)  # 强制重算拼音/演员搜索串
-        _video_search_text(v)
-        cat = _video_category(v)
-        by_cat.setdefault(cat, []).append(v)
-        cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        ext = (v.get("ext") or "").lower() or "unknown"
-        type_counts[ext] = type_counts.get(ext, 0) + 1
-        for g in ensure_video_genres(v):
-            genre_counts[g] = genre_counts.get(g, 0) + 1
-
-    types = [
-        {"ext": ext, "count": cnt, "label": ext.lstrip(".").upper() or "未知"}
-        for ext, cnt in sorted(type_counts.items(), key=lambda x: (-x[1], x[0]))
-    ]
-    genre_order = {name: i for i, (name, _) in enumerate(GENRE_DEFS)}
-    genres = [
-        {"id": name, "name": name, "count": cnt}
-        for name, cnt in sorted(
-            genre_counts.items(),
-            key=lambda x: (genre_order.get(x[0], 999), -x[1], x[0]),
-        )
-        if cnt > 0
-    ]
-    prefer = ["电影", "电视剧", "综艺", "动漫", "少儿", "纪录片", "短剧", "体育", "音乐", "教育", "其他", ""]
-    prefer_rank = {n: i for i, n in enumerate(prefer)}
-
-    def cat_sort_key(item: tuple[str, int]):
-        name, cnt = item
-        return (prefer_rank.get(name, 100), -cnt, name.lower())
-
-    categories = []
-    for name, cnt in sorted(cat_counts.items(), key=cat_sort_key):
-        categories.append({
-            "id": name,
-            "name": "未分类" if name == "" else name,
-            "count": cnt,
-        })
-
-    STATE["videos"] = videos
-    STATE["by_category"] = by_cat
-    STATE["by_id"] = by_id
-    # 多盘条目已有 _lib_root，绝不能用当前 STATE.root 全量覆盖
-    stamp_lib_meta(videos, overwrite=False)
-    STATE["facets"] = {
-        "types": types,
-        "genres": genres,
-        "categories": categories,
-        "count": len(videos),
-    }
-    STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
 
 
 def start_scan(
@@ -349,51 +207,6 @@ def _bg_incremental_scan(root: Path, do_thumbs: bool) -> None:
             _scan_lock.release()
         except RuntimeError:
             pass
-
-def build_tree(root: Path, videos: list[dict], *, with_videos: bool = False) -> dict:
-    """按相对路径文件夹层级建树。
-
-    with_videos=False（默认）：节点只带 count/children，不内嵌整片条目。
-    侧栏树只要计数；内嵌数千条会让 /api/tree JSON 巨大并卡死前台。
-    """
-    root_node = {"name": root.name or str(root), "path": "", "children": {}, "videos": []}
-
-    for v in videos:
-        parts = Path(v["rel"]).parts
-        folders, filename = parts[:-1], parts[-1]
-        node = root_node
-        cum = []
-        for folder in folders:
-            cum.append(folder)
-            key = "/".join(cum)
-            if folder not in node["children"]:
-                node["children"][folder] = {
-                    "name": folder,
-                    "path": key,
-                    "children": {},
-                    "videos": [],
-                }
-            node = node["children"][folder]
-        if with_videos:
-            node["videos"].append(v)
-        else:
-            # placeholder so finalize can count leaf files
-            node["videos"].append(1)
-
-    def finalize(n: dict) -> dict:
-        children = [finalize(c) for c in sorted(n["children"].values(), key=lambda x: x["name"].lower())]
-        leaf_n = len(n["videos"])
-        count = leaf_n + sum(c["count"] for c in children)
-        return {
-            "name": n["name"],
-            "path": n["path"],
-            "count": count,
-            "children": children,
-            "videos": [] if not with_videos else sorted(n["videos"], key=lambda x: (x.get("name") or "").lower()),
-        }
-
-    return finalize(root_node)
-
 
 def _load_old_video_map(cache: Path, root: Path) -> dict[str, dict]:
     """从索引建立 rel → 条目，供增量复用（TS 合集拆成段后不进 map，行走时重收）。"""
@@ -848,62 +661,9 @@ def _fill_missing_thumbs(missing: list[dict]) -> None:
                 log(f"[预览图] 保存单条索引失败: {e}")
 
 
-
 def find_video_by_id(vid: str, prefer_root: str | None = None) -> dict | None:
-    """Find video in active library, then archived / cached disk indexes.
+    """Compatibility wrapper; lookup ownership lives in catalog_repository."""
+    from vg.catalog_repository import find_video_by_id as repository_lookup
 
-    prefer_root: when history remembers which disk, prefer that library (avoids id collision).
-    """
-    from vg.disk_libs import ensure_cached_indexes_scanned, ensure_library, read_root_library
-
-    prefer = (prefer_root or "").strip() or None
-    if prefer:
-        ensure_library(prefer)
-        hit = find_in_disk_libs(vid, prefer_root=prefer)
-        if hit is not None:
-            return hit
-        for item in STATE.get("videos") or []:
-            item_root = item.get("_lib_root") or item.get("root") or ""
-            if not _same_root(item_root, prefer):
-                continue
-            if item.get("id") == vid or item.get("_thumb_id") == vid:
-                return item
-        saved = read_root_library(prefer)
-        if saved is not None:
-            hit = next(
-                (
-                    item
-                    for item in saved
-                    if item.get("id") == vid or item.get("_thumb_id") == vid
-                ),
-                None,
-            )
-            if hit is not None:
-                return hit
-        return None
-
-    by_id = STATE.get("by_id") or {}
-    hit = by_id.get(vid)
-    if hit is not None:
-        return hit
-    hit = next((v for v in STATE.get("videos") or [] if v.get("id") == vid), None)
-    if hit is not None:
-        return hit
-
-    hit = find_in_disk_libs(vid, prefer_root=None)
-    if hit is not None:
-        return hit
-
-    # 冷启动 / 未归档过的盘：扫一遍 preview_cache 里仍在线的索引
-    ensure_cached_indexes_scanned()
-    return find_in_disk_libs(vid, prefer_root=prefer)
-
-
-def _video_category(v: dict) -> str:
-    """一级目录作为频道。"""
-    folder = (v.get("folder") or "").strip("/")
-    if not folder:
-        return ""
-    return folder.split("/")[0]
-
+    return repository_lookup(vid, prefer_root)
 

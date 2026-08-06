@@ -1194,12 +1194,21 @@
       <div class="title">片库清理</div>
       <button class="modal-close" id="cleanupModalClose" title="关闭">×</button>
     </div>
-    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;align-items:center;gap:8px">
       <button type="button" class="btn primary" id="cleanupTabDup">重复</button>
       <button type="button" class="btn" id="cleanupTabBad">损坏</button>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px">
+        盘
+        <select id="cleanupLib" style="max-width:9em" title="限制在某一盘内查找"></select>
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px">
+        频道
+        <select id="cleanupCat" style="max-width:10em" title="限制在某一频道（一级目录）内查找"></select>
+      </label>
       <button type="button" class="btn" id="cleanupBatchFix" title="把勾选中需修声音的加入限速队列">批量修声音</button>
       <button type="button" class="btn" id="cleanupBatchMp4" title="把勾选中的 m3u8/TS 合集加入限速队列">批量转MP4</button>
     </div>
+    <div id="cleanupHint" class="modal-info" style="padding:8px 14px 0;color:var(--muted);font-size:12px;line-height:1.5"></div>
     <div class="modal-info" id="cleanupBody" style="flex:1;overflow:auto;max-height:65vh"></div>
   </div>
 
@@ -3205,6 +3214,10 @@
     });
 
     let cleanupType = "dup";
+    let cleanupLib = "";
+    let cleanupCat = "";
+    let cleanupScopeReady = false;
+
     function thumbHtml(id, thumbV, hasThumb, root) {
       const vid = id || "";
       const tv = thumbV || (hasThumb ? 1 : 0);
@@ -3229,21 +3242,103 @@
       }
       return items[0].id;
     }
-    async function loadCleanup(type) {
+
+    function fillCleanupScopeSelects(data) {
+      const libSel = $("cleanupLib");
+      const catSel = $("cleanupCat");
+      if (!libSel || !catSel) return;
+      const roots = data.roots || state.mountedRoots || [];
+      const prevLib = cleanupLib;
+      libSel.innerHTML = `<option value="">全部盘</option>` + roots.map((r) => {
+        const path = r.path || "";
+        const label = r.label || path;
+        const n = r.count != null ? `（${r.count}）` : "";
+        return `<option value="${escapeAttr(path)}">${escapeHtml(label)}${n}</option>`;
+      }).join("");
+      if (prevLib && [...libSel.options].some((o) => sameLibPath(o.value, prevLib))) {
+        const hit = [...libSel.options].find((o) => sameLibPath(o.value, prevLib));
+        if (hit) libSel.value = hit.value;
+      } else {
+        libSel.value = "";
+        cleanupLib = "";
+      }
+      cleanupLib = libSel.value || "";
+
+      const cats = data.categories || [];
+      const prevCat = cleanupCat;
+      catSel.innerHTML = `<option value="">全部频道</option>` + cats.map((c) => {
+        const id = c.id == null ? "" : String(c.id);
+        const name = c.name || id || "未分类";
+        const n = c.count != null ? `（${c.count}）` : "";
+        return `<option value="${escapeAttr(id)}">${escapeHtml(name)}${n}</option>`;
+      }).join("");
+      if (prevCat && [...catSel.options].some((o) => o.value === prevCat)) {
+        catSel.value = prevCat;
+      } else {
+        catSel.value = "";
+        cleanupCat = "";
+      }
+      cleanupCat = catSel.value || "";
+    }
+
+    async function loadCleanup(type, opts) {
+      opts = opts || {};
       cleanupType = type || "dup";
       $("cleanupTabDup").classList.toggle("primary", cleanupType === "dup");
       $("cleanupTabBad").classList.toggle("primary", cleanupType === "bad");
+      if (!cleanupScopeReady || opts.fromBrowse) {
+        cleanupLib = state.lib || "";
+        cleanupCat = state.category || "";
+        cleanupScopeReady = true;
+      }
       const body = $("cleanupBody");
+      const hint = $("cleanupHint");
       body.innerHTML = "加载中…";
+      if (hint) hint.textContent = "正在按所选范围扫描…";
       try {
-        const data = await fetch("/api/cleanup?type=" + encodeURIComponent(cleanupType)).then((r) => r.json());
+        const params = new URLSearchParams();
+        params.set("type", cleanupType);
+        if (cleanupLib) params.set("lib", cleanupLib);
+        if (cleanupCat) params.set("category", cleanupCat);
+        const data = await fetch("/api/cleanup?" + params).then((r) => r.json());
         if (!data.ok) {
           body.textContent = data.msg || "加载失败";
           return;
         }
+        fillCleanupScopeSelects(data);
+        // Keep selects aligned with what the API actually used
+        if (data.scope) {
+          if (data.scope.lib != null) cleanupLib = data.scope.lib || "";
+          if (data.scope.category != null) cleanupCat = data.scope.category || "";
+          if ($("cleanupLib") && cleanupLib) {
+            const hit = [...$("cleanupLib").options].find((o) => sameLibPath(o.value, cleanupLib));
+            if (hit) $("cleanupLib").value = hit.value;
+          }
+          if ($("cleanupCat")) $("cleanupCat").value = cleanupCat;
+        }
+        const scope = data.scope || {};
+        const scopeBits = [];
+        if (cleanupLib) {
+          const r = (data.roots || []).find((x) => sameLibPath(x.path, cleanupLib));
+          scopeBits.push(r ? r.label : "当前盘");
+        } else {
+          scopeBits.push("全部盘");
+        }
+        if (cleanupCat === "__root__") scopeBits.push("未分类");
+        else if (cleanupCat) scopeBits.push(cleanupCat);
+        else scopeBits.push("全部频道");
+        scopeBits.push(`范围内 ${scope.video_count != null ? scope.video_count : "?"} 部`);
+        if (hint) {
+          hint.innerHTML = `<strong>范围</strong>：${escapeHtml(scopeBits.join(" · "))}。`
+            + ` <strong>判定</strong>：${escapeHtml(scope.rules || "同名或同体积的不同文件")}。`
+            + ` 切换上方「盘 / 频道」后会重新扫描。`;
+        }
         const groups = (data.groups || []).filter((g) => (g.items || []).length);
         if (!groups.length) {
-          body.textContent = cleanupType === "bad" ? "没有标记为损坏的文件" : "没有发现重复组";
+          body.textContent = cleanupType === "bad"
+            ? "当前范围内没有标记为损坏的文件"
+            : "当前范围内没有发现重复组（可换频道或选「全部频道」再试）";
+          body.dataset.groups = "[]";
           return;
         }
         body.innerHTML = groups.map((g, gi) => {
@@ -3290,7 +3385,7 @@
 
     $("cleanupBtn").addEventListener("click", () => {
       $("cleanupModal").classList.add("open");
-      loadCleanup("dup");
+      loadCleanup("dup", { fromBrowse: true });
     });
     $("cleanupModalClose").addEventListener("click", () => $("cleanupModal").classList.remove("open"));
     $("cleanupModal").addEventListener("click", (e) => {
@@ -3298,6 +3393,20 @@
     });
     $("cleanupTabDup").addEventListener("click", () => loadCleanup("dup"));
     $("cleanupTabBad").addEventListener("click", () => loadCleanup("bad"));
+    if ($("cleanupLib")) {
+      $("cleanupLib").addEventListener("change", () => {
+        cleanupLib = $("cleanupLib").value || "";
+        cleanupCat = "";
+        if ($("cleanupCat")) $("cleanupCat").value = "";
+        loadCleanup(cleanupType);
+      });
+    }
+    if ($("cleanupCat")) {
+      $("cleanupCat").addEventListener("change", () => {
+        cleanupCat = $("cleanupCat").value || "";
+        loadCleanup(cleanupType);
+      });
+    }
     async function cleanupBatchConvert(kind) {
       const items = Array.from(document.querySelectorAll(".cleanup-check:checked"))
         .map((el) => ({ id: el.dataset.id, root: el.dataset.root || "", rel: el.dataset.rel || "" }))

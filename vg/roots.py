@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 from vg.cache import ensure_cache_dir
+from vg.catalog import build_category_facets, build_tree, rebuild_indexes, video_category
 from vg.disk_libs import (
     archive_current_library,
     ensure_library,
@@ -16,7 +17,6 @@ from vg.disk_libs import (
     _norm_root_str,
 )
 from vg.drives import save_prefs
-from vg.scan import build_tree, rebuild_indexes
 from vg.state import STATE
 from vg.util import log
 
@@ -269,11 +269,7 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
 
     每盘频道独立统计，不依赖「合并后可能被冲坏」的 STATE.videos 归属。
     """
-    from vg.scan import _video_category
-
     roots = get_mounted_roots()
-    prefer = ["电影", "电视剧", "综艺", "动漫", "少儿", "纪录片", "短剧", "体育", "音乐", "教育", "其他", ""]
-    prefer_rank = {n: i for i, n in enumerate(prefer)}
     out = []
     for r in roots:
         # 优先按盘取片：STATE 打标 / 刚扫完 / 盘上 index / disk_libs
@@ -282,23 +278,13 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
             subset = filter_videos_by_lib(videos, r)
         cat_counts: dict[str, int] = {}
         for v in subset:
-            cat = _video_category(v)
+            cat = video_category(v)
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        categories = []
-        for name, cnt in sorted(
-            cat_counts.items(),
-            key=lambda x: (prefer_rank.get(x[0], 100), -x[1], x[0].lower()),
-        ):
-            categories.append({
-                "id": name,
-                "name": "未分类" if name == "" else name,
-                "count": cnt,
-            })
         out.append({
             "path": r,
             "label": root_label(r),
             "count": len(subset),
-            "categories": categories,
+            "categories": build_category_facets(cat_counts),
         })
     return out
 

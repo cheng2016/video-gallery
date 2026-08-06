@@ -37,21 +37,19 @@ from vg.cache import (
     thumb_path,
     thumb_version,
 )
+from vg.catalog import (
+    build_category_facets,
+    rebuild_indexes,
+    video_category as _video_category,
+    video_search_text as _video_search_text,
+)
+from vg.catalog_repository import find_video_by_id
 from vg.config import (
     APP_DIR,
     BROWSER_FRIENDLY_EXTS,
     BROWSER_HARD_EXTS,
     GENRE_DEFS,
-    MIN_VIDEO_FILE_BYTES,
     PROBE_META_VER,
-    STATIC_EXPORT_DIRNAME,
-)
-from vg.convert import (
-    _kill_convert_proc,
-    convert_parallel_limit,
-    enqueue_convert_job,
-    list_convert_jobs,
-    pump_convert_queue,
 )
 from vg.disk_libs import (
     cache_dir_for_item,
@@ -62,10 +60,11 @@ from vg.disk_libs import (
     save_library_item,
     save_root_library,
 )
-from vg.drives import list_drives_info, list_lan_ipv4, load_prefs, save_prefs
-from vg.export import export_static_site
+from vg.drives import list_drives_info
 from vg.genres import ensure_video_genres
-from vg.privacy import privacy_snapshot, set_privacy
+from vg.http_helpers import filter_videos_by_scope, resolve_local_path
+from vg.lan_service import lan_urls
+from vg.privacy import privacy_snapshot
 from vg.media import (
     _apply_probe_to_item,
     _item_probe_path,
@@ -79,25 +78,16 @@ from vg.roots import (
     filter_videos_by_lib,
     get_mounted_roots,
     publish_unified_library,
-    remove_mount,
     root_label,
     roots_summary,
-    set_mounted_roots,
     thumb_id_for_item,
     tree_for_scope,
     videos_for_scope,
 )
-from vg.scan import (
-    _video_category,
-    _video_search_text,
-    build_tree,
-    find_video_by_id,
-    rebuild_indexes,
-    start_scan,
-)
+from vg.scan import start_scan
 from vg.search import parse_search_query, video_matches_query
 from vg.series import collapse_to_series_cards, series_episodes
-from vg.state import STATE, _convert_lock
+from vg.state import STATE
 from vg.streaming import _stream_file, rewrite_m3u8_for_proxy
 from vg.trash import move_to_trash
 from vg.util import (
@@ -179,32 +169,6 @@ def index():
     return Response(html, mimetype="text/html; charset=utf-8")
 
 
-@app.route("/api/status")
-def api_status():
-    """Lightweight poll target during scan — avoids rebuilding tree/facets every 1.5s."""
-    facets = STATE.get("facets") or {}
-    live = STATE.get("scan_live")
-    live_n = len(live) if isinstance(live, list) else 0
-    return jsonify({
-        "scanning": bool(STATE.get("scanning")),
-        "updating": bool(STATE.get("updating")),
-        "exporting": bool(STATE.get("exporting")),
-        "export_msg": STATE.get("export_msg") or "",
-        "export_path": STATE.get("export_path") or "",
-        "export_ok": STATE.get("export_ok"),
-        "scan_progress": STATE.get("scan_progress") or "",
-        "thumb_progress": STATE.get("thumb_progress") or "",
-        "meta_progress": STATE.get("meta_progress") or "",
-        "count": int(facets.get("count") or len(STATE.get("videos") or [])),
-        "lib_gen": int(STATE.get("lib_gen") or 0),
-        "scan_root": STATE.get("scan_root") or "",
-        "scan_found": live_n,
-        "has_ffmpeg": bool(STATE.get("ffmpeg")),
-        "root": str(STATE["root"]) if STATE.get("root") else "",
-        "lan_share": bool(STATE.get("lan_share")),
-    })
-
-
 @app.route("/api/tree")
 def api_tree():
     root = STATE["root"]
@@ -250,20 +214,7 @@ def api_tree():
             )
             if cnt > 0
         ]
-        prefer = ["电影", "电视剧", "综艺", "动漫", "少儿", "纪录片", "短剧", "体育", "音乐", "教育", "其他", ""]
-        prefer_rank = {n: i for i, n in enumerate(prefer)}
-
-        def cat_sort_key(item: tuple[str, int]):
-            name, cnt = item
-            return (prefer_rank.get(name, 100), -cnt, name.lower())
-
-        categories = []
-        for name, cnt in sorted(cat_counts.items(), key=cat_sort_key):
-            categories.append({
-                "id": name,
-                "name": "未分类" if name == "" else name,
-                "count": cnt,
-            })
+        categories = build_category_facets(cat_counts)
         count = len(videos)
     mounts = roots_summary(all_videos)
 
@@ -292,68 +243,8 @@ def api_tree():
         "bind_host": STATE.get("bind_host") or "127.0.0.1",
         "bind_port": int(STATE.get("bind_port") or 8765),
         "lan_share": bool(STATE.get("lan_share")),
-        "lan_urls": _lan_urls(),
+        "lan_urls": lan_urls(),
         "privacy": privacy_snapshot(),
-    })
-
-
-def _lan_urls() -> list[str]:
-    port = int(STATE.get("bind_port") or 8765)
-    urls = [f"http://127.0.0.1:{port}"]
-    if STATE.get("lan_share"):
-        for ip in list_lan_ipv4():
-            u = f"http://{ip}:{port}"
-            if u not in urls:
-                urls.append(u)
-    return urls
-
-
-@app.route("/api/share", methods=["GET", "POST"])
-def api_share():
-    """局域网分享开关。即时生效（服务始终绑定 0.0.0.0，用访问控制开关）。"""
-    from vg.lan import ensure_firewall_allow
-
-    port = int(STATE.get("bind_port") or 8765)
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        lan = bool(data.get("lan"))
-        STATE["lan_share"] = lan
-        save_prefs(lan_share=lan)
-        fw_ok, fw_msg = True, ""
-        if lan:
-            fw_ok, fw_msg = ensure_firewall_allow(port)
-        urls = _lan_urls()
-        lan_only = [u for u in urls if "127.0.0.1" not in u]
-        if lan:
-            msg = "已开启局域网分享（立即生效）"
-            if lan_only:
-                msg += "。其它设备请打开：\n" + "\n".join(lan_only)
-            else:
-                msg += "。未检测到局域网 IP，请确认电脑已连 WiFi。"
-            if fw_msg:
-                msg += "\n\n" + fw_msg
-            if not fw_ok:
-                msg += "\n若仍「拒绝连接」，多半是防火墙拦截。"
-        else:
-            msg = "已关闭局域网分享（立即生效），仅本机可访问"
-        return jsonify({
-            "ok": True,
-            "lan": lan,
-            "active": lan,
-            "need_restart": False,
-            "firewall_ok": fw_ok,
-            "urls": urls,
-            "msg": msg,
-        })
-    prefs = load_prefs()
-    return jsonify({
-        "ok": True,
-        "lan": bool(STATE.get("lan_share")),
-        "pref_lan": bool(prefs.get("lan_share")),
-        "need_restart": False,
-        "urls": _lan_urls(),
-        "host": STATE.get("bind_host") or "0.0.0.0",
-        "port": port,
     })
 
 
@@ -543,10 +434,7 @@ def api_videos():
     videos = videos_for_scope(lib or None)
 
     # 频道：在当前 lib 范围内按一级目录
-    if category == "__root__":
-        videos = [v for v in videos if not (v.get("folder") or "").strip("/")]
-    elif category:
-        videos = [v for v in videos if _video_category(v) == category]
+    videos = filter_videos_by_scope(videos, category=category)
 
     # 多层子类用「频道内全部片」统计各层兄弟项
     cat_videos = videos
@@ -567,17 +455,11 @@ def api_videos():
         folder = folder.replace("\\", "/")
         folder_all = request.args.get("folder_all", "").strip() in ("1", "true", "yes")
         has_children = bool(_subfolder_facets(videos, "", folder))
-        if has_children and not folder_all:
-            videos = [
-                v for v in videos
-                if (v.get("folder") or "").replace("\\", "/") == folder
-            ]
-        else:
-            videos = [
-                v for v in videos
-                if (v.get("folder") or "").replace("\\", "/") == folder
-                or (v.get("folder") or "").replace("\\", "/").startswith(folder + "/")
-            ]
+        videos = filter_videos_by_scope(
+            videos,
+            folder=folder,
+            include_descendants=not (has_children and not folder_all),
+        )
     if ext:
         if not ext.startswith("."):
             ext = "." + ext
@@ -1004,9 +886,8 @@ def api_info(vid: str):
 
 
 def _local_path_for_item(item: dict) -> Path | None:
-    if item.get("kind") == "ts_set" and item.get("segments"):
-        return resolve_item_rel(item, item["segments"][0])
-    return resolve_item_rel(item, item.get("rel") or "")
+    """Compatibility wrapper for local-item actions still hosted in web.py."""
+    return resolve_local_path(item)
 
 
 @app.route("/api/local/<vid>", methods=["POST"])
@@ -1076,111 +957,6 @@ def api_series(sid: str):
         "title": title,
         "count": len(slim),
         "episodes": slim,
-    })
-
-
-@app.route("/api/cleanup")
-def api_cleanup():
-    """重复 / 损坏列表。?type=dup|bad"""
-    kind = (request.args.get("type") or "dup").strip().lower()
-    # 与浏览一致：多盘时用合并片库，并当场重算重复标记
-    videos = list(videos_for_scope(None))
-    if kind != "bad":
-        from vg.scan import mark_duplicates
-        mark_duplicates(videos)
-
-    def _row(v: dict, extra: dict | None = None) -> dict:
-        enriched = dict(v)
-        attach_thumb_meta(enriched)
-        row = {
-            "id": v.get("id"),
-            "name": v.get("name"),
-            "rel": v.get("rel") or "",
-            "path": str(_local_path_for_item(v) or ""),
-            "size": int(v.get("size") or 0),
-            "size_h": v.get("size_h") or "",
-            "folder": v.get("folder") or "",
-            "mtime": float(v.get("mtime") or 0),
-            "mtime_h": v.get("mtime_h") or "",
-            "ext": v.get("ext") or "",
-            "kind": v.get("kind") or "",
-            "root": v.get("root") or v.get("_lib_root") or "",
-            "lib_label": v.get("lib_label") or v.get("_lib_label") or "",
-            "has_thumb": bool(enriched.get("has_thumb")),
-            "thumb_v": int(enriched.get("thumb_v") or 0),
-            "thumb_id": enriched.get("thumb_id") or v.get("_thumb_id") or v.get("id"),
-        }
-        if extra:
-            row.update(extra)
-        return row
-
-    if kind == "bad":
-        rows = []
-        for v in videos:
-            if not v.get("bad"):
-                continue
-            rows.append(_row(v, {"reason": v.get("bad_reason") or "无法读取"}))
-        return jsonify({"ok": True, "type": "bad", "groups": [{"reason": "损坏", "items": rows}], "count": len(rows)})
-
-    # 直接按同名 / 同体积分组（不依赖可能过期的 dup 标记）
-    from vg.scan import duplicate_name_key
-
-    by_name: dict[str, list] = {}
-    by_size: dict[int, list] = {}
-    for v in videos:
-        if (v.get("kind") or "") in ("m3u8", "ts_set", "series"):
-            continue
-        nk = duplicate_name_key(v)
-        if nk:
-            by_name.setdefault(nk, []).append(v)
-        sz = int(v.get("size") or 0)
-        if sz >= 1:
-            by_size.setdefault(sz, []).append(v)
-
-    groups = []
-    seen_keys: set[str] = set()
-
-    def _uniq_path(v: dict) -> str:
-        root = (v.get("_lib_root") or v.get("root") or "").strip().lower()
-        rel = (v.get("rel") or "").replace("\\", "/").strip("/").lower()
-        return f"{root}|{rel}|{v.get('id') or ''}"
-
-    def _pack(label: str, items: list) -> None:
-        # 去重视频 id，至少 2 个不同文件
-        uniq: dict[str, dict] = {}
-        for x in items:
-            uniq[_uniq_path(x)] = x
-        items = list(uniq.values())
-        if len(items) < 2:
-            return
-        ids = tuple(sorted(x.get("id") or "" for x in items))
-        key = label + "|" + ",".join(ids)
-        if key in seen_keys:
-            return
-        seen_keys.add(key)
-        groups.append({
-            "reason": label,
-            "items": [_row(x) for x in items],
-        })
-
-    for items in by_name.values():
-        if len(items) >= 2:
-            _pack("同名", items)
-    for sz, items in by_size.items():
-        if sz < MIN_VIDEO_FILE_BYTES:
-            continue
-        # 不同盘即使 rel 相同也算不同文件
-        paths = {_uniq_path(g) for g in items}
-        if len(paths) >= 2:
-            _pack("同体积", items)
-
-    # 只保留真正有条目的组
-    groups = [g for g in groups if (g.get("items") or [])]
-    return jsonify({
-        "ok": True,
-        "type": "dup",
-        "groups": groups,
-        "count": sum(len(g["items"]) for g in groups),
     })
 
 
@@ -1343,192 +1119,6 @@ def api_delete():
     })
 
 
-@app.route("/api/convert-mp4/<vid>", methods=["POST"])
-def api_convert_mp4_start(vid: str):
-    """将 m3u8 / ts_set 转为同目录 MP4（进入限速队列）。"""
-    if not re.fullmatch(r"[a-f0-9]{16}", vid or ""):
-        return jsonify({"ok": False, "msg": "无效 id"}), 400
-    if not STATE.get("ffmpeg"):
-        return jsonify({"ok": False, "msg": "未找到 ffmpeg，请先安装后再试"}), 400
-    if not (STATE.get("root") or get_mounted_roots()):
-        return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
-    prefer_root = (request.args.get("root") or "").strip() or None
-    if len(get_mounted_roots()) > 1 and not prefer_root:
-        return jsonify({"ok": False, "msg": "多盘转换必须指定 root"}), 400
-    item = find_video_by_id(vid, prefer_root=prefer_root)
-    if not item:
-        return jsonify({"ok": False, "msg": "未找到视频"}), 404
-    kind = item.get("kind") or ""
-    if kind not in ("m3u8", "ts_set") and (item.get("ext") or "").lower() != ".m3u8":
-        return jsonify({"ok": False, "msg": "仅支持 m3u8 / TS 合集"}), 400
-    item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
-    ok, msg, job_id = enqueue_convert_job(
-        vid, kind="mp4", name=item.get("name") or "", root=item_root or None
-    )
-    return jsonify({"ok": ok, "job_id": job_id, "msg": msg, "status": "queued"})
-
-
-@app.route("/api/convert-mp4/job/<job_id>")
-def api_convert_mp4_status(job_id: str):
-    with _convert_lock:
-        job = STATE["convert_jobs"].get(job_id)
-        if not job:
-            return jsonify({"ok": False, "msg": "任务不存在"}), 404
-        return jsonify({
-            "ok": True,
-            "job_id": job_id,
-            "vid": job.get("vid") or "",
-            "kind": job.get("kind") or "mp4",
-            "name": job.get("name") or "",
-            "status": job.get("status") or "error",
-            "msg": job.get("msg") or "",
-            "percent": int(job.get("percent") or 0),
-            "out_path": job.get("out_path") or "",
-            "added_id": job.get("added_id") or "",
-        })
-
-
-@app.route("/api/convert-mp4/job/<job_id>/cancel", methods=["POST"])
-def api_convert_mp4_cancel(job_id: str):
-    with _convert_lock:
-        job = STATE["convert_jobs"].get(job_id)
-        if not job:
-            return jsonify({"ok": False, "msg": "任务不存在"}), 404
-        if job.get("status") in ("done", "error", "cancelled"):
-            return jsonify({"ok": True, "msg": "任务已结束", "status": job.get("status")})
-        job["cancel"] = True
-        job["msg"] = "正在取消…"
-        if job.get("status") == "queued":
-            job["status"] = "cancelled"
-            job["msg"] = "已取消"
-            proc = None
-        else:
-            proc = job.get("proc")
-    if proc:
-        _kill_convert_proc(proc)
-    pump_convert_queue()
-    return jsonify({"ok": True, "msg": "已请求取消", "status": "cancelling"})
-
-
-@app.route("/api/fix-audio/<vid>", methods=["POST"])
-def api_fix_audio_start(vid: str):
-    """将不兼容浏览器的音轨转为 AAC（进入限速队列）。"""
-    if not re.fullmatch(r"[a-f0-9]{16}", vid or ""):
-        return jsonify({"ok": False, "msg": "无效 id"}), 400
-    if not STATE.get("ffmpeg"):
-        return jsonify({"ok": False, "msg": "未找到 ffmpeg，请先安装后再试"}), 400
-    if not (STATE.get("root") or get_mounted_roots()):
-        return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
-    prefer_root = (request.args.get("root") or "").strip() or None
-    if len(get_mounted_roots()) > 1 and not prefer_root:
-        return jsonify({"ok": False, "msg": "多盘修复必须指定 root"}), 400
-    item = find_video_by_id(vid, prefer_root=prefer_root)
-    if not item:
-        return jsonify({"ok": False, "msg": "未找到视频"}), 404
-    kind = item.get("kind") or ""
-    if kind in ("m3u8", "ts_set") or (item.get("ext") or "").lower() == ".m3u8":
-        return jsonify({"ok": False, "msg": "流媒体请用「转成 MP4」"}), 400
-    item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
-    ok, msg, job_id = enqueue_convert_job(
-        vid, kind="fix_audio", name=item.get("name") or "", root=item_root or None
-    )
-    return jsonify({"ok": ok, "job_id": job_id, "msg": msg, "status": "queued"})
-
-
-@app.route("/api/convert/queue")
-def api_convert_queue():
-    jobs = list_convert_jobs(50)
-    active = sum(1 for j in jobs if j.get("status") in ("queued", "running"))
-    return jsonify({
-        "ok": True,
-        "jobs": jobs,
-        "active": active,
-        "parallel": convert_parallel_limit(),
-    })
-
-
-@app.route("/api/convert/batch", methods=["POST"])
-def api_convert_batch():
-    """批量加入转换队列，支持 items: [{id, root}] 精确定位磁盘。"""
-    data = request.get_json(silent=True) or {}
-    ids = data.get("ids") or []
-    requested = data.get("items")
-    legacy_ids = not isinstance(requested, list)
-    if not isinstance(requested, list):
-        requested = [{"id": vid} for vid in ids] if isinstance(ids, list) else []
-    kind = (data.get("kind") or "mp4").strip().lower()
-    if kind not in ("mp4", "fix_audio"):
-        return jsonify({"ok": False, "msg": "kind 应为 mp4 或 fix_audio"}), 400
-    if data.get("parallel") is not None:
-        try:
-            STATE["convert_parallel"] = max(1, min(4, int(data["parallel"])))
-            from vg.drives import save_prefs
-            save_prefs(convert_parallel=STATE["convert_parallel"])
-            pump_convert_queue()
-        except (TypeError, ValueError):
-            pass
-    if not isinstance(requested, list):
-        return jsonify({"ok": False, "msg": "items 无效"}), 400
-    if legacy_ids and ids and len(get_mounted_roots()) > 1:
-        return jsonify({"ok": False, "msg": "多盘批量转换必须携带每项 root"}), 400
-    # 仅改并发
-    if not requested:
-        return jsonify({
-            "ok": True,
-            "queued": [],
-            "skipped": [],
-            "msg": f"并发已设为 {convert_parallel_limit()}",
-            "parallel": convert_parallel_limit(),
-        })
-    if not STATE.get("ffmpeg"):
-        return jsonify({"ok": False, "msg": "未找到 ffmpeg"}), 400
-
-    queued = []
-    skipped = []
-    for raw in requested[:80]:
-        req = raw if isinstance(raw, dict) else {"id": raw}
-        vid = str(req.get("id") or "")
-        prefer_root = str(req.get("root") or "").strip() or None
-        if len(get_mounted_roots()) > 1 and not prefer_root:
-            skipped.append({"id": vid, "msg": "缺少 root"})
-            continue
-        if not re.fullmatch(r"[a-f0-9]{16}", vid):
-            skipped.append({"id": vid, "msg": "无效 id"})
-            continue
-        item = find_video_by_id(vid, prefer_root=prefer_root)
-        if not item:
-            skipped.append({"id": vid, "msg": "未找到"})
-            continue
-        ik = item.get("kind") or ""
-        ext = (item.get("ext") or "").lower()
-        if kind == "mp4":
-            if ik not in ("m3u8", "ts_set") and ext != ".m3u8":
-                skipped.append({"id": vid, "msg": "不是 m3u8/TS 合集"})
-                continue
-        else:
-            if ik in ("m3u8", "ts_set") or ext == ".m3u8":
-                skipped.append({"id": vid, "msg": "流媒体请用转 MP4"})
-                continue
-            if not item.get("audio_hard"):
-                skipped.append({"id": vid, "msg": "无需修声音"})
-                continue
-        item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
-        ok, msg, job_id = enqueue_convert_job(
-            vid, kind=kind, name=item.get("name") or "", root=item_root or None
-        )
-        if ok:
-            queued.append({"id": vid, "job_id": job_id, "name": item.get("name") or ""})
-        else:
-            skipped.append({"id": vid, "msg": msg})
-    return jsonify({
-        "ok": True,
-        "queued": queued,
-        "skipped": skipped,
-        "msg": f"已排队 {len(queued)} 个" + (f"，跳过 {len(skipped)}" if skipped else ""),
-        "parallel": convert_parallel_limit(),
-    })
-
-
 @app.route("/api/thumb/<vid>", methods=["POST"])
 def api_thumb_set(vid: str):
     """换封面：JSON {seek:秒} 截帧，或 multipart 上传图片字段 file。"""
@@ -1611,157 +1201,7 @@ def api_thumb_set(vid: str):
     })
 
 
-@app.route("/api/roots", methods=["GET", "POST"])
-def api_roots():
-    """多根目录：GET 列表；POST {action: add|remove|set|publish, path?, paths?}"""
-    if request.method == "GET":
-        mounts = roots_summary()
-        primary = ""
-        try:
-            if STATE.get("root"):
-                primary = str(Path(STATE["root"]).resolve())
-        except OSError:
-            primary = str(STATE.get("root") or "")
-        for m in mounts:
-            m["current"] = bool(primary) and m.get("path", "").lower() == primary.lower()
-        return jsonify({
-            "ok": True,
-            "roots": mounts,
-            "count": len(mounts),
-            "multi": len(mounts) > 1,
-            "primary": primary,
-        })
+from vg.routes import register_feature_routes
 
-    data = request.get_json(silent=True) or {}
-    action = (data.get("action") or "add").strip().lower()
-    if action == "publish":
-        n = publish_unified_library()
-        return jsonify({"ok": True, "msg": f"已刷新统一片库（{n}）", "count": n})
-    if action == "set":
-        paths = data.get("paths") or []
-        if not isinstance(paths, list):
-            return jsonify({"ok": False, "msg": "paths 无效"}), 400
-        cleaned = set_mounted_roots([str(p) for p in paths])
-        n = publish_unified_library() if cleaned else 0
-        return jsonify({"ok": True, "msg": f"已设置 {len(cleaned)} 个目录", "roots": cleaned, "count": n})
-    path = (data.get("path") or data.get("drive") or "").strip().strip('"')
-    if not path:
-        return jsonify({"ok": False, "msg": "请提供 path"}), 400
-    if len(path) == 2 and path[1] == ":":
-        path = path + "\\"
-    if action == "remove":
-        ok, msg = remove_mount(path)
-        return jsonify({"ok": ok, "msg": msg, "roots": roots_summary()})
-    # add
-    ok, msg = add_mount(path)
-    return jsonify({"ok": ok, "msg": msg, "roots": roots_summary()})
-
-
-@app.route("/api/privacy", methods=["GET", "POST"])
-def api_privacy():
-    """隐私模式：预览图加密、缓存写在程序目录还是视频盘。"""
-    if request.method == "GET":
-        return jsonify({"ok": True, **privacy_snapshot()})
-    data = request.get_json(silent=True) or {}
-    encrypt = data.get("encrypt_thumbs")
-    loc = data.get("cache_location")
-    if encrypt is None and loc is None:
-        return jsonify({"ok": False, "msg": "未提供设置项"}), 400
-    if loc is not None and str(loc).strip().lower() not in ("program", "disk"):
-        return jsonify({"ok": False, "msg": "cache_location 应为 program 或 disk"}), 400
-    before = privacy_snapshot()
-    after = set_privacy(
-        encrypt_thumbs=bool(encrypt) if encrypt is not None else None,
-        cache_location_value=str(loc) if loc is not None else None,
-    )
-    tips = []
-    if encrypt is not None and bool(encrypt) != before["encrypt_thumbs"]:
-        tips.append("加密设置已保存；新截的预览图按新规则写入，旧图仍可正常显示。")
-    if loc is not None and after["cache_location"] != before["cache_location"]:
-        tips.append("缓存位置已改，请点「重新扫描」让索引与预览图落到新位置。")
-        # 刷新当前盘 cache_dir 指向
-        root = STATE.get("root")
-        if root:
-            try:
-                from vg.cache import ensure_cache_dir
-
-                STATE["cache_dir"] = ensure_cache_dir(Path(root))
-            except OSError:
-                pass
-    msg = " ".join(tips) if tips else "已保存"
-    return jsonify({"ok": True, "msg": msg, **after})
-
-
-@app.route("/api/export-static", methods=["POST"])
-def api_export_static():
-    """导出纯静态站到视频盘根目录/_video_gallery_static/（后台线程，不挡浏览）。"""
-    if STATE.get("exporting"):
-        return jsonify({"ok": False, "msg": "正在导出中，请稍候…", "exporting": True})
-    if not STATE.get("root"):
-        return jsonify({"ok": False, "msg": "请先打开/扫描一个盘"}), 400
-    if not (STATE.get("videos") or []):
-        return jsonify({"ok": False, "msg": "当前没有可导出的视频"}), 400
-    if STATE.get("scanning"):
-        return jsonify({"ok": False, "msg": "扫描进行中，请稍后再导出"}), 400
-
-    data = request.get_json(silent=True) or {}
-    open_folder = bool(data.get("open_folder", True))
-
-    def job() -> None:
-        STATE["exporting"] = True
-        STATE["export_ok"] = None
-        STATE["export_msg"] = "正在导出静态站…"
-        STATE["export_path"] = ""
-        try:
-            ok, msg, path = export_static_site()
-            STATE["export_ok"] = ok
-            STATE["export_msg"] = msg
-            STATE["export_path"] = path or ""
-            if ok and open_folder and path:
-                try:
-                    if sys.platform == "win32":
-                        os.startfile(path)  # type: ignore[attr-defined]
-                    else:
-                        subprocess.Popen(["xdg-open", path])
-                except Exception as e:
-                    log(f"[静态导出] 打开目录失败: {e}")
-        except Exception as e:
-            STATE["export_ok"] = False
-            STATE["export_msg"] = f"导出失败: {e}"
-            log(f"[静态导出] 异常: {e}")
-        finally:
-            STATE["exporting"] = False
-
-    threading.Thread(target=job, daemon=True, name="export-static").start()
-    return jsonify({"ok": True, "msg": "已开始导出静态站，完成后会打开文件夹", "exporting": True})
-
-
-@app.route("/api/export-static/status")
-def api_export_static_status():
-    return jsonify({
-        "exporting": bool(STATE.get("exporting")),
-        "ok": STATE.get("export_ok"),
-        "msg": STATE.get("export_msg") or "",
-        "path": STATE.get("export_path") or "",
-    })
-
-
-@app.route("/api/export-static/reveal", methods=["POST"])
-def api_export_static_reveal():
-    root = STATE.get("root")
-    path = STATE.get("export_path") or ""
-    if not path and root:
-        path = str(Path(root) / STATIC_EXPORT_DIRNAME)
-    if not path or not Path(path).is_dir():
-        return jsonify({"ok": False, "msg": "尚未导出，或目录不存在"}), 404
-    try:
-        if sys.platform == "win32":
-            os.startfile(path)  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
-        return jsonify({"ok": True, "path": path})
-    except Exception as e:
-        return jsonify({"ok": False, "msg": str(e), "path": path}), 500
+register_feature_routes(app)
 

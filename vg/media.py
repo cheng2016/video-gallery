@@ -347,8 +347,8 @@ def start_metadata_enrichment() -> None:
 
 
 def _bg_enrich_metadata() -> None:
+    from vg.catalog import rebuild_indexes
     from vg.disk_libs import save_library_item
-    from vg.scan import rebuild_indexes
 
     try:
         videos = STATE.get("videos") or []

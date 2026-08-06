@@ -265,9 +265,9 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
             note = note or "浏览器可能无法内嵌播放，请用「打开文件」"
 
         ensure_video_actors(v)
-        from vg.scan import _video_search_text
+        from vg.catalog import video_search_text
         v.pop("_q", None)
-        search_q = _video_search_text(v)
+        search_q = video_search_text(v)
 
         exported.append({
             "id": vid,

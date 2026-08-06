@@ -263,8 +263,8 @@ def video_matches_query(v: dict, parsed: dict, search_text_fn) -> bool:
             return False
 
     if parsed.get("category"):
-        from vg.scan import _video_category
-        cat = _video_category(v) or ""
+        from vg.catalog import video_category
+        cat = video_category(v) or ""
         if parsed["category"].lower() not in cat.lower():
             return False
 

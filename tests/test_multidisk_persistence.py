@@ -7,6 +7,8 @@ from vg import cache
 from vg import disk_libs
 from vg import web
 from vg.cache import ensure_cache_dir, thumb_cache_get, thumb_cache_put
+from vg.catalog import rebuild_indexes
+from vg.catalog_repository import find_video_by_id
 from vg.disk_libs import (
     root_for_item,
     save_libraries_by_root,
@@ -14,7 +16,6 @@ from vg.disk_libs import (
     save_root_library,
 )
 from vg.roots import publish_unified_library, videos_for_scope
-from vg.scan import find_video_by_id, rebuild_indexes
 from vg.state import STATE
 from vg.util import video_id
 
