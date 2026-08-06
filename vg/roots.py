@@ -301,9 +301,10 @@ def tree_for_scope(lib: str | None = None) -> dict:
     Tree for UI:
     - single root / lib selected → normal folder tree for that root
     - multi + 全部 → 每个盘作为一级节点，下面是该盘真实文件夹
+
+    片源必须与 videos_for_scope() 一致，否则侧栏树数量与右侧列表会对不上。
     """
     roots = get_mounted_roots()
-    videos = STATE.get("videos") or []
     lib = (lib or "").strip()
 
     if lib:
@@ -311,39 +312,45 @@ def tree_for_scope(lib: str | None = None) -> dict:
             lib = _norm_root_str(lib)
         except Exception:
             pass
-        scoped = filter_videos_by_lib(videos, lib)
-        if not scoped:
-            scoped = _videos_from_root(lib)
+        scoped = videos_for_scope(lib)
         try:
             tree = build_tree(Path(lib), scoped)
         except OSError:
             tree = {"name": root_label(lib), "path": "", "count": len(scoped), "children": [], "videos": []}
         tree["name"] = root_label(lib)
         tree["path"] = ""
+        tree["count"] = len(scoped)
         return _stamp_tree_lib(tree, lib)
 
     if len(roots) <= 1:
+        scoped = videos_for_scope(None)
         if roots:
             try:
-                tree = build_tree(Path(roots[0]), videos)
+                tree = build_tree(Path(roots[0]), scoped)
+                tree["count"] = len(scoped)
                 return _stamp_tree_lib(tree, roots[0])
             except OSError:
                 pass
-        return STATE.get("tree") or {"name": "全部", "path": "", "count": 0, "children": [], "videos": []}
+        return {
+            "name": "全部",
+            "path": "",
+            "count": len(scoped),
+            "children": [],
+            "videos": [],
+        }
 
     # 多根「全部」：盘 → 该盘文件夹（可展开选择）
     children = []
     total = 0
     for r in roots:
-        subset = _videos_from_root(r)
-        if not subset:
-            subset = filter_videos_by_lib(videos, r)
+        subset = videos_for_scope(r)
         n = len(subset)
         total += n
         try:
             sub = build_tree(Path(r), subset)
         except OSError:
             sub = {"name": root_label(r), "path": "", "count": n, "children": [], "videos": []}
+        sub["count"] = n
         _stamp_tree_lib(sub, r)
         children.append({
             "name": root_label(r),

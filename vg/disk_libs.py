@@ -518,6 +518,64 @@ def ensure_cached_indexes_scanned() -> None:
         log(f"[跨盘] 扫描缓存索引失败: {e}")
 
 
+def discover_indexed_roots() -> list[str]:
+    """Discover online roots that already have a persisted catalog.
+
+    This is the startup fallback when ``prefs.mounted_roots`` is incomplete.
+    Program-cache indexes contain their source root, so a previously scanned
+    disk can be mounted again without rescanning it first.
+    """
+    roots: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str | Path | None) -> None:
+        if not raw:
+            return
+        try:
+            path = Path(raw).expanduser().resolve()
+            if not path.is_dir():
+                return
+            value = str(path)
+        except OSError:
+            return
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            roots.append(value)
+
+    try:
+        if VGDATA_DIR.is_dir():
+            for index_path in VGDATA_DIR.glob(f"*/{INDEX_NAME}"):
+                try:
+                    payload = json.loads(index_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict):
+                    add(payload.get("root"))
+    except OSError as e:
+        log(f"[多盘] 发现缓存片库失败: {e}")
+
+    # In disk-cache mode the program cache may not contain the index. Checking
+    # drive roots is cheap and avoids recursively scanning whole disks.
+    try:
+        from vg.config import THUMB_DIR_NAME
+        from vg.drives import list_ready_drives
+
+        for drive in list_ready_drives():
+            index_path = drive / THUMB_DIR_NAME / INDEX_NAME
+            if not index_path.is_file():
+                continue
+            try:
+                payload = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            add(payload.get("root") if isinstance(payload, dict) else drive)
+    except OSError:
+        pass
+
+    return roots
+
+
 def ensure_library(root: str | Path | None) -> bool:
     if not root:
         return False

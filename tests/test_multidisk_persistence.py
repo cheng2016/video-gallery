@@ -10,6 +10,8 @@ from vg.cache import ensure_cache_dir, thumb_cache_get, thumb_cache_put
 from vg.catalog import rebuild_indexes
 from vg.catalog_repository import find_video_by_id
 from vg.disk_libs import (
+    discover_indexed_roots,
+    ensure_library,
     root_for_item,
     save_libraries_by_root,
     save_library_item,
@@ -195,6 +197,60 @@ class MultiDiskPersistenceTests(unittest.TestCase):
         scoped = videos_for_scope(str(self.root_a))
 
         self.assertEqual({v["rel"] for v in scoped}, {"same.mp4", "second.mp4"})
+
+    def test_tree_count_matches_videos_for_scope_with_partial_state(self):
+        from vg.roots import set_mounted_roots, tree_for_scope
+
+        first = self.item(self.root_a)
+        second = dict(first)
+        second["id"] = "e" * 16
+        second["rel"] = "folder/second.mp4"
+        second["filename"] = "second.mp4"
+        second["folder"] = "folder"
+        save_root_library(self.root_a, [first, second])
+        save_root_library(self.root_b, [self.item(self.root_b)])
+        set_mounted_roots([str(self.root_a), str(self.root_b)], primary=str(self.root_a))
+        # STATE 只剩部分片，模拟扫描中/合并滞后
+        STATE["videos"] = [first]
+
+        lib_a = str(self.root_a.resolve())
+        vids = videos_for_scope(lib_a)
+        tree = tree_for_scope(lib_a)
+        self.assertEqual(tree["count"], len(vids))
+        self.assertEqual(len(vids), 2)
+
+        all_vids = videos_for_scope(None)
+        all_tree = tree_for_scope(None)
+        self.assertEqual(all_tree["count"], len(all_vids))
+        self.assertEqual(len(all_vids), 3)
+
+    def test_cached_indexes_restore_all_online_scanned_roots(self):
+        from unittest.mock import patch
+
+        a = self.item(self.root_a)
+        b = self.item(self.root_b)
+        save_root_library(self.root_a, [a])
+        save_root_library(self.root_b, [b])
+
+        # Simulate restart with an empty/incomplete mounted-roots preference.
+        STATE["videos"] = []
+        STATE["disk_libs"] = {}
+        STATE["mounted_roots"] = []
+
+        with patch("vg.drives.list_ready_drives", return_value=[]):
+            restored = discover_indexed_roots()
+        self.assertEqual(
+            {path.lower() for path in restored},
+            {str(self.root_a.resolve()).lower(), str(self.root_b.resolve()).lower()},
+        )
+
+        from vg.roots import set_mounted_roots
+
+        set_mounted_roots(restored, primary=str(self.root_a))
+        for root in restored:
+            self.assertTrue(ensure_library(root))
+        self.assertEqual(publish_unified_library(), 2)
+        self.assertEqual(len(videos_for_scope(None)), 2)
 
     def test_preferred_root_never_falls_back_to_foreign_disk(self):
         item = self.item(self.root_a)

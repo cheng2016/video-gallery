@@ -169,27 +169,41 @@ def main():
     print("正在后台加载/扫描，网页会先打开，列表随后刷新…")
     bootlog.step("start_scan", f"root={root} thumbs={not args.no_thumbs} force={args.rescan}")
     try:
-        from vg.disk_libs import ensure_library
-        from vg.roots import set_mounted_roots
+        from vg.disk_libs import discover_indexed_roots, ensure_library
+        from vg.roots import publish_unified_library, set_mounted_roots
 
         saved = prefs.get("mounted_roots") or []
+        discovered = discover_indexed_roots()
         valid = []
-        if isinstance(saved, list):
-            for p in saved:
-                try:
-                    pp = Path(p).expanduser().resolve()
-                    if pp.is_dir():
-                        valid.append(str(pp))
-                except OSError:
-                    pass
+        candidates = list(saved) if isinstance(saved, list) else []
+        candidates.extend(discovered)
+        for p in candidates:
+            try:
+                pp = Path(p).expanduser().resolve()
+                if pp.is_dir() and str(pp).lower() not in {v.lower() for v in valid}:
+                    valid.append(str(pp))
+            except OSError:
+                pass
+        if discovered:
+            bootlog.step(
+                "restore_indexed_roots",
+                f"saved={len(saved) if isinstance(saved, list) else 0} "
+                f"discovered={len(discovered)} online={len(valid)}",
+            )
         root_s = str(root.resolve())
         if root_s.lower() not in {v.lower() for v in valid}:
             valid = [root_s] + valid
         if len(valid) > 1:
             set_mounted_roots(valid, primary=root_s)
             for m in valid:
-                if m.lower() != root_s.lower():
-                    ensure_library(m)
+                ensure_library(m)
+            # Publish all cached disks before the background scan starts. The
+            # first page therefore already contains the full restored library.
+            restored_count = publish_unified_library()
+            bootlog.step(
+                "restore_unified_library",
+                f"roots={len(valid)} videos={restored_count}",
+            )
             ok, msg = start_scan(root, do_thumbs=not args.no_thumbs, force=args.rescan, replace_mounts=False)
         else:
             ok, msg = start_scan(root, do_thumbs=not args.no_thumbs, force=args.rescan, replace_mounts=True)

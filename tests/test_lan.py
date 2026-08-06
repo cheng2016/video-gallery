@@ -92,6 +92,5 @@ class RemoteLocalOpenTests(unittest.TestCase):
         self.assertTrue(data["url"].endswith("/stream/abcd1234abcd1234"))
         startfile.assert_not_called()
 
-
 if __name__ == "__main__":
     unittest.main()

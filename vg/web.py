@@ -138,6 +138,16 @@ def _enforce_lan_share():
     )
 
 
+@app.after_request
+def _api_no_store(resp):
+    """局域网 IP 下浏览器常缓存 GET /api/*；本机 127.0.0.1 往往不缓存，会造成「左边对右边数量错」。"""
+    if (request.path or "").startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.route("/")
 def index():
     """返回页面；用字符串注入盘符 JSON，不依赖 Jinja，避免 {{ }} 原样显示。"""
@@ -178,11 +188,14 @@ def api_tree():
     tree = tree_for_scope(lib or None)
 
     # Prefer precomputed facets for the unified catalog; scoped views recompute.
+    # Also reject cache when it disagrees with the folder tree (same video source).
     facets = STATE.get("facets") or {}
+    tree_count = int((tree or {}).get("count") or 0)
     use_cached = (
         not lib
         and facets
         and int(facets.get("count") or -1) == len(videos)
+        and int(facets.get("count") or -1) == tree_count
         and not STATE.get("scanning")
     )
     if use_cached:
@@ -474,7 +487,7 @@ def api_videos():
         videos = [v for v in videos if genre in ensure_video_genres(v)]
 
     raw_count = len(videos)
-    view = (request.args.get("view") or "series").strip().lower()
+    view = (request.args.get("view") or "flat").strip().lower()
     if view == "series":
         videos = collapse_to_series_cards(videos)
 
@@ -561,7 +574,7 @@ def api_videos():
         "genres": scoped_genres,
         "subfolders": scoped_subs,
         "subfolder_levels": subfolder_levels,
-        "view": view if view in ("series", "flat") else "series",
+        "view": view if view in ("series", "flat") else "flat",
         "lib": lib,
     })
 
@@ -943,7 +956,7 @@ def api_local(vid: str):
                 "path": play_url,
                 "title": item.get("name") or item.get("filename") or vid,
                 "msg": (
-                    "局域网访问：已返回本机播放地址，请用 PotPlayer / VLC 打开"
+                    "局域网访问：请先运行本机播放助手，将用系统默认播放器打开"
                     if action == "open"
                     else "已返回局域网播放地址（非服务端磁盘路径）"
                 ),

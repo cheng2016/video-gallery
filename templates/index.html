@@ -1258,7 +1258,8 @@
       ext: "",
       genre: "",
       sort: "mtime_desc",
-      view: "series",
+      // 默认单集：卡片数与左边频道「片子数」一致。合集视图会把多集收成 1 张卡，局域网新访客容易误以为数量错。
+      view: "flat",
       query: "",
       expanded: new Set([""]),
       root: "",
@@ -1310,7 +1311,7 @@
 
     const $ = (id) => document.getElementById(id);
 
-    const PREFS_KEY = "vg_ui_prefs";
+    const PREFS_KEY = "vg_ui_prefs_v2";
     const PLAY_PROG_KEY = "vg_play_progress";
 
     function loadUiPrefs() {
@@ -1337,7 +1338,7 @@
         const drive = ($("driveSelect") && $("driveSelect").value) || state._preferDrive || "";
         localStorage.setItem(PREFS_KEY, JSON.stringify({
           sort: state.sort,
-          view: state.view || "series",
+          view: state.view || "flat",
           category: state.category,
           folder: state.folder,
           folderAll: !!state.folderAll,
@@ -1542,7 +1543,14 @@
     async function fetchTree() {
       const params = new URLSearchParams();
       if (state.lib) params.set("lib", state.lib);
-      const r = await fetch("/api/tree" + (params.toString() ? ("?" + params) : ""));
+      params.set("_", String(Date.now()));
+      const r = await fetch("/api/tree" + (params.toString() ? ("?" + params) : ""), {
+        cache: "no-store",
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.msg || ("树接口失败 HTTP " + r.status));
+      }
       return r.json();
     }
 
@@ -1559,7 +1567,12 @@
       if (state.lib) params.set("lib", state.lib);
       params.set("offset", String(offset == null ? state.offset : offset));
       params.set("limit", String(state.pageSize));
-      const r = await fetch("/api/videos?" + params);
+      params.set("_", String(Date.now()));
+      const r = await fetch("/api/videos?" + params, { cache: "no-store" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.msg || ("列表接口失败 HTTP " + r.status));
+      }
       return r.json();
     }
 
@@ -1897,11 +1910,13 @@
       }
       const roots = state.mountedRoots || [];
       const grand = roots.reduce((s, r) => s + (r.count || 0), 0);
+      // 与 /api/tree 的 count（videos_for_scope）对齐，避免侧栏合计和右侧不一致
+      const allBadge = (total != null && total > 0) ? total : (grand || 0);
       const allDisksActive = !state.lib && !state.category;
       let html = `<div class="channel-item ${allDisksActive ? "active" : ""}" data-lib="" data-cat="">
         <span class="ico">${CHANNEL_ICO.__all__}</span>
         <span class="label">全部视频</span>
-        <span class="badge">${grand || total || 0}</span>
+        <span class="badge">${allBadge}</span>
       </div>`;
 
       for (const root of roots) {
@@ -1952,8 +1967,8 @@
       const vt = $("viewTags");
       if (vt) {
         vt.innerHTML = [
-          { id: "series", label: "合集" },
           { id: "flat", label: "单集" },
+          { id: "series", label: "合集" },
         ].map((s) =>
           `<button type="button" class="tag ${state.view === s.id ? "active" : ""}" data-view="${s.id}">${s.label}</button>`
         ).join("");
@@ -2350,7 +2365,14 @@
     async function refresh() {
       state.offset = 0;
       loadingMore = false;
-      const treeData = await fetchTree();
+      let treeData;
+      try {
+        treeData = await fetchTree();
+      } catch (e) {
+        $("countLabel").textContent = "加载失败";
+        alert(String(e.message || e));
+        return;
+      }
       lastScanning = !!treeData.scanning;
       state.tree = treeData.tree;
       state.root = treeData.root || state.root;
@@ -2374,7 +2396,14 @@
       ) {
         state.folder = state.category + "/" + state.folder;
       }
-      let data = await fetchVideos(0);
+      let data;
+      try {
+        data = await fetchVideos(0);
+      } catch (e) {
+        $("countLabel").textContent = "列表加载失败";
+        alert(String(e.message || e));
+        return;
+      }
       const genreBefore = state.genre;
       renderGenreTags(data.genres || []);
       if (genreBefore && !state.genre) {
@@ -2437,9 +2466,14 @@
         ? ((state.mountedRoots.find((r) => sameLibPath(r.path, state.lib)) || {}).label || state.lib)
         : (state.multi ? "全部目录" : "");
       const showN = (data.raw_count != null ? data.raw_count : data.count) || 0;
-      $("countLabel").textContent = lastScanning
-        ? `扫描中… ${showN} 个`
-        : (libTip ? `${libTip} · ${showN} 个` : `${showN} 个视频`);
+      // 剧集视图：卡片数是合集数，左边频道统计的是片子数——标题写清楚避免「右边数量不对」
+      if (!lastScanning && state.view === "series" && data.count != null && data.raw_count != null && data.count !== data.raw_count) {
+        $("countLabel").textContent = (libTip ? `${libTip} · ` : "") + `合集 ${data.count} · 共 ${data.raw_count} 部`;
+      } else {
+        $("countLabel").textContent = lastScanning
+          ? `扫描中… ${showN} 个`
+          : (libTip ? `${libTip} · ${showN} 个` : `${showN} 个视频`);
+      }
     }
 
     async function loadMore() {
@@ -2868,40 +2902,14 @@
       video.play().catch(() => {});
     }
 
-    function launchClientPlayerScheme(schemeUrl) {
-      const a = document.createElement("a");
-      a.href = schemeUrl;
-      a.rel = "noopener";
-      a.style.display = "none";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }
-
-    function preferredLanPlayer() {
-      try {
-        return localStorage.getItem("vg_lan_player") || "potplayer";
-      } catch (_) {
-        return "potplayer";
-      }
-    }
-
-    function setPreferredLanPlayer(name) {
-      try { localStorage.setItem("vg_lan_player", name); } catch (_) {}
-    }
-
-    function openRemoteWithClientPlayer(playUrl) {
-      const pref = preferredLanPlayer();
-      const scheme = pref === "vlc" ? "vlc://" : "potplayer://";
-      launchClientPlayerScheme(scheme + playUrl);
+    async function openRemoteWithClientPlayer(playUrl) {
+      // 浏览器无法在访客电脑上可靠调起桌面播放器；不再下载 bat / 协议跳转
       const escapeAttr = (s) => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
       const urlAttr = escapeAttr(playUrl);
       $("modalInfo").innerHTML =
-        "已请求打开本机播放器（" + (pref === "vlc" ? "VLC" : "PotPlayer") + "）。浏览器可能会询问是否允许。<br>" +
-        "若没反应，可切换： " +
-        '<button type="button" class="btn" data-lan-player="potplayer" data-play-url="' + urlAttr + '">PotPlayer</button> ' +
-        '<button type="button" class="btn" data-lan-player="vlc" data-play-url="' + urlAttr + '">VLC</button> ' +
-        '<button type="button" class="btn" data-copy-play-url="' + urlAttr + '">复制地址</button><br>' +
+        "局域网访客请用页面内播放，或把地址粘贴到本机播放器。<br>" +
+        '<button type="button" class="btn primary" data-open-stream-url="' + urlAttr + '">浏览器新标签打开</button> ' +
+        '<button type="button" class="btn" data-copy-play-url="' + urlAttr + '">复制播放地址</button><br>' +
         "<code style='word-break:break-all'>" + escapeHtml(playUrl) + "</code>";
     }
 
@@ -2919,7 +2927,7 @@
           return;
         }
         if (data.remote && action === "open" && data.url) {
-          openRemoteWithClientPlayer(data.url);
+          await openRemoteWithClientPlayer(data.url);
           return;
         }
         if (action === "path" && data.path) {
@@ -3048,7 +3056,7 @@
     $("viewTags").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-view]");
       if (!btn) return;
-      state.view = btn.dataset.view || "series";
+      state.view = btn.dataset.view || "flat";
       saveUiPrefs();
       refresh();
     });
@@ -3698,13 +3706,11 @@
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
     $("btnReveal").addEventListener("click", () => localAction("reveal"));
     $("modalInfo").addEventListener("click", async (e) => {
-      const playerBtn = e.target.closest("[data-lan-player]");
-      if (playerBtn) {
-        const name = playerBtn.dataset.lanPlayer;
-        const playUrl = playerBtn.dataset.playUrl || "";
+      const streamBtn = e.target.closest("[data-open-stream-url]");
+      if (streamBtn) {
+        const playUrl = streamBtn.dataset.openStreamUrl || "";
         if (!playUrl) return;
-        setPreferredLanPlayer(name);
-        launchClientPlayerScheme((name === "vlc" ? "vlc://" : "potplayer://") + playUrl);
+        window.open(playUrl, "_blank", "noopener");
         return;
       }
       const copyBtn = e.target.closest("[data-copy-play-url]");
