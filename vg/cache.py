@@ -144,7 +144,9 @@ def thumb_file_ready(cache: Path | None, vid: str) -> bool:
 
 
 def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
-    """读取并解密预览图；带内存 LRU。"""
+    """读取预览图（支持加密 VG1 与明文 JPEG）；带内存 LRU。"""
+    from vg.privacy import unpack_thumb_bytes
+
     cached = thumb_cache_get(vid, cache)
     if cached is not None:
         return cached
@@ -153,8 +155,8 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
         if not p.exists() or p.stat().st_size <= 24:
             return None
         _clear_path_attrs_windows(p)
-        raw = decrypt_blob(p.read_bytes())
-        if raw and len(raw) > 100 and raw[:2] == b"\xff\xd8":
+        raw = unpack_thumb_bytes(p.read_bytes())
+        if raw:
             thumb_cache_put(vid, raw, cache)
             return raw
     except OSError as e:
@@ -171,12 +173,13 @@ def has_encrypted_thumb(cache: Path, vid: str) -> bool:
     return read_thumb_jpeg(cache, vid) is not None
 
 
-def ensure_cache_dir(root: Path) -> Path:
-    """缓存固定：程序根目录/preview_cache/<盘符标识>/（绝不写到视频盘根目录）。"""
+def ensure_program_cache_subdir(root: Path) -> Path:
+    """程序目录 preview_cache/<盘符_hash>/（默认，不写视频盘）。"""
     VGDATA_DIR.mkdir(parents=True, exist_ok=True)
-    _ensure_vault_key()
-    cleanup_legacy_disk_cache(root)
-    # 用盘符字母作子目录名，方便辨认（如 E、D）；整路径再哈希兜底
+    from vg.privacy import encrypt_thumbs_enabled
+
+    if encrypt_thumbs_enabled():
+        _ensure_vault_key()
     try:
         drive = root.resolve().drive.rstrip(":\\/") or "disk"
     except OSError:
@@ -188,9 +191,22 @@ def ensure_cache_dir(root: Path) -> Path:
     return cache
 
 
+def ensure_cache_dir(root: Path) -> Path:
+    """按隐私偏好选择缓存位置：程序目录（默认）或视频盘根下的隐藏目录。"""
+    from vg.privacy import cache_location, resolve_cache_dir_for_root
+
+    if cache_location() == "program":
+        cleanup_legacy_disk_cache(root)
+    return resolve_cache_dir_for_root(root)
+
+
 def cleanup_legacy_disk_cache(root: Path) -> None:
-    """删除早期版本误写在视频盘根目录的缓存文件夹（可安全删）。"""
+    """删除早期版本误写在视频盘根目录的缓存（仅「程序目录缓存」模式）。"""
     if not root:
+        return
+    from vg.privacy import cache_location
+
+    if cache_location() == "disk":
         return
     for name in LEGACY_DISK_CACHE_NAMES:
         p = root / name

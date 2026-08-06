@@ -30,6 +30,9 @@ STATE: dict = {
     "disk_libs": {},  # root_key -> {root, cache_dir, by_id, updated} 跨盘历史/续播
     "mounted_roots": [],  # 多根目录：统一片库挂载列表
     "convert_parallel": 1,  # 转码并发上限
+    "lib_gen": 0,  # 片库世代：扫描中途/合并后递增，供轻量轮询
+    "scan_root": "",  # 正在扫描的盘根路径
+    "scan_live": None,  # 扫描中途已发现条目（不覆盖其它盘 STATE）
 }
 _scan_lock = threading.Lock()
 _convert_lock = threading.Lock()

@@ -1,0 +1,27 @@
+name: 其它问题 / Bug
+description: 崩溃、导出失败、多盘异常等（不属于扫不到 / 没声音 / 封面）
+title: "[Bug] "
+labels: ["bug", "需要信息"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么？期望是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: 1. … 2. … 3. …
+    validations:
+      required: true
+  - type: input
+    id: ver
+    attributes:
+      label: 版本或来源
+      placeholder: Release 标签 / commit / 本地源码日期
+  - type: textarea
+    id: log
+    attributes:
+      label: 相关报错或 startup.log 末尾（可打码路径）

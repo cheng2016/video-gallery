@@ -30,6 +30,8 @@ from vg.disk_libs import (
     find_in_disk_libs,
     save_library_item,
     stamp_lib_meta,
+    store_live_library,
+    sync_disk_lib_memory,
 )
 from vg.drives import save_prefs
 from vg.genres import detect_genres, ensure_video_genres
@@ -135,11 +137,18 @@ def mark_duplicates(videos: list[dict]) -> None:
             _flag(group, "同体积")
 
 
-def rebuild_indexes(videos: list[dict] | None = None) -> None:
-    """扫描结束后预计算频道索引与侧面统计，加速 /api/tree、/api/videos。"""
+def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> None:
+    """扫描结束后预计算频道索引与侧面统计，加速 /api/tree、/api/videos。
+
+    heavy=False：跳过重复检测与强制重算拼音（扫描中途/轻量刷新用）。
+    """
     videos = videos if videos is not None else STATE.get("videos") or []
-    mark_duplicates(videos)
-    attach_series(videos)
+    if heavy:
+        mark_duplicates(videos)
+        attach_series(videos)
+    else:
+        # 剧集折叠仍需要 series 字段；重复标记可延后到完整重建
+        attach_series(videos)
     by_cat: dict[str, list] = {}
     by_id: dict[str, dict] = {}
     type_counts: dict[str, int] = {}
@@ -150,7 +159,8 @@ def rebuild_indexes(videos: list[dict] | None = None) -> None:
         vid = v.get("id")
         if vid:
             by_id[vid] = v
-        v.pop("_q", None)  # 强制重算拼音/演员搜索串
+        if heavy:
+            v.pop("_q", None)  # 强制重算拼音/演员搜索串
         _video_search_text(v)
         cat = _video_category(v)
         by_cat.setdefault(cat, []).append(v)
@@ -199,6 +209,7 @@ def rebuild_indexes(videos: list[dict] | None = None) -> None:
         "categories": categories,
         "count": len(videos),
     }
+    STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
 
 
 def start_scan(
@@ -339,8 +350,12 @@ def _bg_incremental_scan(root: Path, do_thumbs: bool) -> None:
         except RuntimeError:
             pass
 
-def build_tree(root: Path, videos: list[dict]) -> dict:
-    """按相对路径文件夹层级建树。"""
+def build_tree(root: Path, videos: list[dict], *, with_videos: bool = False) -> dict:
+    """按相对路径文件夹层级建树。
+
+    with_videos=False（默认）：节点只带 count/children，不内嵌整片条目。
+    侧栏树只要计数；内嵌数千条会让 /api/tree JSON 巨大并卡死前台。
+    """
     root_node = {"name": root.name or str(root), "path": "", "children": {}, "videos": []}
 
     for v in videos:
@@ -359,19 +374,22 @@ def build_tree(root: Path, videos: list[dict]) -> dict:
                     "videos": [],
                 }
             node = node["children"][folder]
-        node["videos"].append(v)
+        if with_videos:
+            node["videos"].append(v)
+        else:
+            # placeholder so finalize can count leaf files
+            node["videos"].append(1)
 
     def finalize(n: dict) -> dict:
         children = [finalize(c) for c in sorted(n["children"].values(), key=lambda x: x["name"].lower())]
-        videos_sorted = sorted(n["videos"], key=lambda x: x["name"].lower())
-        # 统计本节点及子节点视频数
-        count = len(videos_sorted) + sum(c["count"] for c in children)
+        leaf_n = len(n["videos"])
+        count = leaf_n + sum(c["count"] for c in children)
         return {
             "name": n["name"],
             "path": n["path"],
             "count": count,
             "children": children,
-            "videos": videos_sorted,
+            "videos": [] if not with_videos else sorted(n["videos"], key=lambda x: (x.get("name") or "").lower()),
         }
 
     return finalize(root_node)
@@ -463,6 +481,12 @@ def scan_videos(
     ffmpeg = STATE["ffmpeg"]
     cache = STATE["cache_dir"] or ensure_cache_dir(root)
     STATE["cache_dir"] = cache
+    try:
+        root_s = str(Path(root).resolve())
+    except OSError:
+        root_s = str(root)
+    STATE["scan_root"] = root_s
+    STATE["scan_live"] = []
     mode = "增量" if incremental else "全量"
     log(f"[扫描] {mode}开始: {root}" + ("（后台）" if quiet else ""))
     try:
@@ -478,6 +502,32 @@ def scan_videos(
     errors: list[str] = []
     found: list[dict] = []
     reused = added = 0
+    last_progress_ts = 0.0
+    last_tree_n = 0
+
+    def _publish_live(force_tree: bool = False) -> None:
+        """Push mid-scan catalog without wiping other disks from STATE."""
+        nonlocal last_progress_ts, last_tree_n
+        import time as _time
+
+        now = _time.time()
+        # Items are stamped as they are found; just expose the live list.
+        STATE["scan_live"] = found
+        STATE["scan_progress"] = f"已发现 {len(found)} 个视频…"
+        STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+        # Sync disk_libs / tree infrequently — scan_live already covers API reads.
+        if force_tree or (len(found) - last_tree_n >= 400) or (now - last_progress_ts >= 3.0):
+            try:
+                store_live_library(root_s, found)
+            except Exception as e:
+                log(f"[扫描] 实时入库失败: {e}")
+            if not quiet:
+                try:
+                    STATE["tree"] = build_tree(root, found)
+                except Exception:
+                    pass
+            last_tree_n = len(found)
+            last_progress_ts = now
 
     def on_walk_error(err: OSError) -> None:
         if len(errors) < 5:
@@ -540,36 +590,60 @@ def scan_videos(
                 if ext in PLAYLIST_EXTS:
                     item["kind"] = "m3u8"
                 added += 1
+            item["root"] = root_s
+            item["_lib_root"] = root_s
+            if cache:
+                item["_lib_cache"] = str(cache)
+            if "_folder_raw" not in item:
+                item["_folder_raw"] = (item.get("folder") or "").replace("\\", "/").strip("/")
             found.append(item)
-            if len(found) % 200 == 0:
-                STATE["videos"] = found
-                if not quiet:
-                    STATE["tree"] = build_tree(root, found)
-                STATE["scan_progress"] = f"已发现 {len(found)} 个视频…"
-                log(f"[扫描] 已发现 {len(found)} 个…（复用 {reused} / 新建 {added}）")
-            elif len(found) % 50 == 0:
-                STATE["scan_progress"] = f"已发现 {len(found)} 个视频…"
-                if not quiet:
-                    STATE["videos"] = found
+            n = len(found)
+            if n % 100 == 0:
+                _publish_live(force_tree=(n % 500 == 0))
+                if n % 200 == 0:
+                    log(f"[扫描] 已发现 {n} 个…（复用 {reused} / 新建 {added}）")
+            elif n == 25:
+                # First batch: make the third disk visible ASAP
+                _publish_live(force_tree=True)
 
     found.sort(key=lambda x: x["rel"].lower())
     found = collapse_segment_sets(found)
-    try:
-        root_s = str(Path(root).resolve())
-    except OSError:
-        root_s = str(root)
     stamp_lib_meta(found, root=root_s, cache=cache, overwrite=True)
     for v in found:
         v["root"] = root_s
         if "_folder_raw" not in v:
             v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
+    STATE["scan_live"] = found
+    try:
+        store_live_library(root_s, found)
+    except Exception:
+        pass
     STATE["tree"] = build_tree(root, found)
-    rebuild_indexes(found)
+
+    # Never replace the whole multi-disk STATE with one disk mid-flight.
+    multi = False
+    try:
+        from vg.roots import get_mounted_roots
+
+        multi = len(get_mounted_roots()) > 1
+    except Exception:
+        multi = False
+
+    if multi:
+        # Leave other disks intact; unified publish happens after save_index.
+        pass
+    else:
+        rebuild_indexes(found)
+
     extra = f"（{len(errors)} 个目录跳过）" if errors else ""
     tip = f"，复用 {reused}，新建/变更 {added}" if incremental else ""
     STATE["scan_progress"] = f"扫描完成，共 {len(found)} 个视频{tip}{extra}"
     log(f"[扫描] 完成，共 {len(found)} 个{tip}{extra}")
     save_index(cache, root, found)
+    try:
+        sync_disk_lib_memory(root_s, found)
+    except Exception as e:
+        log(f"[扫描] 同步内存索引失败: {e}")
     save_prefs(last_root=str(root))
     try:
         from vg.roots import on_scan_finished
@@ -577,6 +651,8 @@ def scan_videos(
         on_scan_finished(root)
     except Exception as e:
         log(f"[多根] 扫描收尾失败: {e}")
+        if not multi:
+            rebuild_indexes(found)
 
     if do_thumbs and ffmpeg and found:
         missing = []
@@ -600,30 +676,33 @@ def scan_videos(
             log(f"[预览图] 全部命中缓存（{cached_n}），无需重建")
         save_index(cache, root, found)
         try:
+            sync_disk_lib_memory(root_s, found)
+        except Exception:
+            pass
+        # One final merge/rebuild after thumbs — avoid triple publish.
+        try:
             from vg.roots import get_mounted_roots, publish_unified_library
 
             if len(get_mounted_roots()) > 1:
                 publish_unified_library()
             else:
                 rebuild_indexes(found)
+                STATE["tree"] = build_tree(root, found)
         except Exception as e:
             log(f"[多根] 预览图完成后合并失败: {e}")
             rebuild_indexes(found)
     elif not ffmpeg:
         STATE["thumb_progress"] = "未找到 ffmpeg，已跳过预览图（安装后重启可生成）"
         log("[预览图] 未找到 ffmpeg，已跳过")
+        if not multi:
+            STATE["tree"] = build_tree(root, found)
     elif not quiet:
         STATE["thumb_progress"] = ""
-
-    try:
-        from vg.roots import get_mounted_roots, publish_unified_library
-
-        if len(get_mounted_roots()) > 1:
-            publish_unified_library()
-        else:
+        if not multi:
             STATE["tree"] = build_tree(root, found)
-    except Exception:
-        STATE["tree"] = build_tree(root, found)
+
+    STATE["scan_live"] = None
+    STATE["scan_root"] = ""
     if not quiet:
         STATE["scanning"] = False
     log("[扫描] 全部结束，可在浏览器浏览")

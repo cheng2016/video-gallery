@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 使用说明 / Releases
+    url: https://github.com/cheng2016/video-gallery/blob/main/docs/how-it-works.md
+    about: 先看图文三步与免安装包说明，很多问题不用提 Issue。
+  - name: 讨论区（想法 / 功能建议）
+    url: https://github.com/cheng2016/video-gallery/discussions
+    about: 非故障类想法可发 Discussions（若仓库已开启）。

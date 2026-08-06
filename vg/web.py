@@ -65,6 +65,7 @@ from vg.disk_libs import (
 from vg.drives import list_drives_info, list_lan_ipv4, load_prefs, save_prefs
 from vg.export import export_static_site
 from vg.genres import ensure_video_genres
+from vg.privacy import privacy_snapshot, set_privacy
 from vg.media import (
     _apply_probe_to_item,
     _item_probe_path,
@@ -178,6 +179,32 @@ def index():
     return Response(html, mimetype="text/html; charset=utf-8")
 
 
+@app.route("/api/status")
+def api_status():
+    """Lightweight poll target during scan — avoids rebuilding tree/facets every 1.5s."""
+    facets = STATE.get("facets") or {}
+    live = STATE.get("scan_live")
+    live_n = len(live) if isinstance(live, list) else 0
+    return jsonify({
+        "scanning": bool(STATE.get("scanning")),
+        "updating": bool(STATE.get("updating")),
+        "exporting": bool(STATE.get("exporting")),
+        "export_msg": STATE.get("export_msg") or "",
+        "export_path": STATE.get("export_path") or "",
+        "export_ok": STATE.get("export_ok"),
+        "scan_progress": STATE.get("scan_progress") or "",
+        "thumb_progress": STATE.get("thumb_progress") or "",
+        "meta_progress": STATE.get("meta_progress") or "",
+        "count": int(facets.get("count") or len(STATE.get("videos") or [])),
+        "lib_gen": int(STATE.get("lib_gen") or 0),
+        "scan_root": STATE.get("scan_root") or "",
+        "scan_found": live_n,
+        "has_ffmpeg": bool(STATE.get("ffmpeg")),
+        "root": str(STATE["root"]) if STATE.get("root") else "",
+        "lan_share": bool(STATE.get("lan_share")),
+    })
+
+
 @app.route("/api/tree")
 def api_tree():
     root = STATE["root"]
@@ -186,45 +213,58 @@ def api_tree():
     videos = videos_for_scope(lib or None)
     tree = tree_for_scope(lib or None)
 
-    # 按当前范围重算侧面（多根「全部」或选中某一根）
-    type_counts: dict[str, int] = {}
-    cat_counts: dict[str, int] = {}
-    genre_counts: dict[str, int] = {}
-    for v in videos:
-        ext = (v.get("ext") or "").lower() or "unknown"
-        type_counts[ext] = type_counts.get(ext, 0) + 1
-        cat = _video_category(v)
-        cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        for g in ensure_video_genres(v):
-            genre_counts[g] = genre_counts.get(g, 0) + 1
-    types = [
-        {"ext": ext, "count": cnt, "label": ext.lstrip(".").upper() or "未知"}
-        for ext, cnt in sorted(type_counts.items(), key=lambda x: (-x[1], x[0]))
-    ]
-    genre_order = {name: i for i, (name, _) in enumerate(GENRE_DEFS)}
-    genres = [
-        {"id": name, "name": name, "count": cnt}
-        for name, cnt in sorted(
-            genre_counts.items(),
-            key=lambda x: (genre_order.get(x[0], 999), -x[1], x[0]),
-        )
-        if cnt > 0
-    ]
-    prefer = ["电影", "电视剧", "综艺", "动漫", "少儿", "纪录片", "短剧", "体育", "音乐", "教育", "其他", ""]
-    prefer_rank = {n: i for i, n in enumerate(prefer)}
+    # Prefer precomputed facets for the unified catalog; scoped views recompute.
+    facets = STATE.get("facets") or {}
+    use_cached = (
+        not lib
+        and facets
+        and int(facets.get("count") or -1) == len(videos)
+        and not STATE.get("scanning")
+    )
+    if use_cached:
+        types = facets.get("types") or []
+        genres = facets.get("genres") or []
+        categories = facets.get("categories") or []
+        count = int(facets.get("count") or len(videos))
+    else:
+        type_counts: dict[str, int] = {}
+        cat_counts: dict[str, int] = {}
+        genre_counts: dict[str, int] = {}
+        for v in videos:
+            ext = (v.get("ext") or "").lower() or "unknown"
+            type_counts[ext] = type_counts.get(ext, 0) + 1
+            cat = _video_category(v)
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            for g in ensure_video_genres(v):
+                genre_counts[g] = genre_counts.get(g, 0) + 1
+        types = [
+            {"ext": ext, "count": cnt, "label": ext.lstrip(".").upper() or "未知"}
+            for ext, cnt in sorted(type_counts.items(), key=lambda x: (-x[1], x[0]))
+        ]
+        genre_order = {name: i for i, (name, _) in enumerate(GENRE_DEFS)}
+        genres = [
+            {"id": name, "name": name, "count": cnt}
+            for name, cnt in sorted(
+                genre_counts.items(),
+                key=lambda x: (genre_order.get(x[0], 999), -x[1], x[0]),
+            )
+            if cnt > 0
+        ]
+        prefer = ["电影", "电视剧", "综艺", "动漫", "少儿", "纪录片", "短剧", "体育", "音乐", "教育", "其他", ""]
+        prefer_rank = {n: i for i, n in enumerate(prefer)}
 
-    def cat_sort_key(item: tuple[str, int]):
-        name, cnt = item
-        return (prefer_rank.get(name, 100), -cnt, name.lower())
+        def cat_sort_key(item: tuple[str, int]):
+            name, cnt = item
+            return (prefer_rank.get(name, 100), -cnt, name.lower())
 
-    categories = []
-    for name, cnt in sorted(cat_counts.items(), key=cat_sort_key):
-        categories.append({
-            "id": name,
-            "name": "未分类" if name == "" else name,
-            "count": cnt,
-        })
-    count = len(videos)
+        categories = []
+        for name, cnt in sorted(cat_counts.items(), key=cat_sort_key):
+            categories.append({
+                "id": name,
+                "name": "未分类" if name == "" else name,
+                "count": cnt,
+            })
+        count = len(videos)
     mounts = roots_summary(all_videos)
 
     return jsonify({
@@ -242,6 +282,8 @@ def api_tree():
         "thumb_progress": STATE["thumb_progress"],
         "meta_progress": STATE.get("meta_progress") or "",
         "count": count,
+        "lib_gen": int(STATE.get("lib_gen") or 0),
+        "scan_found": len(STATE.get("scan_live") or []) if isinstance(STATE.get("scan_live"), list) else 0,
         "has_ffmpeg": bool(STATE["ffmpeg"]),
         "root": str(root) if root else "",
         "lib": lib,
@@ -251,6 +293,7 @@ def api_tree():
         "bind_port": int(STATE.get("bind_port") or 8765),
         "lan_share": bool(STATE.get("lan_share")),
         "lan_urls": _lan_urls(),
+        "privacy": privacy_snapshot(),
     })
 
 
@@ -1612,6 +1655,41 @@ def api_roots():
     # add
     ok, msg = add_mount(path)
     return jsonify({"ok": ok, "msg": msg, "roots": roots_summary()})
+
+
+@app.route("/api/privacy", methods=["GET", "POST"])
+def api_privacy():
+    """隐私模式：预览图加密、缓存写在程序目录还是视频盘。"""
+    if request.method == "GET":
+        return jsonify({"ok": True, **privacy_snapshot()})
+    data = request.get_json(silent=True) or {}
+    encrypt = data.get("encrypt_thumbs")
+    loc = data.get("cache_location")
+    if encrypt is None and loc is None:
+        return jsonify({"ok": False, "msg": "未提供设置项"}), 400
+    if loc is not None and str(loc).strip().lower() not in ("program", "disk"):
+        return jsonify({"ok": False, "msg": "cache_location 应为 program 或 disk"}), 400
+    before = privacy_snapshot()
+    after = set_privacy(
+        encrypt_thumbs=bool(encrypt) if encrypt is not None else None,
+        cache_location_value=str(loc) if loc is not None else None,
+    )
+    tips = []
+    if encrypt is not None and bool(encrypt) != before["encrypt_thumbs"]:
+        tips.append("加密设置已保存；新截的预览图按新规则写入，旧图仍可正常显示。")
+    if loc is not None and after["cache_location"] != before["cache_location"]:
+        tips.append("缓存位置已改，请点「重新扫描」让索引与预览图落到新位置。")
+        # 刷新当前盘 cache_dir 指向
+        root = STATE.get("root")
+        if root:
+            try:
+                from vg.cache import ensure_cache_dir
+
+                STATE["cache_dir"] = ensure_cache_dir(Path(root))
+            except OSError:
+                pass
+    msg = " ".join(tips) if tips else "已保存"
+    return jsonify({"ok": True, "msg": msg, **after})
 
 
 @app.route("/api/export-static", methods=["POST"])

@@ -1,0 +1,58 @@
+name: 播放没声音
+description: 浏览器能出画面但听不到声音，或只有系统播放器才有声
+title: "[没声音] "
+labels: ["没声音", "需要信息"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        浏览器常不支持 AC3/DTS 等音轨。多数情况用「修复声音」或「系统播放器」即可。
+  - type: dropdown
+    id: where
+    attributes:
+      label: 在哪里没声音？
+      options:
+        - 仅浏览器内播放没声
+        - 系统播放器也没声
+        - 转 MP4 / 修复声音之后仍没声
+        - 其它
+    validations:
+      required: true
+  - type: input
+    id: format
+    attributes:
+      label: 视频格式 / 扩展名
+      placeholder: 例如 mkv、mp4、m3u8、TS 合集
+    validations:
+      required: true
+  - type: dropdown
+    id: tried
+    attributes:
+      label: 试过这些吗？
+      options:
+        - 已点「修复声音」，仍不行
+        - 已用「系统播放器」，浏览器没声但系统有声
+        - 还没试过修复声音 / 系统播放器
+        - 其它（说明里写）
+    validations:
+      required: true
+  - type: input
+    id: codec
+    attributes:
+      label: 若播放信息里写了音频编码，请填上
+      placeholder: 例如 ac3、dts、eac3、aac（不知道可填「不清楚」）
+  - type: textarea
+    id: detail
+    attributes:
+      label: 补充说明
+      placeholder: 片源来源（可选）、是否局域网手机播放、截图里的提示文字等
+    validations:
+      required: true
+  - type: checkboxes
+    id: env
+    attributes:
+      label: 环境
+      options:
+        - label: 已安装 / 能检测到 ffmpeg（状态栏或启动窗口有 ffmpeg 路径）
+        - label: 用的是免安装包
+        - label: 用的是源码 + start.bat

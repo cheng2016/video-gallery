@@ -107,17 +107,26 @@ def _restore_folder(item: dict, root_s: str, label: str) -> str:
 
 
 def _videos_from_root(root_s: str) -> list[dict]:
-    """Videos belonging to one root; complete disk index beats partial scan STATE."""
+    """Videos belonging to one root; live scan progress beats stale index."""
     root_s_l = root_s.lower()
-    vids = list(STATE.get("videos") or [])
 
-    # A saved per-root index is complete. STATE may be a partial ``found`` list
-    # while a background scan is publishing progress.
+    # Scanning this disk: prefer live in-memory snapshot so the third disk
+    # appears while the walk is still running.
+    try:
+        scan_root = STATE.get("scan_root") or ""
+        if scan_root and _norm_root_str(scan_root).lower() == root_s_l:
+            live = STATE.get("scan_live")
+            if isinstance(live, list) and live:
+                return live
+    except Exception:
+        pass
+
+    # Memory / disk index (read_root_library is now mtime-cached)
     from_disk = read_root_library(root_s)
     if from_disk is not None:
         return from_disk
 
-    # No saved index yet: use correctly tagged in-memory entries.
+    vids = list(STATE.get("videos") or [])
     scoped = [
         dict(v) for v in vids
         if (v.get("_lib_root") or v.get("root") or "").strip()
@@ -126,7 +135,6 @@ def _videos_from_root(root_s: str) -> list[dict]:
     if scoped:
         return scoped
 
-    # 刚扫完、尚未打标：STATE.root 就是该盘，且库里没有其它盘的标记
     try:
         cur = STATE.get("root")
         if cur and _norm_root_str(cur).lower() == root_s_l and vids:
@@ -141,18 +149,6 @@ def _videos_from_root(root_s: str) -> list[dict]:
                 return out
     except OSError:
         pass
-
-    # 内存 disk_libs 兜底
-    libs = STATE.get("disk_libs") or {}
-    lib = libs.get(root_s)
-    if not lib:
-        # 大小写宽松匹配
-        for k, val in libs.items():
-            if str(k).lower() == root_s_l:
-                lib = val
-                break
-    if lib and lib.get("by_id"):
-        return [dict(v) for v in lib["by_id"].values()]
 
     if load_library_from_index(root_s):
         lib = (STATE.get("disk_libs") or {}).get(root_s)
@@ -369,7 +365,7 @@ def tree_for_scope(lib: str | None = None) -> dict:
             "lib": r,
             "count": n,
             "children": sub.get("children") or [],
-            "videos": sub.get("videos") or [],
+            "videos": [],
         })
     return {
         "name": "全部盘",
@@ -429,6 +425,12 @@ def publish_unified_library() -> int:
     STATE["videos"] = merged
     STATE["tree"] = tree_for_scope(None)
     rebuild_indexes(merged)
+    STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+    # Clear live scan snapshot once the unified catalog is published.
+    if STATE.get("scan_live") is not None:
+        STATE["scan_live"] = None
+    if STATE.get("scan_root"):
+        STATE["scan_root"] = ""
     log(f"[多根] 统一片库 {len(roots)} 个目录，共 {len(merged)} 部")
     return len(merged)
 

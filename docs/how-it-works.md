@@ -28,3 +28,8 @@
 
 下载免安装包见 [Releases](https://github.com/cheng2016/video-gallery/releases)。  
 示例目录结构见 [`samples/demo-library`](../samples/demo-library/)。
+
+### 隐私与反馈
+
+- 顶栏 **隐私**：可关预览图加密；可选缓存写在程序目录或视频盘 `.video_gallery_cache`。  
+- 顶栏 **反馈** → [中文 Issues 模板](https://github.com/cheng2016/video-gallery/issues/new/choose)（扫不到 / 没声音 / 封面错）。

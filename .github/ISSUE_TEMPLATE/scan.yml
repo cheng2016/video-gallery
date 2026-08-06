@@ -1,0 +1,64 @@
+name: 扫不到视频
+description: 选盘 / 扫描后列表为空、数量不对、某个文件夹没有进库
+title: "[扫不到] "
+labels: ["扫不到", "需要信息"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        谢谢反馈。请尽量填全，能大幅减少来回问问题的时间。
+  - type: dropdown
+    id: when
+    attributes:
+      label: 什么时候出的问题？
+      options:
+        - 第一次扫描就空
+        - 以前能扫到，最近不行了
+        - 只有某个文件夹 / 某盘扫不到
+        - 其它（请在描述里写）
+    validations:
+      required: true
+  - type: input
+    id: path
+    attributes:
+      label: 扫描的盘符或目录（可打码隐私部分）
+      placeholder: 例如 D:\ 或 E:\电影
+    validations:
+      required: true
+  - type: dropdown
+    id: run_mode
+    attributes:
+      label: 怎么运行的？
+      options:
+        - 免包 Start-VideoGallery.bat / VideoGallery.exe
+        - 源码 start.bat / app.py
+        - 不清楚
+    validations:
+      required: true
+  - type: textarea
+    id: expect
+    attributes:
+      label: 资源管理器里实际有哪些格式？大概多少个文件？
+      placeholder: 例如：mkv/mp4 大约 200 个；或只有 m3u8+ts
+    validations:
+      required: true
+  - type: textarea
+    id: ui
+    attributes:
+      label: 软件里看到什么？
+      placeholder: 例如：扫描完成显示 0；或侧栏有盘但点进去空；状态栏原文也可粘贴
+    validations:
+      required: true
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: 已排除这些常见原因
+      options:
+        - label: 文件大于约 100KB（过小的假视频会被跳过）
+        - label: 不在系统目录 / node_modules / .git 等自动跳过目录里
+        - label: 盘符可在资源管理器正常打开（未掉盘）
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其它说明 / 截图说明
+      placeholder: 可附状态栏文字、startup.log 末尾几行（勿贴含隐私的完整路径列表）

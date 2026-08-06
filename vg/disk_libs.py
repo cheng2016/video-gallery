@@ -97,12 +97,40 @@ def item_belongs_to_root(item: dict, root: Path | str) -> bool:
 
 
 def read_root_library(root: Path | str) -> list[dict] | None:
-    """Read one complete per-disk index, or None when no valid index exists."""
+    """Read one per-disk catalog; prefer in-memory cache to avoid re-parsing JSON."""
     root_s = _norm_root_str(root)
     cache = ensure_cache_dir(Path(root_s))
     index_path = cache / INDEX_NAME
+
+    # Live scan snapshot beats stale index while this root is being scanned.
+    with _libs_lock:
+        existing = (STATE.get("disk_libs") or {}).get(root_s)
+        if not existing:
+            for k, val in (STATE.get("disk_libs") or {}).items():
+                if str(k).lower() == root_s.lower():
+                    existing = val
+                    break
+        if existing and existing.get("by_id") and existing.get("live"):
+            return list(existing["by_id"].values())
+
     if not index_path.is_file():
         return None
+
+    try:
+        index_mtime = index_path.stat().st_mtime
+    except OSError:
+        index_mtime = 0
+
+    with _libs_lock:
+        existing = (STATE.get("disk_libs") or {}).get(root_s)
+        if (
+            existing
+            and existing.get("by_id")
+            and not existing.get("live")
+            and float(existing.get("index_mtime") or 0) == float(index_mtime or 0)
+        ):
+            return list(existing["by_id"].values())
+
     try:
         payload = json.loads(index_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -111,11 +139,77 @@ def read_root_library(root: Path | str) -> list[dict] | None:
     videos = payload.get("videos")
     if not isinstance(videos, list):
         return None
-    return [
+    clean = [
         _disk_item(v, root_s, cache)
         for v in videos
         if isinstance(v, dict) and v.get("id") and item_belongs_to_root(v, root_s)
     ]
+    by_id = {v["id"]: v for v in clean}
+    _store_lib(root_s, cache, by_id, index_mtime=index_mtime)
+    return list(by_id.values())
+
+
+def store_live_library(root: Path | str, videos: list[dict]) -> None:
+    """Publish in-progress scan results into disk_libs without writing index.json.
+
+    Lets other disks keep their indexes while the scanning disk becomes visible
+    immediately in /api/tree and /api/videos.
+    """
+    root_s = _norm_root_str(root)
+    try:
+        cache = ensure_cache_dir(Path(root_s))
+    except OSError:
+        cache = None
+    by_id: dict[str, dict] = {}
+    for item in videos:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        stamped = dict(item)
+        stamp_lib_meta([stamped], root=root_s, cache=cache, overwrite=True)
+        stamped["root"] = root_s
+        if "_folder_raw" not in stamped:
+            stamped["_folder_raw"] = (stamped.get("folder") or "").replace("\\", "/").strip("/")
+        source_id = stamped.get("_thumb_id") or stamped["id"]
+        by_id[source_id] = stamped
+    with _libs_lock:
+        libs = STATE.setdefault("disk_libs", {})
+        libs[root_s] = {
+            "root": root_s,
+            "cache_dir": str(cache) if cache else None,
+            "by_id": by_id,
+            "updated": time.time(),
+            "index_mtime": 0,
+            "live": True,
+            "live_count": len(by_id),
+        }
+    STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+
+
+def sync_disk_lib_memory(root: Path | str, videos: list[dict]) -> None:
+    """Refresh in-memory disk_libs after index.json was written (clears live flag)."""
+    root_s = _norm_root_str(root)
+    try:
+        cache = ensure_cache_dir(Path(root_s))
+    except OSError:
+        cache = None
+    by_id: dict[str, dict] = {}
+    for item in videos:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        if cache is not None:
+            by_id[item.get("_thumb_id") or item["id"]] = _disk_item(item, root_s, cache)
+        else:
+            stamped = dict(item)
+            stamp_lib_meta([stamped], root=root_s, cache=None, overwrite=True)
+            stamped["root"] = root_s
+            by_id[stamped.get("_thumb_id") or stamped["id"]] = stamped
+    index_mtime = 0.0
+    if cache is not None:
+        try:
+            index_mtime = (Path(cache) / INDEX_NAME).stat().st_mtime
+        except OSError:
+            index_mtime = 0.0
+    _store_lib(root_s, cache, by_id, index_mtime=index_mtime)
 
 
 def save_root_library(root: Path | str, videos: list[dict]) -> list[dict]:
@@ -318,6 +412,7 @@ def _store_lib(
             "by_id": by_id,
             "updated": time.time(),
             "index_mtime": float(index_mtime or 0),
+            "live": False,
         }
 
 
@@ -390,7 +485,7 @@ def load_library_from_index(root: Path | str) -> bool:
 
 
 def ensure_cached_indexes_scanned() -> None:
-    """One-time: pull all preview_cache/*/index.json whose root folder still exists."""
+    """One-time: pull indexes from program preview_cache and (if enabled) disk caches."""
     global _scanned_caches
     if _scanned_caches:
         return
@@ -399,23 +494,47 @@ def ensure_cached_indexes_scanned() -> None:
             return
         _scanned_caches = True
     try:
-        if not VGDATA_DIR.is_dir():
-            return
-        for index_path in VGDATA_DIR.glob(f"*/{INDEX_NAME}"):
-            try:
-                data = json.loads(index_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            root_raw = (data.get("root") or "").strip()
-            if not root_raw:
-                continue
-            try:
-                root_p = Path(root_raw)
-                if not root_p.is_dir():
+        from vg.config import THUMB_DIR_NAME
+        from vg.privacy import cache_location
+
+        seen_roots: set[str] = set()
+        if VGDATA_DIR.is_dir():
+            for index_path in VGDATA_DIR.glob(f"*/{INDEX_NAME}"):
+                try:
+                    data = json.loads(index_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
                     continue
-            except OSError:
-                continue
-            load_library_from_index(root_p)
+                root_raw = (data.get("root") or "").strip()
+                if not root_raw:
+                    continue
+                try:
+                    root_p = Path(root_raw)
+                    if not root_p.is_dir():
+                        continue
+                except OSError:
+                    continue
+                key = str(root_p.resolve()).lower()
+                if key in seen_roots:
+                    continue
+                seen_roots.add(key)
+                load_library_from_index(root_p)
+
+        # 盘内缓存模式：挂载列表里的盘也可能只有 .video_gallery_cache
+        if cache_location() == "disk":
+            for raw in list(STATE.get("mounted_roots") or []):
+                try:
+                    root_p = Path(raw).expanduser().resolve()
+                    if not root_p.is_dir():
+                        continue
+                    if not (root_p / THUMB_DIR_NAME / INDEX_NAME).is_file():
+                        continue
+                    key = str(root_p).lower()
+                    if key in seen_roots:
+                        continue
+                    seen_roots.add(key)
+                    load_library_from_index(root_p)
+                except OSError:
+                    continue
     except OSError as e:
         log(f"[跨盘] 扫描缓存索引失败: {e}")
 

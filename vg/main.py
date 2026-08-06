@@ -161,7 +161,11 @@ def main():
         print(f"ffmpeg: {STATE['ffmpeg']}")
 
     print(f"扫描目录: {root}")
-    print(f"预览图目录: {VGDATA_DIR.resolve()}（程序根目录，文件已加密）")
+    from vg.privacy import privacy_snapshot
+
+    priv = privacy_snapshot()
+    enc = "已加密" if priv["encrypt_thumbs"] else "明文 JPEG"
+    print(f"预览图目录: {priv['cache_hint']}（{enc}）")
     print("正在后台加载/扫描，网页会先打开，列表随后刷新…")
     bootlog.step("start_scan", f"root={root} thumbs={not args.no_thumbs} force={args.rescan}")
     try:

@@ -71,6 +71,12 @@
       background: var(--hover);
       border-color: var(--border);
     }
+    .header-actions a.btn {
+      text-decoration: none;
+      color: inherit;
+      display: inline-flex;
+      align-items: center;
+    }
     .brand {
       font-size: 1.15rem;
       font-weight: 700;
@@ -1049,6 +1055,8 @@
       <button class="btn" id="lanBtn" title="允许同一 WiFi 下其它设备访问">局域网共享</button>
       <button class="btn" id="historyBtn" title="最近播放 / 继续看 / 已看完">播放历史</button>
       <button class="btn" id="exportStaticBtn" title="导出到当前盘/_video_gallery_static/，双击即可离线浏览，无需启动服务">导出静态站</button>
+      <button class="btn" id="privacyBtn" title="隐私：预览图加密、缓存是否写视频盘">隐私</button>
+      <a class="btn" id="feedbackBtn" href="https://github.com/cheng2016/video-gallery/issues/new/choose" target="_blank" rel="noopener" title="反馈问题（扫不到 / 没声音 / 封面错）">反馈</a>
     </div>
   </header>
 
@@ -1141,6 +1149,44 @@
       <button class="modal-close" id="seriesModalClose" title="关闭">×</button>
     </div>
     <div class="modal-info" id="seriesModalList" style="flex:1;overflow:auto;max-height:70vh"></div>
+  </div>
+
+  <div class="modal" id="privacyModal">
+    <div class="modal-bar">
+      <div class="title">隐私模式</div>
+      <button class="modal-close" id="privacyModalClose" title="关闭">×</button>
+    </div>
+    <div class="modal-info" style="line-height:1.6;max-width:36rem">
+      <p style="margin:0 0 12px;opacity:.85">囤片场景常用：预览图不想被资源管理器直接打开看；缓存不想写到视频盘占空间或暴露目录。</p>
+      <label style="display:flex;align-items:flex-start;gap:10px;margin:12px 0;cursor:pointer">
+        <input type="checkbox" id="privacyEncrypt" style="margin-top:4px" />
+        <span>
+          <strong>加密预览图</strong><br>
+          <span style="opacity:.75;font-size:.9em">开启后缓存为加密文件，不能当普通图片打开；关闭则为普通 JPEG（文件名仍是 .vgt）。</span>
+        </span>
+      </label>
+      <div style="margin:14px 0 6px"><strong>缓存位置</strong></div>
+      <label style="display:flex;align-items:flex-start;gap:10px;margin:8px 0;cursor:pointer">
+        <input type="radio" name="privacyCacheLoc" value="program" style="margin-top:4px" />
+        <span>
+          <strong>程序目录（推荐）</strong><br>
+          <span style="opacity:.75;font-size:.9em">写到软件旁的 preview_cache，不污染视频盘；换机/重装时注意备份。</span>
+        </span>
+      </label>
+      <label style="display:flex;align-items:flex-start;gap:10px;margin:8px 0;cursor:pointer">
+        <input type="radio" name="privacyCacheLoc" value="disk" style="margin-top:4px" />
+        <span>
+          <strong>视频盘内</strong><br>
+          <span style="opacity:.75;font-size:.9em">写到各盘根目录 .video_gallery_cache（隐藏文件夹）；盘带走封面也在，但会占用盘空间。</span>
+        </span>
+      </label>
+      <p id="privacyPathHint" style="margin:12px 0 0;font-size:.85em;opacity:.7;word-break:break-all"></p>
+    </div>
+    <div class="modal-actions" style="justify-content:flex-end;flex-wrap:wrap;gap:8px">
+      <a class="btn" href="https://github.com/cheng2016/video-gallery/issues/new/choose" target="_blank" rel="noopener">反馈问题</a>
+      <button type="button" class="btn" id="privacyCancel">取消</button>
+      <button type="button" class="btn primary" id="privacySave">保存</button>
+    </div>
   </div>
 
   <div class="modal" id="cleanupModal">
@@ -1602,41 +1648,85 @@
       let wasBusy = true;
       let lastThumbProgress = "";
       let lastScanProgress = "";
+      let lastLibGen = state._libGen || 0;
+      let lastScanFound = -1;
       let thumbRefreshTimer = 0;
+      let lastFullRefresh = 0;
+      let driveTick = 0;
+      let pollInFlight = false;
+
       state._poll = setInterval(async () => {
+        if (pollInFlight) return;
+        pollInFlight = true;
         try {
-          const d = await refreshTree();
+          const r = await fetch("/api/status");
+          const d = await r.json();
           const busy = !!(d.scanning || d.updating);
+          const gen = d.lib_gen || 0;
+          const found = d.scan_found || 0;
+          const genChanged = gen !== lastLibGen;
+          const foundJump = found > 0 && (lastScanFound < 0 || found - lastScanFound >= 100);
+          const now = Date.now();
+
+          const bits = [];
+          if (d.scan_progress) bits.push(d.scan_progress);
+          if (d.thumb_progress) bits.push(d.thumb_progress);
+          if (d.meta_progress) bits.push(d.meta_progress);
+          if (found > 0 && d.scanning) bits.push("本盘 " + found);
+          const detail = bits.join(" · ");
+          if (detail) {
+            const head = state.multi
+              ? ("片库扫描中" + (state.lib ? " · 当前盘" : " · 全部"))
+              : (d.root ? ("当前: " + d.root) : "扫描中");
+            $("status").textContent = head + " · " + detail;
+            $("status").title = $("status").textContent;
+          }
+          $("rescanBtn").disabled = !!d.scanning;
+          $("scanDriveBtn").disabled = !!d.scanning;
+          $("driveSelect").disabled = !!d.scanning;
+
           if (busy) {
             wasBusy = true;
-            if (d.scanning) await refresh();
-            else if (
+            const canFull = now - lastFullRefresh > 3000;
+            if (canFull && (genChanged || foundJump)) {
+              lastFullRefresh = now;
+              lastLibGen = gen;
+              lastScanFound = found;
+              state._libGen = gen;
+              await refresh();
+            } else if (
+              canFull &&
               d.scan_progress &&
               d.scan_progress !== lastScanProgress &&
-              d.scan_progress.includes("扫描完成")
+              String(d.scan_progress).includes("扫描完成")
             ) {
+              lastFullRefresh = now;
               await refresh();
             } else if (d.thumb_progress && d.thumb_progress !== lastThumbProgress) {
               lastThumbProgress = d.thumb_progress;
-              const now = Date.now();
-              if (now - thumbRefreshTimer > 2500) {
+              if (now - thumbRefreshTimer > 3000) {
                 thumbRefreshTimer = now;
                 refreshVisibleThumbs();
               }
             }
           } else if (wasBusy) {
             wasBusy = false;
+            lastLibGen = gen;
+            state._libGen = gen;
             await refresh();
             refreshVisibleThumbs();
             clearInterval(state._poll);
             state._poll = null;
           }
           lastScanProgress = d.scan_progress || lastScanProgress;
-          await loadDrives();
+          driveTick += 1;
+          if (driveTick % 6 === 0) await loadDrives();
         } catch (e) {
           console.warn(e);
+        } finally {
+          pollInFlight = false;
         }
-      }, 1500);
+      }, 2000);
     }
 
     function refreshVisibleThumbs() {
@@ -3654,6 +3744,54 @@
     }
 
     renderMountChips();
+
+    // —— 隐私模式 ——
+    async function openPrivacyModal() {
+      try {
+        const data = await fetch("/api/privacy").then((r) => r.json());
+        if (!data.ok) {
+          alert(data.msg || "无法读取隐私设置");
+          return;
+        }
+        $("privacyEncrypt").checked = !!data.encrypt_thumbs;
+        const loc = data.cache_location === "disk" ? "disk" : "program";
+        document.querySelectorAll('input[name="privacyCacheLoc"]').forEach((el) => {
+          el.checked = el.value === loc;
+        });
+        $("privacyPathHint").textContent = "当前：" + (data.cache_hint || data.cache_path || "");
+        $("privacyModal").classList.add("open");
+      } catch (e) {
+        alert("读取失败: " + e);
+      }
+    }
+    if ($("privacyBtn")) $("privacyBtn").addEventListener("click", openPrivacyModal);
+    if ($("privacyModalClose")) $("privacyModalClose").addEventListener("click", () => $("privacyModal").classList.remove("open"));
+    if ($("privacyCancel")) $("privacyCancel").addEventListener("click", () => $("privacyModal").classList.remove("open"));
+    if ($("privacyModal")) $("privacyModal").addEventListener("click", (e) => {
+      if (e.target === $("privacyModal")) $("privacyModal").classList.remove("open");
+    });
+    if ($("privacySave")) $("privacySave").addEventListener("click", async () => {
+      const encrypt = !!($("privacyEncrypt") && $("privacyEncrypt").checked);
+      const locEl = document.querySelector('input[name="privacyCacheLoc"]:checked');
+      const cache_location = (locEl && locEl.value) || "program";
+      try {
+        const r = await fetch("/api/privacy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ encrypt_thumbs: encrypt, cache_location }),
+        });
+        const data = await r.json();
+        if (!data.ok) {
+          alert(data.msg || "保存失败");
+          return;
+        }
+        $("privacyModal").classList.remove("open");
+        alert(data.msg || "已保存");
+        try { await refresh(); } catch (_) {}
+      } catch (e) {
+        alert("保存失败: " + e);
+      }
+    });
 
     $("exportStaticBtn").addEventListener("click", async () => {
       if (!state.root) {

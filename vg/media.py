@@ -15,10 +15,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from vg.cache import (
-    decrypt_blob,
-    encrypt_blob,
     thumb_path,
 )
+from vg.privacy import pack_thumb_bytes, unpack_thumb_bytes
 from vg.config import (
     BROWSER_FRIENDLY_AUDIO,
     MIN_VIDEO_FILE_BYTES,
@@ -123,12 +122,12 @@ def _ffprobe_path(ffmpeg: str) -> str:
 
 
 def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0, force: bool = False) -> bool:
-    """截帧后写入加密预览图 out（.vgt）。有效缓存则跳过；force 或损坏则重建。"""
+    """截帧写入预览图 out（.vgt；按隐私设置加密或明文）。有效缓存则跳过；force 或损坏则重建。"""
     out.parent.mkdir(parents=True, exist_ok=True)
     _clear_path_attrs_windows(out)
     if out.exists() and not force:
         try:
-            raw = decrypt_blob(out.read_bytes())
+            raw = unpack_thumb_bytes(out.read_bytes())
             if raw and raw[:2] == b"\xff\xd8" and len(raw) > 100:
                 return True
             out.unlink(missing_ok=True)
@@ -170,7 +169,7 @@ def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0, force
                     if not (raw[:2] == b"\xff\xd8"):
                         continue
                     _clear_path_attrs_windows(out)
-                    out.write_bytes(encrypt_blob(raw))
+                    out.write_bytes(pack_thumb_bytes(raw))
                     return True
             except Exception:
                 continue
@@ -184,13 +183,13 @@ def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0, force
 
 
 def save_thumbnail_jpeg(out: Path, jpeg_bytes: bytes) -> bool:
-    """把 JPEG 字节写入加密预览图。"""
+    """把 JPEG 写入预览图文件（按隐私设置加密或明文）。"""
     if not jpeg_bytes or jpeg_bytes[:2] != b"\xff\xd8":
         return False
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         _clear_path_attrs_windows(out)
-        out.write_bytes(encrypt_blob(jpeg_bytes))
+        out.write_bytes(pack_thumb_bytes(jpeg_bytes))
         return True
     except OSError:
         return False

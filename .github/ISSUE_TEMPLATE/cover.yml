@@ -1,0 +1,55 @@
+name: 封面 / 预览图不对
+description: 没封面、黑图、错图、截到片头黑场、换封面无效等
+title: "[封面错] "
+labels: ["封面", "需要信息"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        预览图默认加密存在 `preview_cache`（或你在「隐私」里改到盘内缓存）。换封面可在播放器里截当前帧。
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: 具体现象
+      options:
+        - 完全没有封面（占位图）
+        - 有图但是黑屏 / 片头广告
+        - 封面是别的片子的图（串图）
+        - 点了换封面 / 上传封面没生效
+        - 静态导出后封面丢失或错乱
+        - 其它
+    validations:
+      required: true
+  - type: dropdown
+    id: privacy
+    attributes:
+      label: 「隐私」设置（若改过）
+      options:
+        - 默认（加密 + 程序目录缓存）
+        - 关了加密
+        - 缓存改到视频盘内
+        - 不清楚 / 没动过
+    validations:
+      required: true
+  - type: input
+    id: kind
+    attributes:
+      label: 片源类型
+      placeholder: 例如 普通 mp4/mkv、m3u8、TS 合集、合集卡片
+    validations:
+      required: true
+  - type: checkboxes
+    id: tried
+    attributes:
+      label: 已尝试
+      options:
+        - label: 重新扫描 / 等后台「预览图」进度跑完
+        - label: 播放器里「换封面」截当前画面
+        - label: 确认已安装 ffmpeg（没 ffmpeg 无法截帧）
+  - type: textarea
+    id: detail
+    attributes:
+      label: 更多描述
+      placeholder: 哪一部、多盘还是单盘、是否刚改过隐私设置或删过 preview_cache
+    validations:
+      required: true
