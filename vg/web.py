@@ -890,9 +890,28 @@ def _local_path_for_item(item: dict) -> Path | None:
     return resolve_local_path(item)
 
 
+def _client_play_url(vid: str, item: dict, prefer_root: str | None) -> str:
+    """Absolute HTTP URL that another device can open in its own player."""
+    from urllib.parse import quote
+
+    kind = item.get("kind") or ""
+    query = f"?root={quote(prefer_root)}" if prefer_root else ""
+    if kind in ("m3u8", "ts_set"):
+        path = f"/playlist/{vid}.m3u8{query}"
+    else:
+        path = f"/stream/{vid}{query}"
+    return request.url_root.rstrip("/") + path
+
+
 @app.route("/api/local/<vid>", methods=["POST"])
 def api_local(vid: str):
-    """本机操作：open=系统播放器打开，reveal=资源管理器定位，path=仅返回路径。"""
+    """本机操作：open=系统播放器打开，reveal=资源管理器定位，path=仅返回路径。
+
+    非本机（局域网访客）不能在服务端调起播放器/资源管理器；open/path 改为返回
+    可在访客本机打开的播放地址。
+    """
+    from vg.lan import is_local_client
+
     data = request.get_json(silent=True) or {}
     prefer_root = (
         request.args.get("root") or data.get("root") or ""
@@ -905,9 +924,35 @@ def api_local(vid: str):
     if not path:
         return jsonify({"ok": False, "msg": "文件不存在"}), 404
     path_str = str(path)
+    local_client = is_local_client(_client_ip())
+    play_url = _client_play_url(vid, item, prefer_root)
+
+    if not local_client:
+        if action == "reveal":
+            return jsonify({
+                "ok": False,
+                "remote": True,
+                "url": play_url,
+                "msg": "「打开位置」只能在跑服务的电脑上使用",
+            }), 400
+        if action in ("open", "path"):
+            return jsonify({
+                "ok": True,
+                "remote": True,
+                "url": play_url,
+                "path": play_url,
+                "title": item.get("name") or item.get("filename") or vid,
+                "msg": (
+                    "局域网访问：请用本机播放器打开下载的播放列表，"
+                    "或把地址粘贴到 VLC / PotPlayer"
+                    if action == "open"
+                    else "已返回局域网播放地址（非服务端磁盘路径）"
+                ),
+            })
+        return jsonify({"ok": False, "msg": "未知操作"}), 400
 
     if action == "path":
-        return jsonify({"ok": True, "path": path_str})
+        return jsonify({"ok": True, "path": path_str, "remote": False})
 
     if action == "open":
         try:
@@ -918,7 +963,7 @@ def api_local(vid: str):
             else:
                 subprocess.Popen(["xdg-open", path_str])
             log(f"[本地] 已用系统播放器打开: {path_str}")
-            return jsonify({"ok": True, "path": path_str, "msg": "已调用系统播放器"})
+            return jsonify({"ok": True, "path": path_str, "remote": False, "msg": "已调用系统播放器"})
         except Exception as e:
             return jsonify({"ok": False, "msg": f"打开失败: {e}", "path": path_str}), 500
 
@@ -930,7 +975,7 @@ def api_local(vid: str):
                 subprocess.Popen(["open", "-R", path_str])
             else:
                 subprocess.Popen(["xdg-open", str(path.parent)])
-            return jsonify({"ok": True, "path": path_str, "msg": "已在文件夹中显示"})
+            return jsonify({"ok": True, "path": path_str, "remote": False, "msg": "已在文件夹中显示"})
         except Exception as e:
             return jsonify({"ok": False, "msg": f"定位失败: {e}", "path": path_str}), 500
 

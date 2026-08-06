@@ -2868,6 +2868,20 @@
       video.play().catch(() => {});
     }
 
+    function openRemoteWithClientPlayer(playUrl, title) {
+      const safe = String(title || "video").replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || "video";
+      const m3u = `#EXTM3U\n#EXTINF:-1,${safe}\n${playUrl}\n`;
+      const blob = new Blob([m3u], { type: "audio/x-mpegurl" });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = safe + ".m3u";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 3000);
+    }
+
     async function localAction(action) {
       if (!currentPlayId) return;
       try {
@@ -2881,12 +2895,19 @@
           alert(data.msg || "操作失败");
           return;
         }
+        if (data.remote && action === "open" && data.url) {
+          openRemoteWithClientPlayer(data.url, data.title || (currentPlayMeta && currentPlayMeta.name) || "");
+          $("modalInfo").textContent =
+            (data.msg || "已生成本机播放列表") + "\n" + data.url +
+            "\n用 VLC / PotPlayer 打开下载的 .m3u，或直接粘贴上面的地址";
+          return;
+        }
         if (action === "path" && data.path) {
           try {
             await navigator.clipboard.writeText(data.path);
-            $("modalInfo").textContent = "已复制路径：\n" + data.path;
+            $("modalInfo").textContent = (data.remote ? "已复制播放地址：\n" : "已复制路径：\n") + data.path;
           } catch {
-            prompt("复制路径：", data.path);
+            prompt(data.remote ? "复制播放地址：" : "复制路径：", data.path);
           }
         } else if (data.msg) {
           $("modalInfo").textContent = data.msg + (data.path ? "\n" + data.path : "");
@@ -3439,11 +3460,15 @@
         const id = reveal.dataset.id;
         const root = reveal.dataset.root || "";
         try {
-          await fetch("/api/local/" + id, {
+          const r = await fetch("/api/local/" + id, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "reveal", root }),
           });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok || !data.ok) {
+            alert((data && data.msg) || "无法打开位置");
+          }
         } catch (_) {}
         return;
       }
