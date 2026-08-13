@@ -14,6 +14,7 @@ def register(app) -> None:
         live = STATE.get("scan_live")
         live_count = len(live) if isinstance(live, list) else 0
         return jsonify({
+            "app": "video-gallery",
             "scanning": bool(STATE.get("scanning")),
             "updating": bool(STATE.get("updating")),
             "exporting": bool(STATE.get("exporting")),

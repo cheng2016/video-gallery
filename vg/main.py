@@ -6,11 +6,16 @@ import subprocess
 
 
 import argparse
+import json
 import os
+import socket
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import ProxyHandler, build_opener
 
 from vg.config import VGDATA_DIR
 from vg.drives import default_scan_root, load_prefs, save_prefs
@@ -20,6 +25,10 @@ from vg.state import STATE
 from vg.util import log
 from vg.web import app
 from vg import bootlog
+
+APP_ID = "video-gallery"
+DEFAULT_PORT = 8765
+PORT_TRIES = 30
 
 
 def _is_frozen() -> bool:
@@ -69,6 +78,109 @@ def fail(msg: str, detail: str = "", code: int = 1) -> None:
     sys.exit(code)
 
 
+def _is_addr_in_use(exc: BaseException) -> bool:
+    err = str(exc).lower()
+    return (
+        "address already in use" in err
+        or "10048" in str(exc)
+        or "通常每个套接字地址" in str(exc)
+    )
+
+
+def port_accepting(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def can_bind_port(host: str, port: int) -> bool:
+    family = socket.AF_INET6 if ":" in (host or "") and host not in ("0.0.0.0",) else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        if host in ("0.0.0.0", "", None):
+            sock.bind(("0.0.0.0", int(port)))
+        else:
+            sock.bind((host, int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def looks_like_gallery_status(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("app") == APP_ID:
+        return True
+    return (
+        "scanning" in data
+        and "lan_share" in data
+        and "lib_gen" in data
+        and "thumb_progress" in data
+    )
+
+
+def probe_own_gallery(port: int, timeout: float = 0.6) -> bool:
+    url = f"http://127.0.0.1:{int(port)}/api/status"
+    try:
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(url, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        return looks_like_gallery_status(json.loads(raw))
+    except (OSError, URLError, ValueError, TimeoutError):
+        return False
+
+
+def find_free_port(host: str, start: int, attempts: int = PORT_TRIES) -> int | None:
+    for port in range(int(start), int(start) + int(attempts)):
+        if port_accepting(port):
+            continue
+        if can_bind_port(host, port):
+            return port
+    return None
+
+
+def choose_listen_port(
+    host: str,
+    preferred: int,
+    locked: bool = False,
+    attempts: int = PORT_TRIES,
+) -> tuple[int | None, str]:
+    """Pick a listen port. mode: reuse | bind | occupied | none_free."""
+    preferred = int(preferred)
+    if probe_own_gallery(preferred):
+        return preferred, "reuse"
+    if can_bind_port(host, preferred) and not port_accepting(preferred):
+        return preferred, "bind"
+    if locked:
+        return None, "occupied"
+    found = find_free_port(host, preferred + 1, max(1, int(attempts) - 1))
+    if found is None:
+        return None, "none_free"
+    return found, "bind"
+
+
+def _open_when_ready(url: str, port: int, timeout: float = 8.0) -> None:
+    """Open the browser only after this app's /api/status answers on the port."""
+
+    def _go() -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if probe_own_gallery(port):
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+                return
+            time.sleep(0.12)
+        log(f"[服务] 等待 {url} 就绪超时，未自动打开浏览器")
+
+    threading.Thread(target=_go, daemon=True).start()
+
+
 def main():
     bootlog.step("main_begin")
     if _is_frozen():
@@ -85,7 +197,13 @@ def main():
 
     parser = argparse.ArgumentParser(description="本地视频库 — 浏览器分类浏览播放")
     parser.add_argument("root", nargs="?", help="视频根目录，例如 D:\\Videos 或 ~/Movies")
-    parser.add_argument("--port", type=int, default=8765, help="端口，默认 8765")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        metavar="N",
+        help="端口，默认 8765；被占用时自动换下一个。指定则固定该端口",
+    )
     parser.add_argument(
         "--host",
         default="0.0.0.0",
@@ -112,9 +230,43 @@ def main():
         # 显式本机绑定时无法被局域网访问；仍允许本地使用
         want_lan = False
     args.host = host
+    preferred = int(args.port) if args.port is not None else DEFAULT_PORT
+    port_locked = args.port is not None
+    chosen, mode = choose_listen_port(host, preferred, locked=port_locked)
+    if mode == "occupied":
+        alt = (
+            f"VideoGallery.exe --port {preferred + 1}"
+            if _is_frozen()
+            else f"python app.py --port {preferred + 1}"
+        )
+        fail(
+            f"端口 {preferred} 已被占用",
+            f"该地址上不是本视频库。请关闭占用程序，或换端口启动:\n  {alt}",
+        )
+    if mode == "none_free":
+        fail(
+            f"端口 {preferred} 起连续 {PORT_TRIES} 个端口均被占用",
+            "请关闭占用程序，或用 --port 指定一个空闲端口。",
+        )
+    if chosen is None:
+        fail("无法选择监听端口", mode)
+    args.port = int(chosen)
     STATE["bind_host"] = host
     STATE["bind_port"] = int(args.port)
     STATE["lan_share"] = bool(want_lan)
+    if mode == "reuse":
+        url = f"http://127.0.0.1:{args.port}"
+        print(f"\n已有视频库在运行 → {url}")
+        print("已打开现有页面，无需再开一份。关闭原来的启动窗口即可停止。\n")
+        bootlog.step("reuse_instance", url)
+        if not args.no_open:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        sys.exit(0)
+    if args.port != preferred:
+        print(f"提示: 端口 {preferred} 已被其他程序占用，已自动改用 {args.port}。")
     try:
         cp = int(prefs.get("convert_parallel") or 1)
         STATE["convert_parallel"] = max(1, min(4, cp))
@@ -248,27 +400,43 @@ def main():
 
     if not args.no_open:
         bootlog.step("open_browser", url)
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+        _open_when_ready(url, int(args.port))
 
     try:
         bootlog.step("run_server", f"{args.host}:{args.port}")
-        _run_server(args.host, args.port)
-        bootlog.step("server_stopped")
-    except OSError as e:
-        bootlog.exception("run_server")
-        err = str(e).lower()
-        if "address already in use" in err or "10048" in str(e) or "通常每个套接字地址" in str(e):
-            alt = (
-                f"VideoGallery.exe --port 8766"
-                if _is_frozen()
-                else f'python app.py --port 8766'
-            )
-            fail(
-                f"端口 {args.port} 已被占用",
-                f"可能已有一个视频库在运行（请关闭旧的启动窗口）。\n"
-                f"或换端口启动:\n  {alt}",
-            )
-        fail("无法启动网页服务", str(e))
+        while True:
+            try:
+                _run_server(args.host, int(args.port))
+                bootlog.step("server_stopped")
+                break
+            except OSError as e:
+                bootlog.exception("run_server")
+                if not _is_addr_in_use(e):
+                    fail("无法启动网页服务", str(e))
+                if port_locked:
+                    alt = (
+                        f"VideoGallery.exe --port {int(args.port) + 1}"
+                        if _is_frozen()
+                        else f"python app.py --port {int(args.port) + 1}"
+                    )
+                    fail(
+                        f"端口 {args.port} 已被占用",
+                        f"请关闭占用该端口的程序，或换端口启动:\n  {alt}",
+                    )
+                nxt = find_free_port(args.host, int(args.port) + 1)
+                if nxt is None:
+                    fail(
+                        f"端口 {args.port} 起连续端口均被占用",
+                        "请关闭占用程序，或用 --port 指定一个空闲端口。",
+                    )
+                print(f"提示: 端口 {args.port} 启动时被抢占，已改用 {nxt}。")
+                args.port = nxt
+                STATE["bind_port"] = nxt
+                url = f"http://127.0.0.1:{nxt}"
+                print(f"本地视频库地址 → {url}")
+                bootlog.step("port_retry", url)
+                if not args.no_open:
+                    _open_when_ready(url, nxt)
     except KeyboardInterrupt:
         bootlog.step("keyboard_interrupt")
         print("\n已停止。")

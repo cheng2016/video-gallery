@@ -16,7 +16,8 @@ if not exist "_internal\" (
 
 echo ========================================
 echo  Local Video Gallery
-echo  URL: http://127.0.0.1:8765
+echo  Default URL: http://127.0.0.1:8765
+echo  Busy ports are skipped automatically.
 echo  Close this window to stop.
 echo ========================================
 echo.
@@ -36,7 +37,6 @@ if exist "startup.log" (
 )
 if not "%EC%"=="0" (
   echo Failed. Common causes:
-  echo  - Port 8765 already in use
   echo  - Missing _internal folder
 )
 echo.

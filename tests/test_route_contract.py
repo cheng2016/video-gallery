@@ -73,7 +73,9 @@ class RouteContractTests(unittest.TestCase):
 
         status = self.client.get("/api/status")
         self.assertEqual(status.status_code, 200)
-        self.assertIn("scanning", status.get_json())
+        payload = status.get_json()
+        self.assertEqual(payload.get("app"), "video-gallery")
+        self.assertIn("scanning", payload)
 
         share = self.client.get("/api/share")
         self.assertEqual(share.status_code, 200)

@@ -46,7 +46,7 @@ def main() -> int:
 
     print()
     print("Starting local video gallery ...")
-    print("URL: http://127.0.0.1:8765")
+    print("Browser will open the local URL (default port 8765; busy ports are skipped).")
     print("Close this window to stop.")
     print()
     args = [str(VENV_PY), "-u", str(APP), *sys.argv[1:]]

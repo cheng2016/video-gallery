@@ -53,7 +53,7 @@ if not exist "app.py" (
 
 echo.
 echo Starting local video gallery ...
-echo URL: http://127.0.0.1:8765
+echo Browser will open the local URL (default port 8765; busy ports are skipped).
 echo Close this window to stop the server.
 echo.
 
