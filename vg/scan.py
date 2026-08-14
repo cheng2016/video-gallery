@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,6 +41,7 @@ from vg.drives import save_prefs
 from vg.genres import detect_genres, ensure_video_genres
 from vg.segments import collapse_segment_sets
 from vg.state import STATE, _scan_lock
+from vg.taxonomy import ensure_video_taxonomy
 from vg.util import (
     format_size,
     is_too_small_video,
@@ -55,6 +57,35 @@ from vg.media import (
     make_thumbnail,
     start_metadata_enrichment,
 )
+
+
+_FINGERPRINT_CHUNK = 64 * 1024
+
+
+def _file_fingerprint(path: Path, st: os.stat_result | None = None) -> str:
+    """Return a cheap content fingerprint for incremental-scan validation.
+
+    Only three 64 KiB samples (head, middle and tail) are read for large files.  The digest is
+    deliberately independent of mtime: mtime remains the fast path, while
+    this value catches a file rewritten in place with the same size and an
+    unchanged/low-resolution timestamp.
+    """
+    try:
+        stat = st or path.stat()
+        size = int(stat.st_size)
+        digest = hashlib.blake2b(digest_size=16)
+        with path.open("rb") as stream:
+            if size <= _FINGERPRINT_CHUNK * 2:
+                digest.update(stream.read())
+            else:
+                digest.update(stream.read(_FINGERPRINT_CHUNK))
+                stream.seek(max(0, (size // 2) - (_FINGERPRINT_CHUNK // 2)))
+                digest.update(stream.read(_FINGERPRINT_CHUNK))
+                stream.seek(max(0, size - _FINGERPRINT_CHUNK))
+                digest.update(stream.read(_FINGERPRINT_CHUNK))
+        return f"b2:{size}:{digest.hexdigest()}"
+    except (OSError, ValueError):
+        return ""
 
 
 def _same_root(a: str | Path | None, b: str | Path | None) -> bool:
@@ -364,17 +395,29 @@ def scan_videos(
             if is_too_small_video(ext, st.st_size):
                 continue
             old = old_map.get(rel)
-            if (
+            metadata_match = bool(
                 old
                 and int(old.get("size") or -1) == st.st_size
                 and abs(float(old.get("mtime") or 0) - st.st_mtime) < 1.0
-            ):
+            )
+            old_sig = str(old.get("file_sig") or "") if old else ""
+            # Existing indexes predating file_sig remain usable.  Newer rows
+            # get a content check only after the cheap metadata check passes.
+            signature_match = True
+            current_sig = ""
+            if metadata_match and old_sig:
+                current_sig = _file_fingerprint(full, st)
+                signature_match = bool(current_sig) and current_sig == old_sig
+            if metadata_match and signature_match:
                 item = dict(old)
                 item["id"] = item.get("id") or video_id(rel)
                 item["size"] = st.st_size
                 item["size_h"] = format_size(st.st_size)
                 item["mtime"] = st.st_mtime
                 item["mtime_h"] = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                # Backfill the fingerprint on reuse.  For legacy rows this is
+                # a migration; on the next scan it becomes a real comparison.
+                item["file_sig"] = current_sig or _file_fingerprint(full, st)
                 item["thumb"] = f"{item['id']}{THUMB_EXT}"
                 item["ext"] = ext
                 if ext in PLAYLIST_EXTS:
@@ -394,6 +437,7 @@ def scan_videos(
                     "size_h": format_size(st.st_size),
                     "mtime": st.st_mtime,
                     "mtime_h": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                    "file_sig": _file_fingerprint(full, st),
                     "duration": None,
                     "duration_h": "",
                     "thumb": f"{vid}{THUMB_EXT}",
@@ -405,6 +449,7 @@ def scan_videos(
                 added += 1
             item["root"] = root_s
             item["_lib_root"] = root_s
+            ensure_video_taxonomy(item)
             if cache:
                 item["_lib_cache"] = str(cache)
             if "_folder_raw" not in item:
@@ -666,4 +711,3 @@ def find_video_by_id(vid: str, prefer_root: str | None = None) -> dict | None:
     from vg.catalog_repository import find_video_by_id as repository_lookup
 
     return repository_lookup(vid, prefer_root)
-

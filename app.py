@@ -83,7 +83,9 @@ if __name__ == "__main__":
             pass
     _safe_stdio()
 
-    _early_log(f"[early] pid={os.getpid()} frozen={_frozen()} exe={sys.executable!r} cwd={os.getcwd()!r}")
+    early = _early_log(
+        f"[early] pid={os.getpid()} frozen={_frozen()} exe={sys.executable!r} cwd={os.getcwd()!r}"
+    )
 
     bl = None
     try:

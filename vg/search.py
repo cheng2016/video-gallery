@@ -156,6 +156,12 @@ def build_search_text(v: dict) -> str:
     genres = v.get("genres") or []
     if not isinstance(genres, list):
         genres = []
+    themes = v.get("themes") or []
+    backgrounds = v.get("backgrounds") or []
+    if not isinstance(themes, list):
+        themes = []
+    if not isinstance(backgrounds, list):
+        backgrounds = []
     actors = ensure_video_actors(v)
     parts = [
         name,
@@ -163,6 +169,8 @@ def build_search_text(v: dict) -> str:
         folder,
         series,
         " ".join(str(g) for g in genres),
+        " ".join(str(value) for value in themes),
+        " ".join(str(value) for value in backgrounds),
         " ".join(actors),
         pinyin_blob(name),
         pinyin_blob(series) if series else "",
@@ -177,7 +185,7 @@ def build_search_text(v: dict) -> str:
 
 _TOKEN_RE = re.compile(
     r"""
-    (?P<field>ext|type|genre|g|actor|a|cast|lib|disk|channel|cat)
+    (?P<field>ext|type|genre|g|theme|topic|background|setting|scene|actor|a|cast|lib|disk|channel|cat)
     :
     (?P<value>"[^"]+"|'[^']+'|[^\s]+)
     |
@@ -194,6 +202,7 @@ def parse_search_query(q: str) -> dict:
       ext:mkv           → 仅 mkv
       type:mp4          → 同 ext
       genre:动作 / g:科幻
+      theme:科幻 / background:太空
       actor:周迅 / a:张三
       channel:电影 / cat:动漫
       多条件空格分隔，纯文本多项需同时命中（AND）
@@ -203,6 +212,8 @@ def parse_search_query(q: str) -> dict:
         "terms": [],
         "ext": "",
         "genre": "",
+        "theme": "",
+        "background": "",
         "actor": "",
         "category": "",
         "raw": q,
@@ -223,6 +234,10 @@ def parse_search_query(q: str) -> dict:
                 out["ext"] = ext
             elif field in ("genre", "g"):
                 out["genre"] = val
+            elif field in ("theme", "topic"):
+                out["theme"] = val
+            elif field in ("background", "setting", "scene"):
+                out["background"] = val
             elif field in ("actor", "a", "cast"):
                 out["actor"] = val
             elif field in ("channel", "cat"):
@@ -233,7 +248,7 @@ def parse_search_query(q: str) -> dict:
             plain = (m.group("plain") or "").strip()
             if not plain:
                 continue
-            if re.match(r"^(ext|type|genre|g|actor|a|cast|lib|disk|channel|cat):", plain, re.I):
+            if re.match(r"^(ext|type|genre|g|theme|topic|background|setting|scene|actor|a|cast|lib|disk|channel|cat):", plain, re.I):
                 continue
             out["terms"].append(plain.lower())
     return out
@@ -254,6 +269,19 @@ def video_matches_query(v: dict, parsed: dict, search_text_fn) -> bool:
         genres = ensure_video_genres(v)
         if not any(g.lower() in str(x).lower() for x in genres):
             return False
+
+    if parsed.get("theme") or parsed.get("background"):
+        from vg.taxonomy import ensure_video_taxonomy
+
+        themes, backgrounds = ensure_video_taxonomy(v)
+        if parsed.get("theme"):
+            value = parsed["theme"].lower()
+            if not any(value in str(item).lower() for item in themes):
+                return False
+        if parsed.get("background"):
+            value = parsed["background"].lower()
+            if not any(value in str(item).lower() for item in backgrounds):
+                return False
 
     if parsed.get("actor"):
         actors = ensure_video_actors(v)

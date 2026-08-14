@@ -1,0 +1,28 @@
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class UiControlLayoutTests(unittest.TestCase):
+    def test_sort_and_view_live_in_toolbar_dropdown(self) -> None:
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        filters = html.split('<div class="filters" id="filters">', 1)[1].split(
+            '<div class="scope-sticky" id="scopeSticky">', 1
+        )[0]
+        toolbar = html.split('<div class="scope-sticky" id="scopeSticky">', 1)[1].split(
+            '<div class="status-bar" id="status">', 1
+        )[0]
+
+        self.assertNotIn('id="sortTags"', filters)
+        self.assertNotIn('id="viewTags"', filters)
+        self.assertIn('id="scopeFilterBtn"', toolbar)
+        self.assertIn('id="scopeOptions"', toolbar)
+        self.assertIn('id="sortTags"', toolbar)
+        self.assertIn('id="viewTags"', toolbar)
+        self.assertIn('id="scopeOptionsText"', toolbar)
+
+
+if __name__ == "__main__":
+    unittest.main()

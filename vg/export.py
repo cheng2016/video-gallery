@@ -52,6 +52,37 @@ def _write_macos_launcher(export_dir: Path) -> Path:
     return command
 
 
+def obscure_thumb_name(vid: str, salt: str) -> str:
+    """Hashed JPEG bytes with an opaque name; extension stays .vgj."""
+    digest = hashlib.sha256(f"{salt}:{vid}".encode("utf-8")).hexdigest()[:20]
+    return f"{digest}.vgj"
+
+
+def static_site_readme(root: Path, exported_at: str) -> str:
+    return (
+        "本地视频库 · 静态离线版\n"
+        "====================\n"
+        "封面墙、搜索、分类可在电脑 / Android / iPhone 浏览器里直接浏览。\n"
+        "影片仍在原位置，未复制进本目录；点播依赖原视频文件是否能被当前设备访问。\n"
+        "\n"
+        "【电脑】\n"
+        "1. 可直接打开 index.html（封面墙即可用）\n"
+        "2. 需要系统播放器时，再运行「打开图库.bat」（Windows）或「打开图库.command」（macOS）\n"
+        "\n"
+        "【手机 · 同一 WiFi】\n"
+        "电脑先运行「打开图库」启动器，手机浏览器打开控制台里的 http://电脑IP:端口/\n"
+        "\n"
+        "【手机 · 拷走离线】\n"
+        "把本文件夹整份拷到手机后打开 index.html。\n"
+        "Android：用 Chrome / 文件管理器打开 index.html；若白屏，用本地静态服务器 App 打开本目录。\n"
+        "iPhone：系统「文件」预览往往加载不了同目录图片；请用电脑启动器的局域网地址，或能打开本地网页的 App。\n"
+        "\n"
+        "预览图在 _cache/thumbs/，勿删 _cache。\n"
+        f"导出时间：{exported_at}\n"
+        f"视频根目录：{root}\n"
+    )
+
+
 def _rel_between(from_dir: Path, to_path: Path) -> str:
     """Relative path for same-drive files; empty string when mounts differ."""
     try:
@@ -231,10 +262,6 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
     # 文件名混淆盐：预览图仍是 JPEG，只是文件名看不出，扩展名也不是 .jpg
     name_salt = os.urandom(8).hex()
 
-    def obscure_thumb_name(vid: str) -> str:
-        digest = hashlib.sha256(f"{name_salt}:{vid}".encode("utf-8")).hexdigest()[:20]
-        return f"{digest}.vgj"
-
     exported = []
     thumb_ok = thumb_fail = 0
     for i, v in enumerate(videos, 1):
@@ -273,7 +300,7 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
             raw = read_thumb_jpeg(item_cache, thumb_id)
         if raw:
             try:
-                fname = obscure_thumb_name(vid)
+                fname = obscure_thumb_name(vid, name_salt)
                 (thumbs_dir / fname).write_bytes(raw)
                 thumb_rel = f"_cache/thumbs/{fname}"
                 thumb_ok += 1
@@ -391,6 +418,7 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
         "echo ========================================\r\n"
         "echo  静态视频库助手\r\n"
         "echo  浏览器将自动打开 http://127.0.0.1:%VG_STATIC_PORT%/\r\n"
+        "echo  手机请打开本窗口显示的局域网地址\r\n"
         "echo  关闭本窗口 = 停止（系统播放器依赖此窗口）\r\n"
         "echo ========================================\r\n"
         "%PY% \"_cache\\static_bridge.py\"\r\n"
@@ -400,18 +428,7 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
     _write_macos_launcher(export_dir)
     readme = export_dir / "说明.txt"
     readme.write_text(
-        "本地视频库 · 静态离线版\n"
-        "====================\n"
-        "【重要】请运行与系统对应的“打开图库”启动器，不要直接打开 index.html。\n"
-        "\n"
-        "1. Windows：双击「打开图库.bat」；无 Python 时可使用「打开图库.hta」\n"
-        "2. macOS：双击「打开图库.command」（首次可能需要右键 → 打开）\n"
-        "3. 启动器会启动本地助手和浏览器，系统播放器功能可用\n"
-        "4. 地址栏应是 http://127.0.0.1:8767/ 才正常\n"
-        "5. 预览图在 _cache/thumbs/，勿删 _cache\n"
-        "6. 影片仍在原位置，未复制\n"
-        f"7. 导出时间：{datetime.now().isoformat(timespec='seconds')}\n"
-        f"8. 视频根目录：{root}\n",
+        static_site_readme(root, datetime.now().isoformat(timespec="seconds")),
         encoding="utf-8",
     )
 
@@ -420,7 +437,7 @@ def export_static_site(root: Path | None = None, videos: list[dict] | None = Non
     msg = (
         f"已导出 {len(exported)} 个到：\n{export_dir}\n"
         f"预览图成功 {thumb_ok}，缺图 {thumb_fail}。\n"
-        "运行该目录下与系统对应的“打开图库”启动器即可离线浏览。"
+        "可直接打开 index.html 浏览封面墙；电脑运行「打开图库」后，手机可在同一 WiFi 打开控制台里的地址。"
         f"{skip_tip}"
     )
     log(f"[静态导出] 完成：{export_dir}（{len(exported)} 个，跳过外盘 {skipped}）")

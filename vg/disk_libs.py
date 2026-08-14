@@ -290,6 +290,11 @@ def save_library_item(item: dict, *, allow_insert: bool = False) -> bool:
         if not replaced:
             return False
         save_root_library(root_s, current)
+        # Single-item metadata/thumbnail updates do not rebuild STATE, but
+        # they still change what /api/videos serializes.  Advance the same
+        # generation used by the response cache so the next request observes
+        # the persisted row.
+        STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
     return True
 
 

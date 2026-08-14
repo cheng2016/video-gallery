@@ -28,6 +28,7 @@ class VideoItem(TypedDict, total=False):
     ext: str
     size: int
     size_h: str
+    file_sig: str
     mtime: float
     mtime_h: str
     duration: float | None
@@ -36,6 +37,9 @@ class VideoItem(TypedDict, total=False):
     segments: list[str]
     seg_count: int
     genres: list[str]
+    themes: list[str]
+    backgrounds: list[str]
+    taxonomy_ver: int
     root: str
     _lib_root: str
     _lib_cache: str

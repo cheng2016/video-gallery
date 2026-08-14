@@ -37,6 +37,7 @@ from vg.media import (
     probe_media_info,
 )
 from vg.state import STATE, _convert_lock
+from vg.taxonomy import ensure_video_taxonomy
 from vg.util import (
     format_size,
     is_too_small_video,
@@ -281,6 +282,7 @@ def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> di
         "_lib_cache": str(cache) if cache else "",
         "_folder_raw": folder,
     }
+    ensure_video_taxonomy(item)
     ffmpeg = STATE.get("ffmpeg")
     if ffmpeg:
         info = probe_media_info(ffmpeg, out_path)
@@ -716,4 +718,3 @@ def _fix_audio_worker(job_id: str, vid: str, root: str | None = None) -> None:
         else:
             _convert_job_update(job_id, status="error", msg=str(e), percent=0)
         log(f"[修声音] 任务失败 {vid}: {e}")
-

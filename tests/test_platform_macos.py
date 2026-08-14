@@ -37,6 +37,7 @@ class MacLauncherTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('tryBridgePost("open", path, v.id)', template)
         self.assertIn('tryBridgePost("reveal", path, v.id)', template)
+        self.assertIn('id="navToggle"', template)
 
 
 class MacDriveTests(unittest.TestCase):

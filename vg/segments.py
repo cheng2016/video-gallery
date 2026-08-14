@@ -15,6 +15,7 @@ from vg.config import (
 )
 from vg.genres import detect_genres
 from vg.state import STATE
+from vg.taxonomy import TAXONOMY_VERSION, classify_video_taxonomy
 from vg.util import format_size, natural_sort_key, video_id
 
 def _ts_set_display_name(folder: str, items: list[dict]) -> str:
@@ -49,6 +50,7 @@ def make_ts_set(folder: str, items: list[dict]) -> dict:
     set_key = f"__ts_set__/{folder or '_root_'}"
     vid = video_id(set_key)
     name = _ts_set_display_name(folder, items)
+    themes, backgrounds = classify_video_taxonomy(folder + "/" + name, name)
     return {
         "id": vid,
         "name": name,
@@ -65,6 +67,9 @@ def make_ts_set(folder: str, items: list[dict]) -> dict:
         "thumb": f"{vid}{THUMB_EXT}",
         "has_thumb": False,
         "genres": detect_genres(folder + "/" + name, name),
+        "themes": themes,
+        "backgrounds": backgrounds,
+        "taxonomy_ver": TAXONOMY_VERSION,
         "kind": "ts_set",
         "segments": segments,
         "seg_count": len(segments),
@@ -80,6 +85,7 @@ def make_m3u8_entry(item: dict) -> dict:
     if disp and disp.lower() not in {"index", "playlist", "master", "video"}:
         name = disp
     vid = item.get("id") or video_id(item.get("rel") or "")
+    themes, backgrounds = classify_video_taxonomy(item.get("rel") or "", name)
     return {
         "id": vid,
         "name": name,
@@ -96,6 +102,9 @@ def make_m3u8_entry(item: dict) -> dict:
         "thumb": f"{vid}{THUMB_EXT}",
         "has_thumb": bool(item.get("has_thumb")),
         "genres": item.get("genres") or detect_genres(item.get("rel") or "", name),
+        "themes": item.get("themes") or themes,
+        "backgrounds": item.get("backgrounds") or backgrounds,
+        "taxonomy_ver": TAXONOMY_VERSION,
         "kind": "m3u8",
         "seg_count": 0,
     }
@@ -376,5 +385,4 @@ def collapse_segment_sets(videos: list[dict]) -> list[dict]:
         )
     )
     return kept
-
 

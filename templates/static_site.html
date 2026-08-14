@@ -2,7 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1116" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <title>本地视频库（静态）</title>
   <style>
     :root {
@@ -11,7 +14,7 @@
       --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; min-height: 100dvh; }
     header {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
       padding: 12px 18px; border-bottom: 1px solid var(--border);
@@ -42,6 +45,13 @@
       background: #18202b;
       box-shadow: 0 0 0 3px rgba(0, 200, 212, 0.12);
     }
+    .nav-toggle {
+      display: none;
+      border: 1px solid var(--border); background: var(--bg3); color: var(--text);
+      padding: 6px 10px; border-radius: 8px; cursor: pointer;
+      font-size: 0.82rem; font-family: inherit; white-space: nowrap;
+    }
+    .nav-scrim { display: none; }
     .hint { font-size: 0.78rem; color: var(--muted); max-width: 420px; }
     .export-tip {
       display: none; align-items: center; gap: 8px;
@@ -219,26 +229,80 @@
       background: var(--accent); border-color: var(--accent); color: #041016; font-weight: 600;
     }
     .player { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 8px; }
-    .player video { width: 100%; max-width: 1200px; max-height: calc(100vh - 140px); background: #000; }
+    .player video { width: 100%; max-width: 1200px; max-height: calc(100vh - 140px); max-height: calc(100dvh - 140px); background: #000; }
     .ma { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 14px; }
     .mi { padding: 0 16px 10px; color: var(--muted); font-size: 0.82rem; word-break: break-all; }
     @media (max-width: 800px) {
-      aside { display: none; }
-      .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+      header {
+        padding: 10px 12px;
+        padding-top: max(10px, env(safe-area-inset-top));
+        gap: 8px;
+      }
+      .nav-toggle { display: inline-flex; align-items: center; }
+      .badge { display: none; }
+      input[type=search] {
+        flex: 1 1 100%;
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+      }
+      input[type=search]:focus {
+        flex-basis: auto;
+        width: 100%;
+        max-width: none;
+      }
+      .export-tip { margin: 0; width: 100%; }
+      .layout { min-height: calc(100dvh - 58px); }
+      aside {
+        display: block;
+        position: fixed;
+        z-index: 40;
+        left: 0; top: 0; bottom: 0;
+        width: min(82vw, 300px);
+        transform: translateX(-105%);
+        transition: transform 0.2s ease;
+        padding-top: max(12px, env(safe-area-inset-top));
+        -webkit-overflow-scrolling: touch;
+      }
+      aside.open {
+        transform: translateX(0);
+        box-shadow: 8px 0 24px rgba(0,0,0,.45);
+      }
+      .nav-scrim {
+        display: none;
+        position: fixed; inset: 0; z-index: 35;
+        background: rgba(0,0,0,.45);
+        border: 0;
+        padding: 0;
+      }
+      .nav-scrim.show { display: block; }
+      body.nav-open { overflow: hidden; }
+      .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+      .card {
+        content-visibility: visible;
+        contain-intrinsic-size: auto;
+      }
+      .filters { padding: 10px 12px 4px; }
+      .content-body { padding: 12px 12px calc(28px + env(safe-area-inset-bottom)); }
+      .player video { max-height: 50dvh; }
+      .ma, .mi { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+      .mbar { padding-top: max(12px, env(safe-area-inset-top)); }
     }
   </style>
 </head>
 <body>
   <header>
     <div class="brand">本地<span>视频库</span></div>
+    <button type="button" class="nav-toggle" id="navToggle" aria-controls="channels" aria-expanded="false">频道</button>
     <span class="badge">静态离线版</span>
     <input type="search" id="q" placeholder="搜索：拼音/首字母，ext:mkv genre:动作" title="支持拼音与语法过滤" />
     <div class="export-tip" id="exportTip">
-      <span>请运行「打开图库.bat」（Windows）或「打开图库.command」（macOS）浏览。</span>
+      <span>电脑可直接打开本页浏览。手机请用同一 WiFi 打开电脑启动器显示的地址，或把本文件夹整份拷到手机后打开 index.html。</span>
       <button type="button" class="tip-x" id="tipDismiss" title="不再显示">×</button>
     </div>
     <div class="hint" id="fileWarn" style="display:none;color:#ffb4a2"></div>
   </header>
+  <div class="nav-scrim" id="navScrim"></div>
   <div class="layout">
     <aside id="channels"></aside>
     <main id="mainScroll">
@@ -277,7 +341,7 @@
       <div class="t" id="mtitle"></div>
       <button type="button" id="btnClose" title="关闭">关闭</button>
     </div>
-    <div class="player"><video id="player" controls playsinline></video></div>
+    <div class="player"><video id="player" controls playsinline webkit-playsinline></video></div>
     <div class="mi" id="minfo"></div>
     <div class="ma">
       <button type="button" class="primary" id="btnLocalOpen" title="在新标签打开视频文件">打开视频</button>
@@ -315,6 +379,22 @@
     ];
 
     function $(id) { return document.getElementById(id); }
+    function isMobileNav() {
+      return window.matchMedia && window.matchMedia("(max-width: 800px)").matches;
+    }
+    function setNavOpen(open) {
+      const aside = $("channels");
+      const scrim = $("navScrim");
+      const btn = $("navToggle");
+      if (!aside) return;
+      const on = !!open && isMobileNav();
+      aside.classList.toggle("open", on);
+      document.body.classList.toggle("nav-open", on);
+      if (scrim) {
+        scrim.classList.toggle("show", on);
+      }
+      if (btn) btn.setAttribute("aria-expanded", on ? "true" : "false");
+    }
     function esc(s) {
       return String(s || "").replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -1184,6 +1264,7 @@
       state.folder = "";
       state.folderAll = false;
       state.genre = "";
+      setNavOpen(false);
       onFilterChange(true);
     });
     $("sortTags").addEventListener("click", (e) => {
@@ -1296,6 +1377,7 @@
     });
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && $("modal").classList.contains("open")) closePlayer();
+      else if (e.key === "Escape") setNavOpen(false);
     });
     window.addEventListener("popstate", (e) => {
       if ($("modal").classList.contains("open") || location.hash === "#play") {
@@ -1352,6 +1434,16 @@
         try { localStorage.setItem(TIP_KEY, "1"); } catch (_) {}
       });
       setupScopeSticky();
+      const navToggle = $("navToggle");
+      const navScrim = $("navScrim");
+      if (navToggle) navToggle.addEventListener("click", () => {
+        const open = !$("channels").classList.contains("open");
+        setNavOpen(open);
+      });
+      if (navScrim) navScrim.addEventListener("click", () => setNavOpen(false));
+      window.addEventListener("resize", () => {
+        if (!isMobileNav()) setNavOpen(false);
+      });
       refresh();
     }
   </script>

@@ -11,6 +11,7 @@ from vg.duplicates import mark_duplicates
 from vg.genres import ensure_video_genres
 from vg.series import attach_series
 from vg.state import STATE
+from vg.taxonomy import ensure_video_taxonomy, taxonomy_facets
 
 CATEGORY_PREFER_ORDER = (
     "电影",
@@ -146,6 +147,7 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
             by_id[vid] = video
         if heavy:
             video.pop("_q", None)
+        ensure_video_taxonomy(video)
         video_search_text(video)
         category = video_category(video)
         by_category.setdefault(category, []).append(video)
@@ -178,6 +180,8 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
         "facets": {
             "types": types,
             "genres": genres,
+            "themes": taxonomy_facets(videos, "themes"),
+            "backgrounds": taxonomy_facets(videos, "backgrounds"),
             "categories": build_category_facets(category_counts),
             "count": len(videos),
         },

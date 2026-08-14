@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import re
+from collections import OrderedDict
 
 
 import os
@@ -18,7 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 try:
-    from flask import Flask, Response, abort, jsonify, render_template, request, send_file
+    from flask import Flask, Response, abort, g, jsonify, render_template, request, send_file
 except ImportError:
     print("=" * 50)
     print("【错误】未安装依赖 Flask")
@@ -91,7 +92,8 @@ from vg.roots import (
 from vg.scan import start_scan
 from vg.search import parse_search_query, video_matches_query
 from vg.series import collapse_to_series_cards, series_episodes
-from vg.state import STATE
+from vg.state import STATE, video_query_cache_get, video_query_cache_put
+from vg.taxonomy import ensure_video_taxonomy, taxonomy_facets
 from vg.streaming import _stream_file, rewrite_m3u8_for_proxy
 from vg.trash import move_to_trash
 from vg.util import (
@@ -104,6 +106,41 @@ from vg.util import (
 
 app = Flask(__name__, template_folder=str(APP_DIR / "templates"))
 _delete_lock = threading.RLock()
+_video_response_cache: OrderedDict[tuple, tuple[bytes, int, str]] = OrderedDict()
+_video_response_cache_lock = threading.RLock()
+_VIDEO_RESPONSE_CACHE_MAX = 64
+
+
+def _video_response_cache_key() -> tuple:
+    """Identify one paged query within one immutable catalog generation."""
+    existing = getattr(g, "_video_response_cache_key", None)
+    if existing is not None:
+        return existing
+    query = tuple(sorted((key, tuple(values)) for key, values in request.args.lists()))
+    return (
+        int(STATE.get("lib_gen") or 0),
+        id(STATE.get("videos")),
+        query,
+    )
+
+
+def _cached_video_response(key: tuple):
+    with _video_response_cache_lock:
+        value = _video_response_cache.get(key)
+        if value is not None:
+            _video_response_cache.move_to_end(key)
+        return value
+
+
+def _store_video_response(key: tuple, response: Response) -> None:
+    if response.status_code != 200:
+        return
+    value = (response.get_data(), response.status_code, response.mimetype)
+    with _video_response_cache_lock:
+        _video_response_cache[key] = value
+        _video_response_cache.move_to_end(key)
+        while len(_video_response_cache) > _VIDEO_RESPONSE_CACHE_MAX:
+            _video_response_cache.popitem(last=False)
 
 
 def _serialized(lock: threading.RLock):
@@ -142,6 +179,23 @@ def _enforce_lan_share():
     )
 
 
+@app.before_request
+def _serve_cached_videos_response():
+    if request.method != "GET" or request.path != "/api/videos":
+        return None
+    key = (
+        int(STATE.get("lib_gen") or 0),
+        id(STATE.get("videos")),
+        tuple(sorted((name, tuple(values)) for name, values in request.args.lists())),
+    )
+    g._video_response_cache_key = key
+    cached = _cached_video_response(key)
+    if cached is None:
+        return None
+    body, status, mimetype = cached
+    return Response(body, status=status, mimetype=mimetype)
+
+
 @app.after_request
 def _api_no_store(resp):
     """局域网 IP 下浏览器常缓存 GET /api/*；本机 127.0.0.1 往往不缓存，会造成「左边对右边数量错」。"""
@@ -149,6 +203,13 @@ def _api_no_store(resp):
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
+    return resp
+
+
+@app.after_request
+def _cache_videos_response(resp):
+    if request.method == "GET" and request.path == "/api/videos":
+        _store_video_response(_video_response_cache_key(), resp)
     return resp
 
 
@@ -205,6 +266,8 @@ def api_tree():
     if use_cached:
         types = facets.get("types") or []
         genres = facets.get("genres") or []
+        themes = facets.get("themes") or []
+        backgrounds = facets.get("backgrounds") or []
         categories = facets.get("categories") or []
         count = int(facets.get("count") or len(videos))
     else:
@@ -232,6 +295,8 @@ def api_tree():
             if cnt > 0
         ]
         categories = build_category_facets(cat_counts)
+        themes = taxonomy_facets(videos, "themes")
+        backgrounds = taxonomy_facets(videos, "backgrounds")
         count = len(videos)
     mounts = roots_summary(all_videos)
 
@@ -239,6 +304,8 @@ def api_tree():
         "tree": tree,
         "types": types,
         "genres": genres,
+        "themes": themes,
+        "backgrounds": backgrounds,
         "categories": categories,
         "scanning": STATE["scanning"],
         "updating": bool(STATE.get("updating")),
@@ -429,31 +496,24 @@ def _subfolder_levels(cat_videos: list[dict], category: str, folder: str) -> lis
     return levels
 
 
-@app.route("/api/videos")
-def api_videos():
-    folder = request.args.get("folder", "").strip().strip("/")
-    category = request.args.get("category", "").strip().strip("/")
-    genre = request.args.get("genre", "").strip()
-    q_raw = request.args.get("q", "").strip()
-    parsed = parse_search_query(q_raw)
-    # 搜索语法里的 field 覆盖独立筛选项
-    if parsed.get("ext"):
-        ext = parsed["ext"]
-    else:
-        ext = request.args.get("ext", "").strip().lower()
-    if parsed.get("genre") and not genre:
-        genre = parsed["genre"]
-    if parsed.get("category") and not category:
-        category = parsed["category"]
-    sort = request.args.get("sort", "mtime_desc").strip().lower()
-    lib = (request.args.get("lib") or "").strip()
-
-    videos = videos_for_scope(lib or None)
-
-    # 频道：在当前 lib 范围内按一级目录
+def _prepare_video_query(
+    lib: str,
+    category: str,
+    folder: str,
+    folder_all: bool,
+    genre: str,
+    theme: str,
+    background: str,
+    q_raw: str,
+    parsed: dict,
+    ext: str,
+    view: str,
+    sort: str,
+) -> tuple:
+    """Build one complete filtered/faceted/sorted result for /api/videos."""
+    videos = list(videos_for_scope(lib or None))
     videos = filter_videos_by_scope(videos, category=category)
 
-    # 多层子类用「频道内全部片」统计各层兄弟项
     cat_videos = videos
     if ext or q_raw:
         cat_videos = list(videos)
@@ -469,8 +529,6 @@ def api_videos():
     subfolder_levels = _subfolder_levels(cat_videos, category, folder)
 
     if folder:
-        folder = folder.replace("\\", "/")
-        folder_all = request.args.get("folder_all", "").strip() in ("1", "true", "yes")
         has_children = bool(_subfolder_facets(videos, "", folder))
         videos = filter_videos_by_scope(
             videos,
@@ -478,20 +536,24 @@ def api_videos():
             include_descendants=not (has_children and not folder_all),
         )
     if ext:
-        if not ext.startswith("."):
-            ext = "." + ext
-        videos = [v for v in videos if (v.get("ext") or "").lower() == ext]
+        ext_n = ext if ext.startswith(".") else "." + ext
+        videos = [v for v in videos if (v.get("ext") or "").lower() == ext_n]
     if q_raw:
         videos = [v for v in videos if video_matches_query(v, parsed, _video_search_text)]
 
     scoped_genres = _genre_facets(videos)
+    scoped_themes = taxonomy_facets(videos, "themes")
+    scoped_backgrounds = taxonomy_facets(videos, "backgrounds")
     scoped_subs = _subfolder_facets(videos, category, folder)
 
     if genre:
         videos = [v for v in videos if genre in ensure_video_genres(v)]
+    if theme:
+        videos = [v for v in videos if theme in ensure_video_taxonomy(v)[0]]
+    if background:
+        videos = [v for v in videos if background in ensure_video_taxonomy(v)[1]]
 
     raw_count = len(videos)
-    view = (request.args.get("view") or "flat").strip().lower()
     if view == "series":
         videos = collapse_to_series_cards(videos)
 
@@ -504,21 +566,98 @@ def api_videos():
         reverse = False
     elif sort == "size_desc":
         key_fn = lambda v: v.get("size") or 0
-        reverse = True
     elif sort == "size_asc":
         key_fn = lambda v: v.get("size") or 0
         reverse = False
     elif sort == "duration_desc":
         key_fn = lambda v: v.get("duration") or 0
-        reverse = True
     elif sort == "duration_asc":
         key_fn = lambda v: v.get("duration") or 0
         reverse = False
-    else:
-        reverse = True
-        key_fn = lambda v: v.get("mtime") or 0
 
-    videos.sort(key=key_fn, reverse=reverse)
+    videos = sorted(videos, key=key_fn, reverse=reverse)
+    return (
+        videos,
+        raw_count,
+        scoped_genres,
+        scoped_themes,
+        scoped_backgrounds,
+        scoped_subs,
+        subfolder_levels,
+    )
+
+
+@app.route("/api/videos")
+def api_videos():
+    folder = request.args.get("folder", "").strip().strip("/")
+    category = request.args.get("category", "").strip().strip("/")
+    genre = request.args.get("genre", "").strip()
+    theme = request.args.get("theme", "").strip()
+    background = request.args.get("background", "").strip()
+    q_raw = request.args.get("q", "").strip()
+    parsed = parse_search_query(q_raw)
+    # 搜索语法里的 field 覆盖独立筛选项
+    if parsed.get("ext"):
+        ext = parsed["ext"]
+    else:
+        ext = request.args.get("ext", "").strip().lower()
+    if parsed.get("genre") and not genre:
+        genre = parsed["genre"]
+    if parsed.get("theme") and not theme:
+        theme = parsed["theme"]
+    if parsed.get("background") and not background:
+        background = parsed["background"]
+    if parsed.get("category") and not category:
+        category = parsed["category"]
+    sort = request.args.get("sort", "mtime_desc").strip().lower()
+    lib = (request.args.get("lib") or "").strip()
+
+    folder = folder.replace("\\", "/")
+    folder_all = request.args.get("folder_all", "").strip() in ("1", "true", "yes")
+    view = (request.args.get("view") or "flat").strip().lower()
+    view = view if view in ("series", "flat") else "flat"
+    query_key = (
+        int(STATE.get("lib_gen") or 0),
+        id(STATE.get("videos")),
+        lib,
+        category,
+        folder,
+        folder_all,
+        genre,
+        theme,
+        background,
+        q_raw,
+        ext,
+        view,
+        sort,
+    )
+    cached_query = video_query_cache_get(query_key)
+    if cached_query is None:
+        cached_query = _prepare_video_query(
+            lib,
+            category,
+            folder,
+            folder_all,
+            genre,
+            theme,
+            background,
+            q_raw,
+            parsed,
+            ext,
+            view,
+            sort,
+        )
+        video_query_cache_put(query_key, cached_query)
+    (
+        videos,
+        raw_count,
+        scoped_genres,
+        scoped_themes,
+        scoped_backgrounds,
+        scoped_subs,
+        subfolder_levels,
+    ) = cached_query
+
     total = len(videos)
     try:
         offset = max(0, int(request.args.get("offset", 0) or 0))
@@ -576,6 +715,8 @@ def api_videos():
         "limit": limit,
         "has_more": offset + len(slim) < total,
         "genres": scoped_genres,
+        "themes": scoped_themes,
+        "backgrounds": scoped_backgrounds,
         "subfolders": scoped_subs,
         "subfolder_levels": subfolder_levels,
         "view": view if view in ("series", "flat") else "flat",
@@ -1265,4 +1406,3 @@ def api_thumb_set(vid: str):
 from vg.routes import register_feature_routes
 
 register_feature_routes(app)
-

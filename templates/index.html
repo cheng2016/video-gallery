@@ -624,9 +624,16 @@
       overflow-x: auto;
       padding-bottom: 2px;
     }
-    .scope-filter-btn {
+    .scope-actions {
       grid-column: 2;
       grid-row: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      position: relative;
+    }
+    .scope-filter-btn,
+    .scope-options > summary {
       flex-shrink: 0;
       border: 1px solid var(--border);
       background: var(--bg3);
@@ -638,10 +645,57 @@
       font-family: inherit;
       white-space: nowrap;
     }
-    .scope-filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .scope-filter-btn:hover,
+    .scope-options > summary:hover,
+    .scope-options[open] > summary {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
     .scope-sticky.is-stuck .scope-filter-btn {
       border-color: rgba(0, 200, 212, 0.35);
       color: var(--accent);
+    }
+    .scope-options { position: relative; }
+    .scope-options > summary {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      list-style: none;
+      user-select: none;
+    }
+    .scope-options > summary::-webkit-details-marker { display: none; }
+    .scope-options-caret {
+      color: var(--muted);
+      font-size: 0.68rem;
+      transition: transform 0.15s ease;
+    }
+    .scope-options[open] .scope-options-caret { transform: rotate(180deg); }
+    .scope-options-popover {
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      z-index: 20;
+      width: min(360px, calc(100vw - 28px));
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #171c24;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+    }
+    .scope-options-section + .scope-options-section {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .scope-options-label {
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+    .scope-options-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
     }
     .status-bar {
       padding: 8px 20px;
@@ -1045,7 +1099,7 @@
       <span class="drive-hint" id="driveHint">正在检测磁盘和媒体目录…</span>
     </div>
     <div class="search-wrap">
-      <input type="search" id="search" placeholder="搜索：拼音/首字母，ext:mkv genre:动作 actor:周迅" autocomplete="off" title="支持拼音与首字母；语法：ext:mkv  genre:动作  actor:姓名  channel:电影" />
+      <input type="search" id="search" placeholder="搜索：拼音/首字母，theme:科幻 background:太空" autocomplete="off" title="支持拼音与首字母；语法：ext:mkv genre:动作 theme:科幻 background:太空 actor:姓名 channel:电影" />
     </div>
     <div class="meta" id="countLabel">—</div>
     <div class="header-actions">
@@ -1079,17 +1133,17 @@
     </aside>
     <section class="content" id="contentScroll">
       <div class="filters" id="filters">
-        <div class="filter-row">
-          <div class="filter-label">排序</div>
-          <div class="filter-tags" id="sortTags"></div>
-        </div>
-        <div class="filter-row">
-          <div class="filter-label">视图</div>
-          <div class="filter-tags" id="viewTags"></div>
-        </div>
         <div class="filter-row" id="genreRow" style="display:none">
           <div class="filter-label">类型</div>
           <div class="filter-tags" id="genreTags"></div>
+        </div>
+        <div class="filter-row" id="themeRow" style="display:none">
+          <div class="filter-label">主题</div>
+          <div class="filter-tags" id="themeTags"></div>
+        </div>
+        <div class="filter-row" id="backgroundRow" style="display:none">
+          <div class="filter-label">背景</div>
+          <div class="filter-tags" id="backgroundTags"></div>
         </div>
         <div class="filter-row">
           <div class="filter-label">格式</div>
@@ -1100,7 +1154,25 @@
       <div class="scope-sticky" id="scopeSticky">
         <div class="sticky-filter-row" id="stickyFilterRow"></div>
         <div class="crumb" id="crumb"></div>
-        <button type="button" class="scope-filter-btn" id="scopeFilterBtn" title="回到筛选栏">筛选</button>
+        <div class="scope-actions">
+          <button type="button" class="scope-filter-btn" id="scopeFilterBtn" title="回到筛选栏">筛选</button>
+          <details class="scope-options" id="scopeOptions">
+            <summary id="scopeOptionsSummary" title="调整排序与视图">
+              <span id="scopeOptionsText">最新 · 单集</span>
+              <span class="scope-options-caret" aria-hidden="true">▼</span>
+            </summary>
+            <div class="scope-options-popover" role="group" aria-label="排序与视图">
+              <div class="scope-options-section">
+                <div class="scope-options-label">排序</div>
+                <div class="scope-options-tags" id="sortTags"></div>
+              </div>
+              <div class="scope-options-section">
+                <div class="scope-options-label">视图</div>
+                <div class="scope-options-tags" id="viewTags"></div>
+              </div>
+            </div>
+          </details>
+        </div>
       </div>
       <div class="status-bar" id="status"></div>
       <div id="continueBar" class="continue-bar" style="display:none"></div>
@@ -1251,12 +1323,16 @@
       tree: null,
       types: [],
       genres: [],
+      themes: [],
+      backgrounds: [],
       categories: [],
       category: "",
       folder: "",
       folderAll: false,
       ext: "",
       genre: "",
+      theme: "",
+      background: "",
       sort: "mtime_desc",
       // 默认单集：卡片数与左边频道「片子数」一致。合集视图会把多集收成 1 张卡，局域网新访客容易误以为数量错。
       view: "flat",
@@ -1327,6 +1403,8 @@
         else if (state.folder) state.folderAll = true;
         if (typeof p.ext === "string") state.ext = p.ext;
         if (typeof p.genre === "string") state.genre = p.genre;
+        if (typeof p.theme === "string") state.theme = p.theme;
+        if (typeof p.background === "string") state.background = p.background;
         if (typeof p.query === "string") state.query = p.query;
         if (p.drive) state._preferDrive = p.drive;
         if (p.lastPlayId) state.lastPlayId = p.lastPlayId;
@@ -1344,6 +1422,8 @@
           folderAll: !!state.folderAll,
           ext: state.ext,
           genre: state.genre,
+          theme: state.theme,
+          background: state.background,
           query: state.query || "",
           drive,
           lastPlayId: state.lastPlayId || "",
@@ -1561,6 +1641,8 @@
       if (state.folder && state.folderAll) params.set("folder_all", "1");
       if (state.ext) params.set("ext", state.ext);
       if (state.genre) params.set("genre", state.genre);
+      if (state.theme) params.set("theme", state.theme);
+      if (state.background) params.set("background", state.background);
       if (state.sort) params.set("sort", state.sort);
       if (state.view) params.set("view", state.view);
       if (state.query) params.set("q", state.query);
@@ -1964,15 +2046,20 @@
       $("sortTags").innerHTML = SORTS.map((s) =>
         `<button type="button" class="tag ${state.sort === s.id ? "active" : ""}" data-sort="${s.id}">${s.label}</button>`
       ).join("");
+      const views = [
+        { id: "flat", label: "单集" },
+        { id: "series", label: "合集" },
+      ];
       const vt = $("viewTags");
       if (vt) {
-        vt.innerHTML = [
-          { id: "flat", label: "单集" },
-          { id: "series", label: "合集" },
-        ].map((s) =>
+        vt.innerHTML = views.map((s) =>
           `<button type="button" class="tag ${state.view === s.id ? "active" : ""}" data-view="${s.id}">${s.label}</button>`
         ).join("");
       }
+      const currentSort = SORTS.find((s) => s.id === state.sort) || SORTS[0];
+      const currentView = views.find((s) => s.id === state.view) || views[0];
+      const summary = $("scopeOptionsText");
+      if (summary) summary.textContent = `${currentSort.label} · ${currentView.label}`;
     }
 
     function renderExtTags(types) {
@@ -2003,6 +2090,39 @@
         html += `<button type="button" class="tag ${state.genre === g.name ? "active" : ""}" data-genre="${escapeAttr(g.name)}">${escapeHtml(g.name)}<span class="tag-n">${g.count}</span></button>`;
       }
       $("genreTags").innerHTML = html;
+    }
+
+    function renderTaxonomyTags(values, kind) {
+      const isBackground = kind === "background";
+      const stateList = isBackground ? "backgrounds" : "themes";
+      const stateValue = isBackground ? "background" : "theme";
+      const row = $(isBackground ? "backgroundRow" : "themeRow");
+      const box = $(isBackground ? "backgroundTags" : "themeTags");
+      state[stateList] = values || [];
+      if (!state[stateList].length) {
+        row.style.display = "none";
+        box.innerHTML = "";
+        if (state[stateValue]) state[stateValue] = "";
+        return;
+      }
+      if (state[stateValue] && !state[stateList].some((item) => item.name === state[stateValue])) {
+        state[stateValue] = "";
+      }
+      row.style.display = "flex";
+      const attr = isBackground ? "background" : "theme";
+      let html = `<button type="button" class="tag ${!state[stateValue] ? "active" : ""}" data-${attr}="">全部</button>`;
+      for (const item of state[stateList]) {
+        html += `<button type="button" class="tag ${state[stateValue] === item.name ? "active" : ""}" data-${attr}="${escapeAttr(item.name)}">${escapeHtml(item.name)}<span class="tag-n">${item.count}</span></button>`;
+      }
+      box.innerHTML = html;
+    }
+
+    function renderThemeTags(values) {
+      renderTaxonomyTags(values, "theme");
+    }
+
+    function renderBackgroundTags(values) {
+      renderTaxonomyTags(values, "background");
     }
 
     function renderSubTags(levels) {
@@ -2160,6 +2280,8 @@
       }
       if (state.ext) html += `<span class="sep">·</span><span>${escapeHtml(state.ext)}</span>`;
       if (state.genre) html += `<span class="sep">·</span><span>${escapeHtml(state.genre)}</span>`;
+      if (state.theme) html += `<span class="sep">·</span><span>主题：${escapeHtml(state.theme)}</span>`;
+      if (state.background) html += `<span class="sep">·</span><span>背景：${escapeHtml(state.background)}</span>`;
       if (state.query) html += `<span class="sep">·</span><span>“${escapeHtml(state.query)}”</span>`;
       if (state.totalCount != null) {
         if (state.view === "series" && state.rawCount != null && state.rawCount !== state.totalCount) {
@@ -2233,6 +2355,8 @@
               ${bad ? `<span title="${escapeAttr(badReason)}">疑似损坏</span>` : ""}
               ${v.duration_h ? `<span>${escapeHtml(v.duration_h)}</span>` : ""}
               ${(v.genres && v.genres.length) ? `<span>${escapeHtml(v.genres.slice(0, 2).join("·"))}</span>` : ""}
+              ${(v.themes && v.themes.length) ? `<span title="自动主题">主题·${escapeHtml(v.themes.slice(0, 2).join("·"))}</span>` : ""}
+              ${(v.backgrounds && v.backgrounds.length) ? `<span title="自动背景">背景·${escapeHtml(v.backgrounds.slice(0, 2).join("·"))}</span>` : ""}
             </div>
           </div>
         </div>`;
@@ -2405,10 +2529,20 @@
         return;
       }
       const genreBefore = state.genre;
+      const themeBefore = state.theme;
+      const backgroundBefore = state.background;
       renderGenreTags(data.genres || []);
-      if (genreBefore && !state.genre) {
+      renderThemeTags(data.themes || []);
+      renderBackgroundTags(data.backgrounds || []);
+      if (
+        (genreBefore && !state.genre) ||
+        (themeBefore && !state.theme) ||
+        (backgroundBefore && !state.background)
+      ) {
         data = await fetchVideos(0);
         renderGenreTags(data.genres || []);
+        renderThemeTags(data.themes || []);
+        renderBackgroundTags(data.backgrounds || []);
       }
       state.totalCount = data.count || 0;
       state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
@@ -2425,7 +2559,7 @@
       if (
         state.totalCount === 0 &&
         !folderAlive &&
-        (state.category || state.folder || state.ext || state.genre) &&
+        (state.category || state.folder || state.ext || state.genre || state.theme || state.background) &&
         (treeData.count || 0) > 0
       ) {
         state.category = "";
@@ -2433,6 +2567,8 @@
         state.folderAll = false;
         state.ext = "";
         state.genre = "";
+        state.theme = "";
+        state.background = "";
         saveUiPrefs();
         data = await fetchVideos(0);
         state.totalCount = data.count || 0;
@@ -2440,16 +2576,20 @@
         state.hasMore = !!data.has_more;
         state.offset = (data.videos || []).length;
         renderGenreTags(data.genres || []);
+        renderThemeTags(data.themes || []);
+        renderBackgroundTags(data.backgrounds || []);
       }
       // 选中某盘但内容为空，而侧栏该盘有数量：清残留筛选后再取一次
       if (state.totalCount === 0 && state.lib) {
         const mount = (state.mountedRoots || []).find((r) => sameLibPath(r.path, state.lib));
-        if (mount && (mount.count || 0) > 0 && (state.ext || state.genre || state.category || state.folder)) {
+        if (mount && (mount.count || 0) > 0 && (state.ext || state.genre || state.theme || state.background || state.category || state.folder)) {
           state.category = "";
           state.folder = "";
           state.folderAll = false;
           state.ext = "";
           state.genre = "";
+          state.theme = "";
+          state.background = "";
           saveUiPrefs();
           data = await fetchVideos(0);
           state.totalCount = data.count || 0;
@@ -2457,6 +2597,8 @@
           state.hasMore = !!data.has_more;
           state.offset = (data.videos || []).length;
           renderGenreTags(data.genres || []);
+          renderThemeTags(data.themes || []);
+          renderBackgroundTags(data.backgrounds || []);
         }
       }
       renderSubTags(data.subfolder_levels || []);
@@ -3035,6 +3177,8 @@
       if (!sameLibPath(prevLib, state.lib)) {
         state.ext = "";
         state.genre = "";
+        state.theme = "";
+        state.background = "";
       }
       if (state.lib) {
         if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
@@ -3049,6 +3193,7 @@
       const btn = e.target.closest("[data-sort]");
       if (!btn) return;
       state.sort = btn.dataset.sort || "mtime_desc";
+      $("scopeOptions").open = false;
       saveUiPrefs();
       refresh();
     });
@@ -3057,6 +3202,7 @@
       const btn = e.target.closest("[data-view]");
       if (!btn) return;
       state.view = btn.dataset.view || "flat";
+      $("scopeOptions").open = false;
       saveUiPrefs();
       refresh();
     });
@@ -3077,6 +3223,22 @@
       refresh();
     });
 
+    $("themeTags").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-theme]");
+      if (!btn) return;
+      state.theme = btn.dataset.theme || "";
+      saveUiPrefs();
+      refresh();
+    });
+
+    $("backgroundTags").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-background]");
+      if (!btn) return;
+      state.background = btn.dataset.background || "";
+      saveUiPrefs();
+      refresh();
+    });
+
     $("subFolderRows").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-folder]");
       if (!btn) return;
@@ -3085,6 +3247,7 @@
 
     $("scopeSticky").addEventListener("click", (e) => {
       if (e.target.closest("#scopeFilterBtn")) return;
+      if (e.target.closest("#scopeOptions")) return;
       const folderBtn = e.target.closest("[data-folder]");
       if (folderBtn) {
         applyFolderButton(folderBtn);
@@ -3104,12 +3267,31 @@
         refresh();
         return;
       }
+      const themeBtn = e.target.closest("[data-theme]");
+      if (themeBtn) {
+        state.theme = themeBtn.dataset.theme || "";
+        saveUiPrefs();
+        refresh();
+        return;
+      }
+      const backgroundBtn = e.target.closest("[data-background]");
+      if (backgroundBtn) {
+        state.background = backgroundBtn.dataset.background || "";
+        saveUiPrefs();
+        refresh();
+        return;
+      }
       const extBtn = e.target.closest("[data-ext]");
       if (extBtn) {
         state.ext = extBtn.dataset.ext || "";
         saveUiPrefs();
         refresh();
       }
+    });
+
+    document.addEventListener("click", (e) => {
+      const menu = $("scopeOptions");
+      if (menu && menu.open && !menu.contains(e.target)) menu.open = false;
     });
 
     $("treeToggleBtn").addEventListener("click", () => {
@@ -3140,6 +3322,8 @@
       if (lib && !sameLibPath(prevLib, lib)) {
         state.ext = "";
         state.genre = "";
+        state.theme = "";
+        state.background = "";
       }
       state.folder = path;
       state.folderAll = !!path;
@@ -3731,7 +3915,11 @@
       if (e.target === $("modal")) closePlayer();
     });
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closePlayer();
+      if (e.key === "Escape") {
+        const menu = $("scopeOptions");
+        if (menu) menu.open = false;
+        closePlayer();
+      }
     });
 
     let searchTimer;
@@ -3984,7 +4172,8 @@
         "导出纯静态站？\n\n" +
         "会生成到当前盘根目录下的 _video_gallery_static/\n" +
         "内含 index.html、预览图、data.js。\n" +
-        "之后运行目录中的「打开图库」启动器即可浏览，无需启动本服务。\n" +
+        "电脑可直接打开 index.html 浏览封面墙。\n" +
+        "运行「打开图库」后，同一 WiFi 下的手机浏览器也能打开控制台里的地址。\n" +
         "（视频文件不会被复制，仍引用原路径。）"
       )) return;
       $("exportStaticBtn").disabled = true;

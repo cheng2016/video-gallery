@@ -41,3 +41,28 @@ _meta_running = False
 _thumb_jpeg_cache: OrderedDict[str, bytes] = OrderedDict()
 _thumb_jpeg_lock = threading.Lock()
 
+# Filtered/faceted/sorted /api/videos results; offset/limit are deliberately
+# excluded from the key so infinite-scroll pages share one computed list.
+_video_query_cache: OrderedDict[tuple, tuple] = OrderedDict()
+_video_query_cache_lock = threading.RLock()
+VIDEO_QUERY_CACHE_MAX = 32
+
+
+def video_query_cache_get(key: tuple):
+    with _video_query_cache_lock:
+        value = _video_query_cache.get(key)
+        if value is not None:
+            _video_query_cache.move_to_end(key)
+        return value
+
+
+def video_query_cache_put(key: tuple, value: tuple) -> None:
+    with _video_query_cache_lock:
+        _video_query_cache[key] = value
+        _video_query_cache.move_to_end(key)
+        while len(_video_query_cache) > VIDEO_QUERY_CACHE_MAX:
+            _video_query_cache.popitem(last=False)
+
+# Expensive /api/videos query results are keyed by catalog generation.  Keep
+# the cache beside STATE so catalog writers can invalidate it without importing
+# the web module (which would create an import cycle).

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -24,7 +25,40 @@ PATHS_FILE = HERE / "paths.json"
 PORT = 8767
 PATHS: dict[str, str] = {}
 ALLOWED_ROOT = ROOT.parent.resolve()
+SENSITIVE_FILES = {
+    "paths.json",
+    "bridge.json",
+    "static_bridge.py",
+}
 
+
+def _is_loopback(host: str) -> bool:
+    h = (host or "").split("%")[0].lower()
+    return h in ("127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1")
+
+
+def lan_browse_urls(port: int) -> list[str]:
+    ips: list[str] = []
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))
+            ip = probe.getsockname()[0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.insert(0, ip)
+        finally:
+            probe.close()
+    except Exception:
+        pass
+    return [f"http://{ip}:{int(port)}/" for ip in ips]
 
 def load_cfg() -> dict:
     try:
@@ -144,6 +178,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         super().end_headers()
 
+    def guess_type(self, path):
+        lower = str(path).lower()
+        if lower.endswith((".jpg", ".jpeg", ".vgj")):
+            return "image/jpeg"
+        return super().guess_type(path)
+
+    def _client_host(self) -> str:
+        return (self.client_address[0] if self.client_address else "") or ""
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.end_headers()
@@ -152,14 +195,16 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         route = parsed.path.rstrip("/")
         if route == "/api/ping":
-            self._json(200, {
-                "ok": True,
-                "port": PORT,
-                "root": str(ALLOWED_ROOT),
-                "paths": len(PATHS),
-            })
+            local = _is_loopback(self._client_host())
+            payload = {"ok": True, "port": PORT, "paths": len(PATHS)}
+            if local:
+                payload["root"] = str(ALLOWED_ROOT)
+            self._json(200, payload)
             return
         if route == "/api/local":
+            if not _is_loopback(self._client_host()):
+                self._json(403, {"ok": False, "msg": "仅本机可调用系统播放器"})
+                return
             qs = parse_qs(parsed.query)
             action = (qs.get("action") or ["path"])[0]
             path_str = unquote((qs.get("path") or [""])[0])
@@ -167,12 +212,19 @@ class Handler(SimpleHTTPRequestHandler):
             code, obj = do_local_action(action, path_str, vid)
             self._json(code, obj)
             return
+        name = Path(unquote(parsed.path)).name.lower()
+        if name in SENSITIVE_FILES and not _is_loopback(self._client_host()):
+            self.send_error(404)
+            return
         return super().do_GET()
 
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path.rstrip("/") != "/api/local":
             self.send_error(404)
+            return
+        if not _is_loopback(self._client_host()):
+            self._json(403, {"ok": False, "msg": "仅本机可调用系统播放器"})
             return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
@@ -201,12 +253,21 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
+    global PORT
     boot()
     os.chdir(ROOT)
-    try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    except OSError as e:
-        print(f"端口 {PORT} 无法使用: {e}")
+    httpd = None
+    last_err: OSError | None = None
+    start_port = int(PORT)
+    for port in range(start_port, start_port + 10):
+        try:
+            httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+            PORT = port
+            break
+        except OSError as e:
+            last_err = e
+    if httpd is None:
+        print(f"端口 {start_port} 起无法使用: {last_err}")
         print("请关闭占用该端口的程序，或修改 _cache/bridge.json 的 port")
         input("按回车退出…")
         sys.exit(1)
@@ -214,7 +275,14 @@ def main() -> None:
     url = f"http://127.0.0.1:{PORT}/"
     print("=" * 50)
     print("  静态视频库已启动")
-    print(f"  {url}")
+    print(f"  本机: {url}")
+    lan = lan_browse_urls(PORT)
+    if lan:
+        print("  手机同一 WiFi 打开:")
+        for item in lan:
+            print(f"    {item}")
+    else:
+        print("  未检测到局域网 IP，手机请改用电脑 IP 访问")
     print(f"  视频根目录: {ALLOWED_ROOT}")
     print(f"  可打开文件: {len(PATHS)} 个")
     print("  关闭本窗口即停止")

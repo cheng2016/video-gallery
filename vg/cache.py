@@ -7,6 +7,8 @@ import json
 import os
 import re
 import shutil
+import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +23,23 @@ from vg.config import (
 from vg.schema import INDEX_SCHEMA_VERSION, serialize_video_item
 from vg.state import STATE, _thumb_jpeg_cache, _thumb_jpeg_lock
 from vg.util import _clear_path_attrs_windows, log
+
+
+_index_locks_guard = threading.Lock()
+_index_locks: dict[str, threading.RLock] = {}
+
+
+def _index_lock(cache: Path) -> threading.RLock:
+    try:
+        key = str(cache.resolve()).casefold()
+    except OSError:
+        key = str(cache).casefold()
+    with _index_locks_guard:
+        lock = _index_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _index_locks[key] = lock
+        return lock
 
 def _thumb_cache_key(vid: str, cache: Path | None = None) -> str:
     return f"{str(cache.resolve()).casefold()}|{vid}" if cache else vid
@@ -226,35 +245,52 @@ def cleanup_legacy_disk_cache(root: Path) -> None:
 
 def save_index(cache: Path, root: Path, videos: list[dict]) -> bool:
     path = cache / INDEX_NAME
-    tmp = cache / (INDEX_NAME + ".tmp")
-    try:
-        cache.mkdir(parents=True, exist_ok=True)
-        _clear_path_attrs_windows(path)
-        _clear_path_attrs_windows(tmp)
-        # 所有落盘路径统一使用 schema 契约，避免运行期字段泄漏。
-        clean = [serialize_video_item(v) for v in videos]
-        payload = json.dumps(
-            {
-                "schema_ver": INDEX_SCHEMA_VERSION,
-                "root": str(root.resolve()),
-                "videos": clean,
-                "updated": datetime.now().isoformat(),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        tmp.write_text(payload, encoding="utf-8")
-        os.replace(tmp, path)
-        return True
-    except OSError as e:
-        print(f"提示: 保存索引失败: {e}")
-        print(f"       路径: {path}")
+    with _index_lock(cache):
+        tmp: Path | None = None
+        fd: int | None = None
         try:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
+            cache.mkdir(parents=True, exist_ok=True)
+            _clear_path_attrs_windows(path)
+            # A unique sibling temp file prevents writers in different
+            # processes from deleting or replacing each other's snapshot.
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{INDEX_NAME}.", suffix=".tmp", dir=str(cache)
+            )
+            tmp = Path(tmp_name)
+            _clear_path_attrs_windows(tmp)
+            clean = [serialize_video_item(v) for v in videos]
+            payload = json.dumps(
+                {
+                    "schema_ver": INDEX_SCHEMA_VERSION,
+                    "root": str(root.resolve()),
+                    "videos": clean,
+                    "updated": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                fd = None
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, path)
+            tmp = None
+            return True
+        except (OSError, ValueError) as e:
+            print(f"提示: 保存索引失败: {e}")
+            print(f"       路径: {path}")
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            return False
 
 def attach_thumb_meta(v: dict) -> dict:
     """给列表项补 has_thumb / thumb_v（只看文件是否存在，避免列表接口解密过慢）。"""
@@ -271,4 +307,3 @@ def attach_thumb_meta(v: dict) -> dict:
     v["has_thumb"] = False
     v["thumb_v"] = 0
     return v
-
