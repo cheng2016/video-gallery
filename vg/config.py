@@ -116,7 +116,10 @@ VGDATA_DIR = WRITABLE_ROOT / "preview_cache"
 KEY_FILE = VGDATA_DIR / "vault.key"
 PREFS_FILE = VGDATA_DIR / "prefs.json"
 THUMB_EXT = ".vgt"
-THUMB_WORKERS_MAX = 32
+# Background thumbnail extraction is I/O heavy and each ffmpeg process may
+# otherwise fan out to several decoder threads.  Keep enough parallelism to
+# make progress without starving the web UI or video playback.
+THUMB_WORKERS_MAX = 2
 THUMB_JPEG_CACHE_MAX = 256
 # 转码/修声音同时跑的任务数（1=最稳，不打满 CPU；可在 prefs 覆盖）
 CONVERT_MAX_PARALLEL = 1

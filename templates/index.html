@@ -1589,8 +1589,8 @@
         const label = escapeHtml(r.name || r.id);
         return `<button type="button" class="continue-chip" data-play-id="${escapeAttr(r.id)}" title="${escapeAttr(r.folder || r.root || "")}" style="display:inline-flex;align-items:center;gap:8px;max-width:260px">
           <span class="media-row-thumb" style="width:48px;min-width:48px;height:28px;border-radius:4px">
-            <img src="/thumb/${escapeAttr(r.id)}?v=1${r.root ? `&root=${encodeURIComponent(r.root)}` : ""}" alt="" loading="lazy"
-              onerror="this.style.opacity=.15" />
+            <img src="/thumb/${escapeAttr(r.id)}?v=1&defer=1${r.root ? `&root=${encodeURIComponent(r.root)}` : ""}" alt="" loading="lazy"
+              onload="thumbLoadReady(this)" onerror="thumbLoadFailed(this)" />
           </span>
           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}${pct ? `<span class="pct">${pct}%</span>` : ""}</span>
         </button>`;
@@ -1833,6 +1833,54 @@
       }, 2000);
     }
 
+    const THUMB_PENDING_SRC = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270">' +
+      '<rect fill="#1a1d24" width="480" height="270"/>' +
+      '<polygon points="210,100 210,170 280,135" fill="#4a5568"/></svg>'
+    );
+
+    function thumbLoadReady(img) {
+      const src = img.currentSrc || img.src || "";
+      if (src.startsWith("data:image/svg+xml")) return;
+      img.dataset.thumbReady = "1";
+      img.dataset.thumbAttempt = "0";
+      if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
+      img.style.display = "";
+      img.style.opacity = "";
+      const ph = img.parentNode && img.parentNode.querySelector(".ph");
+      if (ph) ph.style.display = "none";
+    }
+
+    function thumbLoadFailed(img) {
+      if (!img.dataset.thumbUrl) img.dataset.thumbUrl = img.src;
+      const attempt = (Number(img.dataset.thumbAttempt) || 0) + 1;
+      img.dataset.thumbAttempt = String(attempt);
+      img.dataset.thumbReady = "";
+      img.onerror = null;
+      img.src = THUMB_PENDING_SRC;
+      if (attempt >= 7) return;
+      const delay = Math.min(5000, Math.round(650 * Math.pow(1.65, attempt - 1)));
+      if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
+      img._thumbRetryTimer = setTimeout(() => {
+        if (!img.isConnected) return;
+        const url = new URL(img.dataset.thumbUrl, location.href);
+        url.searchParams.set("_retry", String(Date.now()));
+        img.onerror = () => thumbLoadFailed(img);
+        img.onload = () => thumbLoadReady(img);
+        img.src = url.toString();
+      }, delay);
+    }
+
+    function requestThumbReload(img, url) {
+      if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
+      img.dataset.thumbUrl = url;
+      img.dataset.thumbAttempt = "0";
+      img.dataset.thumbReady = "";
+      img.onerror = () => thumbLoadFailed(img);
+      img.onload = () => thumbLoadReady(img);
+      img.src = url;
+    }
+
     function refreshVisibleThumbs() {
       const imgs = document.querySelectorAll("#grid .card img");
       imgs.forEach((img) => {
@@ -1841,8 +1889,10 @@
         const id = card.dataset.cover || card.dataset.id;
         const root = card.dataset.root || "";
         if (!id) return;
-        img.dataset.retried = "";
-        img.src = "/thumb/" + id + "?v=" + Date.now() + (root ? ("&root=" + encodeURIComponent(root)) : "");
+        requestThumbReload(
+          img,
+          "/thumb/" + id + "?v=" + Date.now() + "&defer=1" + (root ? ("&root=" + encodeURIComponent(root)) : "")
+        );
       });
     }
 
@@ -2334,8 +2384,8 @@
       return `
         <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}">
           <div class="thumb">
-            <img src="/thumb/${thumbId}?v=${tv}${thumbRootQ}" alt="" loading="lazy" decoding="async"
-              onerror="if(!this.dataset.retried){this.dataset.retried=1;this.src='/thumb/${thumbId}?v='+Date.now()+'${thumbRootQ}'}" />
+            <img src="/thumb/${thumbId}?v=${tv}&defer=1${thumbRootQ}" alt="" loading="lazy" decoding="async"
+              onload="thumbLoadReady(this)" onerror="thumbLoadFailed(this)" />
             <div class="play"><div class="play-icon"></div></div>
             ${dup ? `<span class="dup-badge" title="${escapeAttr(dupReason)}">重复×${dupN}</span>` : ""}
             ${bad ? `<span class="bad-badge" title="${escapeAttr(badReason)}">损坏</span>` : ""}
@@ -3459,8 +3509,8 @@
       }
       const rootQ = root ? `&root=${encodeURIComponent(root)}` : "";
       return `<div class="media-row-thumb">
-        <img src="/thumb/${escapeAttr(vid)}?v=${tv}${rootQ}" alt="" loading="lazy" decoding="async"
-          onerror="this.style.display='none';this.parentNode.querySelector('.ph').style.display='flex'" />
+        <img src="/thumb/${escapeAttr(vid)}?v=${tv}&defer=1${rootQ}" alt="" loading="lazy" decoding="async"
+          onload="thumbLoadReady(this)" onerror="thumbLoadFailed(this)" />
         <span class="ph" style="display:none">无图</span>
       </div>`;
     }

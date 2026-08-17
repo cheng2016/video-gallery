@@ -94,6 +94,12 @@ from vg.search import parse_search_query, video_matches_query
 from vg.series import collapse_to_series_cards, series_episodes
 from vg.state import STATE, video_query_cache_get, video_query_cache_put
 from vg.taxonomy import ensure_video_taxonomy, taxonomy_facets
+from vg.thumb_jobs import (
+    THUMB_PRIORITY_VISIBLE,
+    note_frontend_activity,
+    submit_thumbnail_job,
+    thumbnail_job_key,
+)
 from vg.streaming import _stream_file, rewrite_m3u8_for_proxy
 from vg.trash import move_to_trash
 from vg.util import (
@@ -183,6 +189,8 @@ def _enforce_lan_share():
 def _serve_cached_videos_response():
     if request.method != "GET" or request.path != "/api/videos":
         return None
+    # This hook can return before later before_request handlers run.
+    note_frontend_activity(0.45)
     key = (
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
@@ -194,6 +202,21 @@ def _serve_cached_videos_response():
         return None
     body, status, mimetype = cached
     return Response(body, status=status, mimetype=mimetype)
+
+
+@app.before_request
+def _let_foreground_requests_preempt_thumbnails():
+    """Give list rendering and playback a quiet window between ffmpeg jobs."""
+    if request.method != "GET":
+        return None
+    path = request.path or ""
+    if path.startswith(("/stream/", "/playlist/", "/hls/")):
+        note_frontend_activity(4.0)
+    elif path in ("/", "/api/tree", "/api/videos", "/api/videos-by-ids") or path.startswith(
+        ("/thumb/", "/api/series/")
+    ):
+        note_frontend_activity(0.45)
+    return None
 
 
 @app.after_request
@@ -835,21 +858,48 @@ def thumb(vid: str):
                 mimetype="image/jpeg",
                 headers={"Cache-Control": "public, max-age=86400"},
             )
-        # 损坏或不存在：尝试现场重建一次
+        # 损坏或不存在：进入共享队列。页面图片使用 defer=1，立即释放
+        # waitress 请求线程；直接访问该地址则短暂等待以兼容原有行为。
         ffmpeg = STATE.get("ffmpeg")
         if item and ffmpeg:
             src = _video_file_for_thumb(item)
             out = thumb_path(cache, file_id)
-            if src and make_thumbnail(ffmpeg, src, out):
-                thumb_cache_invalidate(file_id)
-                raw = read_thumb_jpeg(cache, file_id)
-                if raw:
+            if src:
+                def generate_requested_thumb() -> bool:
+                    ok = make_thumbnail(ffmpeg, src, out, background=True)
+                    if not ok:
+                        return False
+                    thumb_cache_invalidate(file_id, cache)
                     item["has_thumb"] = True
                     item["thumb_v"] = thumb_version(cache, file_id)
                     try:
                         save_library_item(item)
                     except Exception as e:
                         log(f"[预览图] 单条索引保存失败: {e}")
+                    if not STATE.get("scanning") and not STATE.get("updating"):
+                        STATE["thumb_progress"] = (
+                            f"已后台补全预览图：{item.get('name') or file_id}"
+                        )
+                    return True
+
+                future = submit_thumbnail_job(
+                    thumbnail_job_key(cache, file_id),
+                    generate_requested_thumb,
+                    priority=THUMB_PRIORITY_VISIBLE,
+                )
+                if request.args.get("defer", "").strip().lower() in ("1", "true", "yes"):
+                    return Response(
+                        placeholder,
+                        status=503,
+                        mimetype="image/svg+xml",
+                        headers={**placeholder_headers, "Retry-After": "1"},
+                    )
+                try:
+                    future.result(timeout=75)
+                except Exception:
+                    pass
+                raw = read_thumb_jpeg(cache, file_id)
+                if raw:
                     return Response(
                         raw,
                         mimetype="image/jpeg",

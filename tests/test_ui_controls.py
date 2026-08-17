@@ -23,6 +23,13 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn('id="viewTags"', toolbar)
         self.assertIn('id="scopeOptionsText"', toolbar)
 
+    def test_thumbnail_images_use_non_blocking_retry_flow(self) -> None:
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("function thumbLoadFailed(img)", html)
+        self.assertIn("function requestThumbReload(img, url)", html)
+        self.assertIn("&defer=1", html)
+        self.assertNotIn("dataset.retried", html)
+
 
 if __name__ == "__main__":
     unittest.main()

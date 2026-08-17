@@ -128,7 +128,15 @@ def _ffprobe_path(ffmpeg: str) -> str:
     return ffprobe
 
 
-def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0, force: bool = False) -> bool:
+def make_thumbnail(
+    ffmpeg: str,
+    video: Path,
+    out: Path,
+    seek: float = 3.0,
+    force: bool = False,
+    *,
+    background: bool = False,
+) -> bool:
     """截帧写入预览图 out（.vgt；按隐私设置加密或明文）。有效缓存则跳过；force 或损坏则重建。"""
     out.parent.mkdir(parents=True, exist_ok=True)
     _clear_path_attrs_windows(out)
@@ -152,7 +160,8 @@ def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0, force
     tmp = out.with_suffix(".tmp.jpg")
     try:
         seeks = [seek]
-        for fallback in (1.0, 0.0, 10.0, 30.0):
+        fallbacks = (1.0, 0.0) if background else (1.0, 0.0, 10.0, 30.0)
+        for fallback in fallbacks:
             if abs(fallback - seek) > 0.05:
                 seeks.append(fallback)
         for ss in seeks:
@@ -162,14 +171,31 @@ def make_thumbnail(ffmpeg: str, video: Path, out: Path, seek: float = 3.0, force
             except OSError:
                 pass
             try:
+                thread_args = ["-threads", "1"] if background else []
                 cmd = [
-                    ffmpeg, "-y", "-ss", str(ss), "-i", str(video),
-                    "-frames:v", "1", "-vf", "scale=480:-2",
+                    ffmpeg, "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                    *thread_args, "-ss", str(ss), "-i", str(video),
+                    "-frames:v", "1", "-an", "-sn", "-dn",
+                    "-vf", "scale=480:-2", *thread_args,
                     "-q:v", "4", str(tmp),
                 ]
+                run_cmd = cmd
+                if background and sys.platform != "win32":
+                    nice = shutil.which("nice")
+                    if nice:
+                        run_cmd = [nice, "-n", "10", *cmd]
+                creationflags = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    if sys.platform == "win32"
+                    else 0
+                )
+                if background and sys.platform == "win32":
+                    creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
                 r = subprocess.run(
-                    cmd, capture_output=True, timeout=60,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
+                    run_cmd,
+                    capture_output=True,
+                    timeout=25 if background else 60,
+                    creationflags=creationflags,
                 )
                 if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
                     raw = tmp.read_bytes()
@@ -393,4 +419,3 @@ def _bg_enrich_metadata() -> None:
     finally:
         _state._meta_running = False
         threading.Timer(4.0, lambda: STATE.update(meta_progress="")).start()
-

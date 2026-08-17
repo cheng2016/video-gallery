@@ -35,7 +35,8 @@ def log(msg: str) -> None:
 
 def thumb_worker_count(total: int = 0) -> int:
     cpus = os.cpu_count() or 4
-    n = max(2, min(THUMB_WORKERS_MAX, cpus))
+    # Leave at least half of the logical CPUs available to the web UI/player.
+    n = max(1, min(THUMB_WORKERS_MAX, max(1, cpus // 2)))
     if total > 0:
         n = max(1, min(n, total))
     return n
@@ -130,4 +131,3 @@ def format_duration(seconds: float | None) -> str:
     if h:
         return f"{h}:{m:02d}:{sec:02d}"
     return f"{m}:{sec:02d}"
-

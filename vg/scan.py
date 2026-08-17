@@ -6,7 +6,7 @@ import json
 import hashlib
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +42,11 @@ from vg.genres import detect_genres, ensure_video_genres
 from vg.segments import collapse_segment_sets
 from vg.state import STATE, _scan_lock
 from vg.taxonomy import ensure_video_taxonomy
+from vg.thumb_jobs import (
+    THUMB_PRIORITY_BATCH,
+    submit_thumbnail_job,
+    thumbnail_job_key,
+)
 from vg.util import (
     format_size,
     is_too_small_video,
@@ -261,37 +266,50 @@ def _load_old_video_map(cache: Path, root: Path) -> dict[str, dict]:
 
 
 def generate_thumbs_parallel(missing: list[dict], cached_n: int = 0, label: str = "新建") -> tuple[int, int]:
-    """并行生成预览图。返回 (成功数, 失败数)。"""
+    """通过低优先级共享队列生成预览图。返回 (成功数, 失败数)。"""
     ffmpeg = STATE.get("ffmpeg")
     cache = STATE.get("cache_dir")
     if not missing or not ffmpeg or not cache:
         return 0, 0
     total = len(missing)
-    STATE["thumb_progress"] = f"预览图缓存 {cached_n} 个，需{label} {total} 个（{thumb_worker_count(total)} 线程）…"
-    log(f"[预览图] {label} {total} 个，并行 {thumb_worker_count(total)} 线程")
+    workers = thumb_worker_count(total)
+    STATE["thumb_progress"] = (
+        f"预览图缓存 {cached_n} 个，需{label} {total} 个"
+        f"（后台 {workers} 路，前台活跃时让行）…"
+    )
+    log(f"[预览图] {label} {total} 个，后台 {workers} 路低优先级生成")
     ok_n = 0
     fail_n = 0
     done = 0
-    lock = threading.Lock()
-
-    def one(item: dict) -> tuple[dict, bool, str]:
-        name = item.get("name") or item.get("rel") or item.get("id") or "?"
+    def one(item: dict) -> bool:
         try:
             out = thumb_path(cache, item["id"])
             src = _video_file_for_thumb(item)
-            ok = bool(src and make_thumbnail(ffmpeg, src, out))
+            ok = bool(src and make_thumbnail(ffmpeg, src, out, background=True))
             if ok:
                 thumb_cache_invalidate(item["id"])
-            return item, ok, name
-        except Exception as e:
-            return item, False, f"{name} ({e})"
+            return ok
+        except Exception:
+            return False
 
-    workers = thumb_worker_count(total)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(one, it) for it in missing]
-        for fut in as_completed(futures):
-            item, ok, name = fut.result()
-            with lock:
+    future_items: dict = {}
+    for item in missing:
+        key = thumbnail_job_key(cache, item["id"])
+        future = submit_thumbnail_job(
+            key,
+            lambda item=item: one(item),
+            priority=THUMB_PRIORITY_BATCH,
+        )
+        future_items.setdefault(future, []).append(item)
+
+    for future in as_completed(future_items):
+        try:
+            ok = bool(future.result())
+        except Exception:
+            ok = False
+        for item in future_items[future]:
+            name = item.get("name") or item.get("rel") or item.get("id") or "?"
+            try:
                 done += 1
                 i = done
                 if ok:
@@ -308,6 +326,9 @@ def generate_thumbs_parallel(missing: list[dict], cached_n: int = 0, label: str 
                 STATE["thumb_progress"] = (
                     f"{label}加密预览图 {i}/{total}（已有缓存 {cached_n}，成功 {ok_n}）…"
                 )
+            except Exception as exc:
+                fail_n += 1
+                log(f"[预览图] 更新状态失败 {name}: {exc}")
     return ok_n, fail_n
 
 

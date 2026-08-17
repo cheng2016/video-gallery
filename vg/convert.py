@@ -38,6 +38,11 @@ from vg.media import (
 )
 from vg.state import STATE, _convert_lock
 from vg.taxonomy import ensure_video_taxonomy
+from vg.thumb_jobs import (
+    THUMB_PRIORITY_BATCH,
+    submit_thumbnail_job,
+    thumbnail_job_key,
+)
 from vg.util import (
     format_size,
     is_too_small_video,
@@ -329,13 +334,19 @@ def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> di
         def _thumb_one():
             try:
                 out = thumb_path(cache, vid)
-                if make_thumbnail(ffmpeg, out_path, out):
+                if make_thumbnail(ffmpeg, out_path, out, background=True):
                     item["has_thumb"] = True
                     item["thumb_v"] = thumb_version(cache, vid)
                     rebuild_indexes(STATE.get("videos") or [])
+                    return True
             except Exception as e:
                 log(f"[转MP4] 预览图失败: {e}")
-        threading.Thread(target=_thumb_one, daemon=True, name="convert-thumb").start()
+            return False
+        submit_thumbnail_job(
+            thumbnail_job_key(cache, vid),
+            _thumb_one,
+            priority=THUMB_PRIORITY_BATCH,
+        )
     log(f"[转MP4] 已入库: {rel}")
     return item
 
