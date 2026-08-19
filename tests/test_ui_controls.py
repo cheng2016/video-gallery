@@ -28,6 +28,10 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn("function thumbLoadFailed(img)", html)
         self.assertIn("function requestThumbReload(img, url)", html)
         self.assertIn("&defer=1", html)
+        self.assertIn("THUMB_CONCURRENCY", html)
+        self.assertIn("function watchThumbs(", html)
+        self.assertIn("data-thumb-url", html)
+        self.assertIn("refresh({ nav: false })", html)
         self.assertNotIn("dataset.retried", html)
 
     def test_feedback_and_probe_preferences_live_in_settings(self) -> None:

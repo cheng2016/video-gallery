@@ -1371,6 +1371,9 @@
       mountedRoots: [],  // [{path,label,count,categories}]
       multi: false,
       libExpanded: null, // Set of expanded disk paths in channel list
+      navCache: null,    // last /api/tree payload (sidebar + folder tree)
+      trees: Object.create(null), // lib -> folder tree
+      paintedTreeLib: null,
     };
 
     const CHANNEL_ICO = {
@@ -1607,12 +1610,12 @@
         const label = escapeHtml(r.name || r.id);
         return `<button type="button" class="continue-chip" data-play-id="${escapeAttr(r.id)}" title="${escapeAttr(r.folder || r.root || "")}" style="display:inline-flex;align-items:center;gap:8px;max-width:260px">
           <span class="media-row-thumb" style="width:48px;min-width:48px;height:28px;border-radius:4px">
-            <img src="/thumb/${escapeAttr(r.id)}?v=1&defer=1${r.root ? `&root=${encodeURIComponent(r.root)}` : ""}" alt="" loading="lazy"
-              onload="thumbLoadReady(this)" onerror="thumbLoadFailed(this)" />
+            <img ${lazyThumbMarkup(r.id, 1, r.root || "")} />
           </span>
           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}${pct ? `<span class="pct">${pct}%</span>` : ""}</span>
         </button>`;
       }).join("");
+      watchThumbs(bar);
     }
 
     loadUiPrefs();
@@ -1641,7 +1644,6 @@
     async function fetchTree() {
       const params = new URLSearchParams();
       if (state.lib) params.set("lib", state.lib);
-      params.set("_", String(Date.now()));
       const r = await fetch("/api/tree" + (params.toString() ? ("?" + params) : ""), {
         cache: "no-store",
       });
@@ -1667,7 +1669,6 @@
       if (state.lib) params.set("lib", state.lib);
       params.set("offset", String(offset == null ? state.offset : offset));
       params.set("limit", String(state.pageSize));
-      params.set("_", String(Date.now()));
       const r = await fetch("/api/videos?" + params, { cache: "no-store" });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
@@ -1856,12 +1857,116 @@
       '<rect fill="#1a1d24" width="480" height="270"/>' +
       '<polygon points="210,100 210,170 280,135" fill="#4a5568"/></svg>'
     );
+    const THUMB_CONCURRENCY = 4;
+    const thumbsLoaded = new Set();
+    const thumbWait = [];
+    let thumbBusy = 0;
+    let thumbObserver = null;
+    let pageThumbObserver = null;
+
+    function thumbUrlFor(id, tv, root) {
+      return "/thumb/" + encodeURIComponent(id) + "?v=" + (tv || 0) + "&defer=1"
+        + (root ? ("&root=" + encodeURIComponent(root)) : "");
+    }
+
+    function lazyThumbMarkup(id, tv, root) {
+      const url = thumbUrlFor(id, tv, root);
+      return `src="${THUMB_PENDING_SRC}" data-thumb-url="${escapeAttr(url)}" alt="" decoding="async"`;
+    }
+
+    function onThumbVisible(entries, observer) {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        queueThumb(entry.target);
+      }
+    }
+
+    function bindThumbObserver() {
+      if (thumbObserver) return thumbObserver;
+      const root = $("contentScroll");
+      thumbObserver = new IntersectionObserver(onThumbVisible, {
+        root: root || null,
+        rootMargin: "240px 0px",
+        threshold: 0.01,
+      });
+      return thumbObserver;
+    }
+
+    function bindPageThumbObserver() {
+      if (pageThumbObserver) return pageThumbObserver;
+      pageThumbObserver = new IntersectionObserver(onThumbVisible, {
+        root: null,
+        rootMargin: "160px 0px",
+        threshold: 0.01,
+      });
+      return pageThumbObserver;
+    }
+
+    function watchThumbs(scope) {
+      const root = scope || document;
+      const scroll = $("contentScroll");
+      root.querySelectorAll("img[data-thumb-url]").forEach((img) => {
+        if (img.dataset.thumbReady === "1") return;
+        const url = img.dataset.thumbUrl;
+        if (url && thumbsLoaded.has(url)) {
+          img.src = url;
+          img.dataset.thumbReady = "1";
+          return;
+        }
+        if (img.dataset.thumbWatched === "1") return;
+        img.dataset.thumbWatched = "1";
+        const obs = (scroll && scroll.contains(img)) ? bindThumbObserver() : bindPageThumbObserver();
+        obs.observe(img);
+      });
+    }
+
+    function queueThumb(img) {
+      if (!img || img.dataset.thumbReady === "1" || img.dataset.thumbLoading === "1") return;
+      thumbWait.push(img);
+      pumpThumbs();
+    }
+
+    function pumpThumbs() {
+      while (thumbBusy < THUMB_CONCURRENCY && thumbWait.length) {
+        const img = thumbWait.shift();
+        if (!img || !img.isConnected || img.dataset.thumbReady === "1") continue;
+        startThumb(img);
+      }
+    }
+
+    function startThumb(img) {
+      const url = img.dataset.thumbUrl;
+      if (!url) return;
+      img.dataset.thumbLoading = "1";
+      thumbBusy += 1;
+      const probe = new Image();
+      probe.onload = () => {
+        img.dataset.thumbLoading = "";
+        thumbBusy = Math.max(0, thumbBusy - 1);
+        if (img.isConnected) {
+          thumbsLoaded.add(url);
+          img.onload = () => thumbLoadReady(img);
+          img.onerror = () => thumbLoadFailed(img);
+          img.src = url;
+        }
+        pumpThumbs();
+      };
+      probe.onerror = () => {
+        img.dataset.thumbLoading = "";
+        thumbBusy = Math.max(0, thumbBusy - 1);
+        if (img.isConnected) thumbLoadFailed(img);
+        else pumpThumbs();
+      };
+      probe.src = url;
+    }
 
     function thumbLoadReady(img) {
       const src = img.currentSrc || img.src || "";
       if (src.startsWith("data:image/svg+xml")) return;
       img.dataset.thumbReady = "1";
       img.dataset.thumbAttempt = "0";
+      if (img.dataset.thumbUrl) thumbsLoaded.add(img.dataset.thumbUrl);
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img.style.display = "";
       img.style.opacity = "";
@@ -1870,23 +1975,28 @@
     }
 
     function thumbLoadFailed(img) {
-      if (!img.dataset.thumbUrl) img.dataset.thumbUrl = img.src;
+      if (!img.dataset.thumbUrl && img.src && !img.src.startsWith("data:")) img.dataset.thumbUrl = img.src;
       const attempt = (Number(img.dataset.thumbAttempt) || 0) + 1;
       img.dataset.thumbAttempt = String(attempt);
       img.dataset.thumbReady = "";
+      img.dataset.thumbLoading = "";
+      img.dataset.thumbWatched = "1";
       img.onerror = null;
       img.src = THUMB_PENDING_SRC;
-      if (attempt >= 7) return;
+      if (attempt >= 7) {
+        pumpThumbs();
+        return;
+      }
       const delay = Math.min(5000, Math.round(650 * Math.pow(1.65, attempt - 1)));
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img._thumbRetryTimer = setTimeout(() => {
         if (!img.isConnected) return;
         const url = new URL(img.dataset.thumbUrl, location.href);
         url.searchParams.set("_retry", String(Date.now()));
-        img.onerror = () => thumbLoadFailed(img);
-        img.onload = () => thumbLoadReady(img);
-        img.src = url.toString();
+        img.dataset.thumbUrl = url.pathname + url.search;
+        queueThumb(img);
       }, delay);
+      pumpThumbs();
     }
 
     function requestThumbReload(img, url) {
@@ -1894,22 +2004,26 @@
       img.dataset.thumbUrl = url;
       img.dataset.thumbAttempt = "0";
       img.dataset.thumbReady = "";
-      img.onerror = () => thumbLoadFailed(img);
-      img.onload = () => thumbLoadReady(img);
-      img.src = url;
+      img.dataset.thumbLoading = "";
+      img.dataset.thumbWatched = "1";
+      img.src = THUMB_PENDING_SRC;
+      queueThumb(img);
     }
 
     function refreshVisibleThumbs() {
-      const imgs = document.querySelectorAll("#grid .card img");
-      imgs.forEach((img) => {
+      const root = $("contentScroll") || document;
+      const view = root.getBoundingClientRect ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      document.querySelectorAll("#grid .card img[data-thumb-url], #grid .card img").forEach((img) => {
         const card = img.closest(".card");
         if (!card) return;
+        const box = card.getBoundingClientRect();
+        if (box.bottom < view.top - 80 || box.top > view.bottom + 80) return;
         const id = card.dataset.cover || card.dataset.id;
-        const root = card.dataset.root || "";
+        const rootPath = card.dataset.root || "";
         if (!id) return;
         requestThumbReload(
           img,
-          "/thumb/" + id + "?v=" + Date.now() + "&defer=1" + (root ? ("&root=" + encodeURIComponent(root)) : "")
+          "/thumb/" + id + "?v=" + Date.now() + "&defer=1" + (rootPath ? ("&root=" + encodeURIComponent(rootPath)) : "")
         );
       });
     }
@@ -1963,6 +2077,84 @@
     function sameLibPath(a, b) {
       return String(a || "").replace(/[\\/]+$/, "").toLowerCase() ===
         String(b || "").replace(/[\\/]+$/, "").toLowerCase();
+    }
+
+    function libCacheKey(lib) {
+      return String(lib || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    }
+
+    function rememberNav(treeData) {
+      if (!treeData) return;
+      state.navCache = treeData;
+      if (treeData.lib_gen != null) state._libGen = treeData.lib_gen;
+      if (treeData.tree) state.trees[libCacheKey(treeData.lib)] = treeData.tree;
+    }
+
+    function treeFromCache(lib) {
+      const key = libCacheKey(lib);
+      if (state.trees[key]) return state.trees[key];
+      const overview = state.trees[""];
+      if (lib && overview && Array.isArray(overview.children)) {
+        const child = overview.children.find((c) => sameLibPath(c.lib, lib));
+        if (child) {
+          state.trees[key] = child;
+          return child;
+        }
+      }
+      return null;
+    }
+
+    function highlightNav() {
+      document.querySelectorAll("#channelList .channel-item[data-cat]").forEach((el) => {
+        const lib = el.getAttribute("data-lib") || "";
+        const cat = el.getAttribute("data-cat") || "";
+        el.classList.toggle("active", sameLibPath(lib, state.lib || "") && cat === (state.category || ""));
+      });
+      document.querySelectorAll("#channelList .channel-item.channel-disk").forEach((el) => {
+        const path = el.getAttribute("data-disk-header") || "";
+        el.classList.toggle("disk-scoped", sameLibPath(state.lib, path));
+      });
+      document.querySelectorAll("#tree .tree-item").forEach((el) => {
+        const lib = el.getAttribute("data-lib") || "";
+        const path = el.getAttribute("data-path") || "";
+        let on = false;
+        if (lib) {
+          on = sameLibPath(state.lib, lib) && (path ? state.folder === path : !state.folder);
+        } else {
+          on = state.folder === path;
+        }
+        el.classList.toggle("active", on);
+      });
+      document.querySelectorAll("#extTags .tag[data-ext]").forEach((el) => {
+        el.classList.toggle("active", (el.getAttribute("data-ext") || "") === (state.ext || ""));
+      });
+    }
+
+    function syncNavFromCache() {
+      const cached = treeFromCache(state.lib);
+      const painted = libCacheKey(state.paintedTreeLib);
+      const want = libCacheKey(state.lib);
+      if (cached && painted !== want) {
+        state.tree = cached;
+        if ($("tree")) $("tree").innerHTML = renderTree(cached);
+        state.paintedTreeLib = state.lib || "";
+      }
+      highlightNav();
+      renderSortTags();
+    }
+
+    async function applyNavChrome(treeData) {
+      lastScanning = !!treeData.scanning;
+      state.tree = treeData.tree;
+      state.root = treeData.root || state.root;
+      await renderMountChips(treeData.roots || []);
+      if (treeData.multi || (treeData.roots || []).length > 1) state.multi = true;
+      updateAsideTitles();
+      renderChannels(treeData.categories || [], treeData.count || 0);
+      renderSortTags();
+      renderExtTags(treeData.types || []);
+      if ($("tree")) $("tree").innerHTML = treeData.tree ? renderTree(treeData.tree) : "";
+      state.paintedTreeLib = treeData.lib || "";
     }
 
     function normalizeMountRoots(roots) {
@@ -2023,7 +2215,7 @@
       }
       state.expanded = new Set([""]);
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     }
 
     function renderChannels(categories, total) {
@@ -2276,7 +2468,7 @@
         state.folderAll = false;
       }
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     }
 
     function treeNodeKey(node) {
@@ -2388,7 +2580,6 @@
       const year = v.mtime_h ? String(v.mtime_h).slice(0, 4) : "";
       const isSeries = v.kind === "series";
       const thumbId = v.thumb_id || (isSeries ? (v.cover_id || v.id) : v.id);
-      const thumbRootQ = v.root ? `&root=${encodeURIComponent(v.root)}` : "";
       const tv = v.thumb_v || (v.has_thumb ? 1 : 0);
       const dup = !!v.dup;
       const dupN = v.dup_n || 0;
@@ -2402,8 +2593,7 @@
       return `
         <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}">
           <div class="thumb">
-            <img src="/thumb/${thumbId}?v=${tv}&defer=1${thumbRootQ}" alt="" loading="lazy" decoding="async"
-              onload="thumbLoadReady(this)" onerror="thumbLoadFailed(this)" />
+            <img ${lazyThumbMarkup(thumbId, tv, v.root || "")} />
             <div class="play"><div class="play-icon"></div></div>
             ${dup ? `<span class="dup-badge" title="${escapeAttr(dupReason)}">重复×${dupN}</span>` : ""}
             ${bad ? `<span class="bad-badge" title="${escapeAttr(badReason)}">损坏</span>` : ""}
@@ -2479,6 +2669,7 @@
         state.loadedVideos.slice(start, end).map(cardHtml).join("") +
         `<div class="v-spacer" style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
       updateGridHint();
+      watchThumbs(grid);
       if (state.hasMore && end >= total - cols * 2 && !loadingMore) loadMore();
     }
 
@@ -2533,6 +2724,7 @@
         grid.insertAdjacentHTML("beforeend", videos.map(cardHtml).join(""));
       }
       updateGridHint();
+      watchThumbs(grid);
       ensureScrollObserver();
     }
 
@@ -2554,27 +2746,34 @@
       scrollObserver.observe(sentinel);
     }
 
-    async function refresh() {
+    let refreshToken = 0;
+
+    async function refresh(opts) {
+      const options = opts || {};
+      const token = ++refreshToken;
       state.offset = 0;
       loadingMore = false;
-      let treeData;
-      try {
-        treeData = await fetchTree();
-      } catch (e) {
-        $("countLabel").textContent = "加载失败";
-        alert(String(e.message || e));
-        return;
+      let needNav = options.nav !== false;
+      if (!state.navCache) needNav = true;
+
+      let treeData = state.navCache;
+      if (needNav) {
+        try {
+          treeData = await fetchTree();
+        } catch (e) {
+          $("countLabel").textContent = "加载失败";
+          alert(String(e.message || e));
+          return;
+        }
+        if (token !== refreshToken) return;
+        rememberNav(treeData);
+        await applyNavChrome(treeData);
+        if (token !== refreshToken) return;
+      } else {
+        syncNavFromCache();
+        treeData = state.navCache || treeData || {};
+        lastScanning = !!treeData.scanning;
       }
-      lastScanning = !!treeData.scanning;
-      state.tree = treeData.tree;
-      state.root = treeData.root || state.root;
-      await renderMountChips(treeData.roots || []);
-      if (treeData.multi || (treeData.roots || []).length > 1) state.multi = true;
-      updateAsideTitles();
-      renderChannels(treeData.categories || [], treeData.count || 0);
-      renderSortTags();
-      renderExtTags(treeData.types || []);
-      if ($("tree")) $("tree").innerHTML = treeData.tree ? renderTree(treeData.tree) : "";
       if (state.folder && state.folder === state.category) {
         state.folder = "";
         state.folderAll = false;
@@ -2596,6 +2795,7 @@
         alert(String(e.message || e));
         return;
       }
+      if (token !== refreshToken) return;
       const genreBefore = state.genre;
       const themeBefore = state.theme;
       const backgroundBefore = state.background;
@@ -2608,6 +2808,7 @@
         (backgroundBefore && !state.background)
       ) {
         data = await fetchVideos(0);
+        if (token !== refreshToken) return;
         renderGenreTags(data.genres || []);
         renderThemeTags(data.themes || []);
         renderBackgroundTags(data.backgrounds || []);
@@ -2639,6 +2840,7 @@
         state.background = "";
         saveUiPrefs();
         data = await fetchVideos(0);
+        if (token !== refreshToken) return;
         state.totalCount = data.count || 0;
         state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
         state.hasMore = !!data.has_more;
@@ -2646,6 +2848,7 @@
         renderGenreTags(data.genres || []);
         renderThemeTags(data.themes || []);
         renderBackgroundTags(data.backgrounds || []);
+        highlightNav();
       }
       // 选中某盘但内容为空，而侧栏该盘有数量：清残留筛选后再取一次
       if (state.totalCount === 0 && state.lib) {
@@ -2660,6 +2863,7 @@
           state.background = "";
           saveUiPrefs();
           data = await fetchVideos(0);
+          if (token !== refreshToken) return;
           state.totalCount = data.count || 0;
           state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
           state.hasMore = !!data.has_more;
@@ -2667,6 +2871,7 @@
           renderGenreTags(data.genres || []);
           renderThemeTags(data.themes || []);
           renderBackgroundTags(data.backgrounds || []);
+          highlightNav();
         }
       }
       renderSubTags(data.subfolder_levels || []);
@@ -2709,15 +2914,8 @@
 
     async function refreshTree() {
       const data = await fetchTree();
-      state.tree = data.tree;
-      state.root = data.root || state.root;
-      await renderMountChips(data.roots || []);
-      if (data.multi || (data.roots || []).length > 1) state.multi = true;
-      updateAsideTitles();
-      renderChannels(data.categories || [], data.count || 0);
-      renderSortTags();
-      renderExtTags(data.types || []);
-      if ($("tree")) $("tree").innerHTML = data.tree ? renderTree(data.tree) : "";
+      rememberNav(data);
+      await applyNavChrome(data);
       let status = "";
       if (state.multi) {
         const names = (data.roots || []).map((r) => r.label).join(" + ");
@@ -3253,7 +3451,7 @@
         state.libExpanded.add(state.lib);
       }
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
       if (isMobile()) $("sidebar").classList.remove("open");
     });
 
@@ -3263,7 +3461,7 @@
       state.sort = btn.dataset.sort || "mtime_desc";
       $("scopeOptions").open = false;
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     });
 
     $("viewTags").addEventListener("click", (e) => {
@@ -3272,7 +3470,7 @@
       state.view = btn.dataset.view || "flat";
       $("scopeOptions").open = false;
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     });
 
     $("extTags").addEventListener("click", (e) => {
@@ -3280,7 +3478,7 @@
       if (!btn) return;
       state.ext = btn.dataset.ext || "";
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     });
 
     $("genreTags").addEventListener("click", (e) => {
@@ -3288,7 +3486,7 @@
       if (!btn) return;
       state.genre = btn.dataset.genre || "";
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     });
 
     $("themeTags").addEventListener("click", (e) => {
@@ -3296,7 +3494,7 @@
       if (!btn) return;
       state.theme = btn.dataset.theme || "";
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     });
 
     $("backgroundTags").addEventListener("click", (e) => {
@@ -3304,7 +3502,7 @@
       if (!btn) return;
       state.background = btn.dataset.background || "";
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
     });
 
     $("subFolderRows").addEventListener("click", (e) => {
@@ -3325,35 +3523,35 @@
       if (sortBtn) {
         state.sort = sortBtn.dataset.sort || "mtime_desc";
         saveUiPrefs();
-        refresh();
+        refresh({ nav: false });
         return;
       }
       const genreBtn = e.target.closest("[data-genre]");
       if (genreBtn) {
         state.genre = genreBtn.dataset.genre || "";
         saveUiPrefs();
-        refresh();
+        refresh({ nav: false });
         return;
       }
       const themeBtn = e.target.closest("[data-theme]");
       if (themeBtn) {
         state.theme = themeBtn.dataset.theme || "";
         saveUiPrefs();
-        refresh();
+        refresh({ nav: false });
         return;
       }
       const backgroundBtn = e.target.closest("[data-background]");
       if (backgroundBtn) {
         state.background = backgroundBtn.dataset.background || "";
         saveUiPrefs();
-        refresh();
+        refresh({ nav: false });
         return;
       }
       const extBtn = e.target.closest("[data-ext]");
       if (extBtn) {
         state.ext = extBtn.dataset.ext || "";
         saveUiPrefs();
-        refresh();
+        refresh({ nav: false });
       }
     });
 
@@ -3412,7 +3610,7 @@
         }
       }
       saveUiPrefs();
-      refresh();
+      refresh({ nav: false });
       if (isMobile()) $("sidebar").classList.remove("open");
     });
 
@@ -3525,10 +3723,8 @@
       if (!vid) {
         return `<div class="media-row-thumb"><span class="ph">无图</span></div>`;
       }
-      const rootQ = root ? `&root=${encodeURIComponent(root)}` : "";
       return `<div class="media-row-thumb">
-        <img src="/thumb/${escapeAttr(vid)}?v=${tv}&defer=1${rootQ}" alt="" loading="lazy" decoding="async"
-          onload="thumbLoadReady(this)" onerror="thumbLoadFailed(this)" />
+        <img ${lazyThumbMarkup(vid, tv, root || "")} />
         <span class="ph" style="display:none">无图</span>
       </div>`;
     }
@@ -3679,6 +3875,7 @@
           </div>`;
         }).join("");
         body.dataset.groups = JSON.stringify(groups);
+        watchThumbs(body);
       } catch (err) {
         body.textContent = "加载失败: " + err;
       }
@@ -3906,6 +4103,7 @@
             </span>
           </button>`;
         }).join("");
+        watchThumbs(body);
       } catch (err) {
         body.textContent = "加载失败: " + err;
       }
@@ -3995,7 +4193,7 @@
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => {
         state.query = e.target.value.trim();
-        refresh();
+        refresh({ nav: false });
       }, 320);
     });
 
@@ -4324,10 +4522,9 @@
         ? `已自动检测到 ${n} 个磁盘/目录${letters ? "：" + letters : ""}。选择后点「扫描所选项」，不同磁盘会自动加入同一片库。`
         : "未检测到磁盘或媒体目录，请检查硬盘是否已连接，或重启应用";
 
-      await refreshTree();
       await refresh();
-      const d = await fetchTree();
       startPoll();
+      const d = state.navCache || {};
       if (!d.scanning && n) {
         // 若服务端还没在扫，状态里保留磁盘检测结果
         const cur = $("status").textContent || "";

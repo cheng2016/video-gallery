@@ -107,6 +107,102 @@ class VideoResponseCacheTests(unittest.TestCase):
                 STATE[key] = value
             web._video_response_cache.clear()
 
+    def test_cache_buster_query_does_not_bypass_videos_cache(self) -> None:
+        from vg import web
+
+        item = {
+            "id": "v1",
+            "name": "video",
+            "filename": "video.mp4",
+            "rel": "video.mp4",
+            "folder": "",
+            "ext": ".mp4",
+            "size": 100,
+            "mtime": 1,
+            "duration": None,
+            "genres": [],
+        }
+        old = {
+            key: STATE.get(key)
+            for key in ("videos", "root", "mounted_roots", "lan_share", "lib_gen")
+        }
+        web._video_response_cache.clear()
+        STATE.update({"videos": [item], "root": None, "mounted_roots": [], "lan_share": False, "lib_gen": 42})
+        calls = 0
+
+        def scoped(_lib=None):
+            nonlocal calls
+            calls += 1
+            return [item]
+
+        try:
+            with mock.patch.object(web, "videos_for_scope", side_effect=scoped):
+                client = web.app.test_client()
+                self.assertEqual(client.get("/api/videos?limit=1&_=111").status_code, 200)
+                self.assertEqual(client.get("/api/videos?limit=1&_=222").status_code, 200)
+                self.assertEqual(calls, 1)
+        finally:
+            for key, value in old.items():
+                STATE[key] = value
+            web._video_response_cache.clear()
+
+
+class TreePayloadCacheTests(unittest.TestCase):
+    def test_tree_payload_is_reused_until_catalog_generation_changes(self) -> None:
+        from vg import web
+
+        item = {
+            "id": "v1",
+            "name": "video",
+            "filename": "video.mp4",
+            "rel": "video.mp4",
+            "folder": "电影",
+            "ext": ".mp4",
+            "size": 100,
+            "mtime": 1,
+        }
+        old = {
+            key: STATE.get(key)
+            for key in ("videos", "root", "mounted_roots", "lan_share", "lib_gen", "facets", "scanning", "updating")
+        }
+        web._tree_payload_cache.clear()
+        STATE.update({
+            "videos": [item],
+            "root": None,
+            "mounted_roots": [],
+            "lan_share": False,
+            "lib_gen": 7,
+            "facets": None,
+            "scanning": False,
+            "updating": False,
+        })
+        builds = 0
+        real_build = web._build_tree_payload
+
+        def counted(lib):
+            nonlocal builds
+            builds += 1
+            return real_build(lib)
+
+        try:
+            with (
+                mock.patch.object(web, "videos_for_scope", return_value=[item]),
+                mock.patch.object(web, "tree_for_scope", return_value={"name": "全部", "path": "", "count": 1, "children": []}),
+                mock.patch.object(web, "roots_summary", return_value=[]),
+                mock.patch.object(web, "_build_tree_payload", side_effect=counted),
+            ):
+                client = web.app.test_client()
+                self.assertEqual(client.get("/api/tree").status_code, 200)
+                self.assertEqual(client.get("/api/tree").status_code, 200)
+                self.assertEqual(builds, 1)
+                STATE["lib_gen"] += 1
+                self.assertEqual(client.get("/api/tree").status_code, 200)
+                self.assertEqual(builds, 2)
+        finally:
+            for key, value in old.items():
+                STATE[key] = value
+            web._tree_payload_cache.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

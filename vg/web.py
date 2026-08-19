@@ -120,6 +120,20 @@ _delete_lock = threading.RLock()
 _video_response_cache: OrderedDict[tuple, tuple[bytes, int, str]] = OrderedDict()
 _video_response_cache_lock = threading.RLock()
 _VIDEO_RESPONSE_CACHE_MAX = 64
+_tree_payload_cache: OrderedDict[tuple, dict] = OrderedDict()
+_tree_payload_cache_lock = threading.RLock()
+_TREE_PAYLOAD_CACHE_MAX = 16
+
+
+def _stable_request_args() -> tuple:
+    """Query args that identify a page; ignore cache-buster `_`."""
+    return tuple(
+        sorted(
+            (key, tuple(values))
+            for key, values in request.args.lists()
+            if key != "_"
+        )
+    )
 
 
 def _video_response_cache_key() -> tuple:
@@ -127,11 +141,10 @@ def _video_response_cache_key() -> tuple:
     existing = getattr(g, "_video_response_cache_key", None)
     if existing is not None:
         return existing
-    query = tuple(sorted((key, tuple(values)) for key, values in request.args.lists()))
     return (
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
-        query,
+        _stable_request_args(),
     )
 
 
@@ -199,7 +212,7 @@ def _serve_cached_videos_response():
     key = (
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
-        tuple(sorted((name, tuple(values)) for name, values in request.args.lists())),
+        _stable_request_args(),
     )
     g._video_response_cache_key = key
     cached = _cached_video_response(key)
@@ -272,10 +285,34 @@ def index():
     return Response(html, mimetype="text/html; charset=utf-8")
 
 
-@app.route("/api/tree")
-def api_tree():
+def _tree_cache_key(lib: str) -> tuple:
+    return (
+        int(STATE.get("lib_gen") or 0),
+        id(STATE.get("videos")),
+        (lib or "").strip().casefold(),
+        bool(STATE.get("scanning")),
+        bool(STATE.get("updating")),
+    )
+
+
+def _cached_tree_payload(key: tuple) -> dict | None:
+    with _tree_payload_cache_lock:
+        value = _tree_payload_cache.get(key)
+        if value is not None:
+            _tree_payload_cache.move_to_end(key)
+        return value
+
+
+def _store_tree_payload(key: tuple, payload: dict) -> None:
+    with _tree_payload_cache_lock:
+        _tree_payload_cache[key] = payload
+        _tree_payload_cache.move_to_end(key)
+        while len(_tree_payload_cache) > _TREE_PAYLOAD_CACHE_MAX:
+            _tree_payload_cache.popitem(last=False)
+
+
+def _build_tree_payload(lib: str) -> dict:
     root = STATE["root"]
-    lib = (request.args.get("lib") or "").strip()
     all_videos = STATE["videos"] or []
     videos = videos_for_scope(lib or None)
     tree = tree_for_scope(lib or None)
@@ -327,14 +364,33 @@ def api_tree():
         backgrounds = taxonomy_facets(videos, "backgrounds")
         count = len(videos)
     mounts = roots_summary(all_videos)
-
-    return jsonify({
+    return {
         "tree": tree,
         "types": types,
         "genres": genres,
         "themes": themes,
         "backgrounds": backgrounds,
         "categories": categories,
+        "count": count,
+        "root": str(root) if root else "",
+        "lib": lib,
+        "roots": mounts,
+        "multi": len(mounts) > 1,
+    }
+
+
+@app.route("/api/tree")
+def api_tree():
+    lib = (request.args.get("lib") or "").strip()
+    cache_key = _tree_cache_key(lib)
+    heavy = _cached_tree_payload(cache_key)
+    if heavy is None:
+        heavy = _build_tree_payload(lib)
+        if not STATE.get("scanning") and not STATE.get("updating"):
+            _store_tree_payload(cache_key, heavy)
+
+    return jsonify({
+        **heavy,
         "scanning": STATE["scanning"],
         "updating": bool(STATE.get("updating")),
         "exporting": bool(STATE.get("exporting")),
@@ -344,14 +400,9 @@ def api_tree():
         "scan_progress": STATE["scan_progress"],
         "thumb_progress": STATE["thumb_progress"],
         "meta_progress": STATE.get("meta_progress") or "",
-        "count": count,
         "lib_gen": int(STATE.get("lib_gen") or 0),
         "scan_found": len(STATE.get("scan_live") or []) if isinstance(STATE.get("scan_live"), list) else 0,
         "has_ffmpeg": bool(STATE["ffmpeg"]),
-        "root": str(root) if root else "",
-        "lib": lib,
-        "roots": mounts,
-        "multi": len(mounts) > 1,
         "bind_host": STATE.get("bind_host") or "127.0.0.1",
         "bind_port": int(STATE.get("bind_port") or 8765),
         "lan_share": bool(STATE.get("lan_share")),
