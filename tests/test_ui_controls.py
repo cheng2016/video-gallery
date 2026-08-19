@@ -34,6 +34,17 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn("refresh({ nav: false })", html)
         self.assertNotIn("dataset.retried", html)
 
+    def test_multi_disk_all_videos_badge_uses_catalog_total(self) -> None:
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("function catalogTotal(", html)
+        self.assertIn("const allBadge = catalogTotal(total);", html)
+        self.assertIn("renderChannels(state.categories || [], catalogTotal());", html)
+        self.assertNotIn("renderChannels(state.categories || [], state.totalCount || 0)", html)
+        self.assertNotIn(
+            "const allBadge = (total != null && total > 0) ? total : (grand || 0);",
+            html,
+        )
+
     def test_feedback_and_probe_preferences_live_in_settings(self) -> None:
         html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
         header = html.split('<div class="header-actions">', 1)[1].split("</header>", 1)[0]

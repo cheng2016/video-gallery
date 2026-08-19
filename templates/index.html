@@ -1374,6 +1374,7 @@
       navCache: null,    // last /api/tree payload (sidebar + folder tree)
       trees: Object.create(null), // lib -> folder tree
       paintedTreeLib: null,
+      catalogCount: 0,   // all-disks total; never replace with a single-disk list count
     };
 
     const CHANNEL_ICO = {
@@ -2088,6 +2089,17 @@
       state.navCache = treeData;
       if (treeData.lib_gen != null) state._libGen = treeData.lib_gen;
       if (treeData.tree) state.trees[libCacheKey(treeData.lib)] = treeData.tree;
+      // Scoped /api/tree?lib=D: only knows one disk. Keep the all-disks total.
+      if (!(treeData.lib || "").trim() && treeData.count != null) {
+        state.catalogCount = treeData.count || 0;
+      }
+    }
+
+    function catalogTotal(fallback) {
+      const grand = (state.mountedRoots || []).reduce((s, r) => s + (r.count || 0), 0);
+      if (grand > 0) return grand;
+      if (state.catalogCount > 0) return state.catalogCount;
+      return fallback || 0;
     }
 
     function treeFromCache(lib) {
@@ -2150,7 +2162,7 @@
       await renderMountChips(treeData.roots || []);
       if (treeData.multi || (treeData.roots || []).length > 1) state.multi = true;
       updateAsideTitles();
-      renderChannels(treeData.categories || [], treeData.count || 0);
+      renderChannels(treeData.categories || [], catalogTotal(treeData.count || 0));
       renderSortTags();
       renderExtTags(treeData.types || []);
       if ($("tree")) $("tree").innerHTML = treeData.tree ? renderTree(treeData.tree) : "";
@@ -2251,9 +2263,8 @@
         (state.mountedRoots || []).forEach((r) => state.libExpanded.add(r.path));
       }
       const roots = state.mountedRoots || [];
-      const grand = roots.reduce((s, r) => s + (r.count || 0), 0);
-      // 与 /api/tree 的 count（videos_for_scope）对齐，避免侧栏合计和右侧不一致
-      const allBadge = (total != null && total > 0) ? total : (grand || 0);
+      // 多盘「全部视频」必须是各盘合计，不能用当前盘 / 当前列表的 count。
+      const allBadge = catalogTotal(total);
       const allDisksActive = !state.lib && !state.category;
       let html = `<div class="channel-item ${allDisksActive ? "active" : ""}" data-lib="" data-cat="">
         <span class="ico">${CHANNEL_ICO.__all__}</span>
@@ -3428,7 +3439,7 @@
         const existing = [...state.libExpanded].find((p) => sameLibPath(p, path));
         if (existing) state.libExpanded.delete(existing);
         else state.libExpanded.add(path);
-        renderChannels(state.categories || [], state.totalCount || 0);
+        renderChannels(state.categories || [], catalogTotal());
         return;
       }
       const item = e.target.closest(".channel-item");
