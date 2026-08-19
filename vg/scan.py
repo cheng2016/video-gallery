@@ -2,7 +2,6 @@
 """Video scanning, indexing, and thumbnail batch jobs."""
 from __future__ import annotations
 
-import json
 import hashlib
 import os
 import threading
@@ -25,7 +24,6 @@ from vg.catalog import (
     video_search_text as _video_search_text,
 )
 from vg.config import (
-    INDEX_NAME,
     PLAYLIST_EXTS,
     THUMB_EXT,
     VIDEO_EXTS,
@@ -337,24 +335,19 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
             pass
 
 def _load_old_video_map(cache: Path, root: Path) -> dict[str, dict]:
-    """从索引建立 rel → 条目，供增量复用（TS 合集拆成段后不进 map，行走时重收）。"""
-    index_path = cache / INDEX_NAME
-    old_map: dict[str, dict] = {}
-    if not index_path.exists():
-        return old_map
+    """从目录库建立 rel → 条目，供增量复用（TS 合集拆成段后不进 map，行走时重收）。"""
+    from vg.catalog_db import catalog_exists, load_catalog_by_rel, read_catalog_root
+
+    if not catalog_exists(cache):
+        return {}
+    stored_root = read_catalog_root(cache)
+    if stored_root and not _same_root(stored_root, root):
+        return {}
     try:
-        data = json.loads(index_path.read_text(encoding="utf-8"))
-        if not _same_root(data.get("root"), root) or not isinstance(data.get("videos"), list):
-            return old_map
-        for v in data["videos"]:
-            if v.get("kind") == "ts_set":
-                continue
-            rel = (v.get("rel") or "").replace("\\", "/")
-            if rel:
-                old_map[rel] = v
+        return load_catalog_by_rel(cache)
     except Exception as e:
         log(f"[增量] 读取旧索引失败: {e}")
-    return old_map
+        return {}
 
 
 def generate_thumbs_parallel(
@@ -479,14 +472,15 @@ def fill_thumbs_for_videos(
 
 
 def _load_index_videos(cache: Path, root: Path) -> list[dict]:
-    index_path = cache / INDEX_NAME
-    if not index_path.exists():
+    from vg.catalog_db import catalog_exists, load_catalog_videos, read_catalog_root
+
+    if not catalog_exists(cache):
+        return []
+    stored_root = read_catalog_root(cache)
+    if stored_root and not _same_root(stored_root, root):
         return []
     try:
-        data = json.loads(index_path.read_text(encoding="utf-8"))
-        if not _same_root(data.get("root"), root) or not isinstance(data.get("videos"), list):
-            return []
-        return [dict(v) for v in data["videos"] if isinstance(v, dict)]
+        return [dict(v) for v in load_catalog_videos(cache, root) if isinstance(v, dict)]
     except Exception as e:
         log(f"[增量] 读取旧索引失败: {e}")
         return []
@@ -814,14 +808,15 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
     cache = ensure_cache_dir(root)
     STATE["root"] = root
     STATE["cache_dir"] = cache
-    index_path = cache / INDEX_NAME
+    from vg.catalog_db import catalog_exists, load_catalog_videos, read_catalog_root
 
-    if not force and index_path.exists():
+    if not force and catalog_exists(cache):
         try:
-            data = json.loads(index_path.read_text(encoding="utf-8"))
-            if _same_root(data.get("root"), root) and isinstance(data.get("videos"), list):
+            stored_root = read_catalog_root(cache)
+            videos_raw = load_catalog_videos(cache, root)
+            if (not stored_root or _same_root(stored_root, root)) and videos_raw:
                 videos = []
-                for raw in data["videos"]:
+                for raw in videos_raw:
                     if not isinstance(raw, dict):
                         continue
                     v = dict(raw)
@@ -844,7 +839,7 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                 STATE["tree"] = build_tree(root, videos)
                 rebuild_indexes(videos)
                 STATE["scan_progress"] = f"已加载缓存，共 {len(videos)} 个视频"
-                log(f"[缓存] 已加载 {len(videos)} 个视频 ← {index_path}")
+                log(f"[缓存] 已加载 {len(videos)} 个视频 ← {cache}")
                 save_prefs(last_root=str(root))
                 try:
                     from vg.roots import on_scan_finished

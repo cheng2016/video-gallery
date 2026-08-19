@@ -3,24 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import shutil
-import tempfile
 import threading
-from datetime import datetime
 from pathlib import Path
 
 from vg.config import (
-    INDEX_NAME,
     KEY_FILE,
     LEGACY_DISK_CACHE_NAMES,
     THUMB_EXT,
     THUMB_JPEG_CACHE_MAX,
     VGDATA_DIR,
 )
-from vg.schema import INDEX_SCHEMA_VERSION, serialize_video_item
 from vg.state import STATE, _thumb_jpeg_cache, _thumb_jpeg_lock
 from vg.util import _clear_path_attrs_windows, log
 
@@ -259,20 +254,10 @@ def _normalize_folder_counts(raw: object) -> dict[str, int]:
 
 
 def read_index_counts(cache: Path) -> tuple[int | None, dict[str, int] | None]:
-    """Return (file_count, folder_counts). Both None when the index predates counts."""
-    path = cache / INDEX_NAME
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return None, None
-    if not isinstance(data, dict) or "folder_counts" not in data:
-        return None, None
-    folders = _normalize_folder_counts(data.get("folder_counts"))
-    try:
-        file_count = int(data.get("file_count") or 0)
-    except (TypeError, ValueError):
-        file_count = sum(folders.values())
-    return file_count, folders
+    """Return (file_count, folder_counts). Both None when the catalog has no counts."""
+    from vg.catalog_db import read_catalog_counts
+
+    return read_catalog_counts(cache)
 
 
 def list_thumb_ids(cache: Path | None) -> set[str]:
@@ -297,86 +282,44 @@ def save_index(
     file_count: int | None = None,
     folder_counts: dict[str, int] | None = None,
 ) -> bool:
-    path = cache / INDEX_NAME
+    """Persist one root's catalog to SQLite (no whole-JSON rewrite)."""
+    from vg.catalog_db import save_catalog
+
     with _index_lock(cache):
-        tmp: Path | None = None
-        fd: int | None = None
         try:
             cache.mkdir(parents=True, exist_ok=True)
-            _clear_path_attrs_windows(path)
-            preserved_count: int | None = None
-            preserved_folders: dict[str, int] | None = None
-            if file_count is None or folder_counts is None:
-                try:
-                    old = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, TypeError):
-                    old = None
-                if isinstance(old, dict):
-                    if file_count is None:
-                        try:
-                            preserved_count = int(old["file_count"])
-                        except (KeyError, TypeError, ValueError):
-                            preserved_count = None
-                    if folder_counts is None and "folder_counts" in old:
-                        preserved_folders = _normalize_folder_counts(old.get("folder_counts"))
-            use_folders = (
-                _normalize_folder_counts(folder_counts)
-                if folder_counts is not None
-                else (preserved_folders or {})
+            ok = save_catalog(
+                cache,
+                root,
+                videos,
+                file_count=file_count,
+                folder_counts=folder_counts,
             )
-            use_count = file_count if file_count is not None else preserved_count
-            if use_count is None:
-                use_count = sum(use_folders.values())
-            # A unique sibling temp file prevents writers in different
-            # processes from deleting or replacing each other's snapshot.
-            fd, tmp_name = tempfile.mkstemp(
-                prefix=f".{INDEX_NAME}.", suffix=".tmp", dir=str(cache)
-            )
-            tmp = Path(tmp_name)
-            _clear_path_attrs_windows(tmp)
-            clean = [serialize_video_item(v) for v in videos]
-            payload = json.dumps(
-                {
-                    "schema_ver": INDEX_SCHEMA_VERSION,
-                    "root": str(root.resolve()),
-                    "videos": clean,
-                    "file_count": int(use_count),
-                    "folder_counts": use_folders,
-                    "updated": datetime.now().isoformat(),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
-                fd = None
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(tmp, path)
-            tmp = None
-            return True
+            if not ok:
+                print(f"提示: 保存索引失败: {cache}")
+            return ok
         except (OSError, ValueError) as e:
             print(f"提示: 保存索引失败: {e}")
-            print(f"       路径: {path}")
-            if tmp is not None:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            if fd is not None:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+            print(f"       路径: {cache}")
             return False
+
 
 def attach_thumb_meta(v: dict) -> dict:
     """给列表项补 has_thumb / thumb_v（只看文件是否存在，避免列表接口解密过慢）。"""
     from vg.disk_libs import cache_dir_for_item
     from vg.roots import thumb_id_for_item
 
-    cache = cache_dir_for_item(v) or STATE.get("cache_dir")
     vid = thumb_id_for_item(v) or (v.get("id") or "")
+    # Trust scan/index flags on the hot list path — re-statting every card on
+    # each channel switch made post-scan browsing hitch on large libraries.
+    if v.get("has_thumb") and vid:
+        if not v.get("thumb_id"):
+            v["thumb_id"] = vid
+        if not v.get("thumb_v"):
+            v["thumb_v"] = 1
+        return v
+
+    cache = cache_dir_for_item(v) or STATE.get("cache_dir")
     if cache and vid and (thumb_cache_get(vid, cache) is not None or thumb_file_ready(cache, vid)):
         v["has_thumb"] = True
         v["thumb_v"] = thumb_version(cache, vid) or 1

@@ -267,6 +267,11 @@ class MetadataSettingsTests(unittest.TestCase):
                 mock.patch.object(media, "probe_audio_enabled", return_value=False),
                 mock.patch.object(media, "enrich_metadata_parallel", return_value=(1, 0)) as enrich,
                 mock.patch.object(media, "_persist_probed_items"),
+                mock.patch.object(
+                    media,
+                    "adopt_metadata_from_catalog",
+                    side_effect=lambda need, **_kw: (need, 0),
+                ),
                 mock.patch("vg.catalog.rebuild_indexes"),
             ):
                 media._bg_enrich_metadata()
@@ -278,10 +283,178 @@ class MetadataSettingsTests(unittest.TestCase):
             STATE["videos"] = old_videos
             media._state._meta_running = old_running
 
+    def test_reuse_existing_metadata_matches_file_sig(self) -> None:
+        item = {
+            "id": "disk-b",
+            "name": "same",
+            "filename": "same.mp4",
+            "size": 5_000_000,
+            "file_sig": "b2:5000000:abcd",
+            "duration": None,
+        }
+        sources = {
+            "sig:b2:5000000:abcd": {
+                "duration": 42.5,
+                "duration_h": "0:42",
+                "probe_duration_done": True,
+                "audio_codec": "aac",
+                "audio_hard": False,
+                "probe_audio_done": True,
+                "probe_ver": 1,
+            }
+        }
+        self.assertTrue(
+            media.reuse_existing_metadata(
+                item,
+                sources,
+                want_duration=True,
+                want_audio=True,
+            )
+        )
+        self.assertEqual(item["duration"], 42.5)
+        self.assertEqual(item["duration_h"], "0:42")
+        self.assertEqual(item["audio_codec"], "aac")
+        self.assertTrue(item["probe_duration_done"])
+        self.assertTrue(item["probe_audio_done"])
+
+    def test_adopt_metadata_from_catalog_reuses_other_disk_row(self) -> None:
+        donor = {
+            "id": "disk-a",
+            "name": "Movie",
+            "filename": "Movie.mkv",
+            "size": 8_000_000,
+            "file_sig": "b2:8000000:face",
+            "duration": 100.0,
+            "duration_h": "1:40",
+            "probe_duration_done": True,
+            "root": "D:/libA",
+            "_lib_root": "D:/libA",
+            "rel": "Movie.mkv",
+        }
+        need = [
+            {
+                "id": "disk-b",
+                "name": "Movie",
+                "filename": "Movie.mkv",
+                "size": 8_000_000,
+                "file_sig": "b2:8000000:face",
+                "duration": None,
+                "root": "E:/libB",
+                "_lib_root": "E:/libB",
+                "rel": "Movie.mkv",
+            }
+        ]
+        with (
+            mock.patch.object(media, "_persist_probed_items") as persist,
+            mock.patch.object(
+                media,
+                "build_metadata_source_index",
+                return_value={
+                    "sig:b2:8000000:face": media._metadata_reuse_snapshot(
+                        donor,
+                        want_duration=True,
+                        want_audio=False,
+                    )
+                },
+            ),
+        ):
+            leftover, reused_n = media.adopt_metadata_from_catalog(
+                need,
+                want_duration=True,
+                want_audio=False,
+            )
+        self.assertEqual(reused_n, 1)
+        self.assertEqual(leftover, [])
+        self.assertEqual(need[0]["duration"], 100.0)
+        self.assertTrue(need[0]["probe_duration_done"])
+        persist.assert_called_once()
+
+    def test_background_enrichment_skips_ffprobe_when_all_reused(self) -> None:
+        old_ffmpeg = STATE.get("ffmpeg")
+        old_videos = STATE.get("videos")
+        old_running = getattr(media._state, "_meta_running", False)
+        STATE["ffmpeg"] = "ffmpeg"
+        STATE["videos"] = [
+            {
+                "id": "todo",
+                "rel": "todo.mp4",
+                "name": "todo",
+                "size": 5_000_000,
+                "file_sig": "b2:5000000:zz",
+                "duration": None,
+            }
+        ]
+        media._state._meta_running = False
+        try:
+            with (
+                mock.patch.object(media, "probe_duration_enabled", return_value=True),
+                mock.patch.object(media, "probe_audio_enabled", return_value=False),
+                mock.patch.object(
+                    media,
+                    "adopt_metadata_from_catalog",
+                    return_value=([], 1),
+                ),
+                mock.patch.object(media, "enrich_metadata_parallel") as enrich,
+                mock.patch("vg.catalog.rebuild_indexes") as rebuild,
+            ):
+                media._bg_enrich_metadata()
+            enrich.assert_not_called()
+            rebuild.assert_called_once()
+            self.assertIn("复用", STATE.get("meta_progress") or "")
+        finally:
+            STATE["ffmpeg"] = old_ffmpeg
+            STATE["videos"] = old_videos
+            media._state._meta_running = old_running
+
+    def test_enrich_metadata_uses_half_cpu_worker_count(self) -> None:
+        with TemporaryDirectory() as td:
+            path = Path(td) / "v0.mp4"
+            path.write_bytes(b"video")
+            items = [
+                {
+                    "id": "v0",
+                    "name": "v0",
+                    "rel": path.name,
+                    "root": td,
+                    "_lib_root": td,
+                }
+            ]
+            old_ffmpeg = STATE.get("ffmpeg")
+            STATE["ffmpeg"] = "ffmpeg"
+            try:
+                with (
+                    mock.patch.object(media, "probe_duration_enabled", return_value=True),
+                    mock.patch.object(media, "probe_audio_enabled", return_value=False),
+                    mock.patch.object(media, "_item_probe_path", return_value=path),
+                    mock.patch.object(
+                        media,
+                        "probe_media_info",
+                        return_value={"ok": True, "duration": 3.0},
+                    ),
+                    mock.patch.object(media, "_persist_probed_items"),
+                    mock.patch.object(media, "meta_worker_count", return_value=4) as workers,
+                ):
+                    media.enrich_metadata_parallel(items, label="测试")
+                workers.assert_called_once_with(1)
+            finally:
+                STATE["ffmpeg"] = old_ffmpeg
+
+    def test_persist_probed_items_does_not_bump_lib_gen(self) -> None:
+        item = {
+            "id": "v1",
+            "rel": "v1.mp4",
+            "root": "D:/lib",
+            "_lib_root": "D:/lib",
+            "duration": 9.0,
+        }
+        with mock.patch("vg.disk_libs.save_library_items") as save:
+            media._persist_probed_items([item])
+        save.assert_called_once_with([item], bump_gen=False)
+
     def test_probe_progress_is_saved_incrementally(self) -> None:
         with TemporaryDirectory() as td:
             items = []
-            for i in range(12):
+            for i in range(60):
                 path = Path(td) / f"v{i}.mp4"
                 path.write_bytes(b"video")
                 items.append(
@@ -312,19 +485,19 @@ class MetadataSettingsTests(unittest.TestCase):
                         return_value={"ok": True, "duration": 3.0},
                     ),
                     mock.patch.object(media, "_persist_probed_items", side_effect=fake_persist) as persist,
-                    mock.patch.object(media, "thumb_worker_count", return_value=1),
+                    mock.patch.object(media, "meta_worker_count", return_value=1),
                 ):
                     media.enrich_metadata_parallel(items, label="测试")
                 self.assertGreaterEqual(persist.call_count, 2)
-                self.assertEqual(sum(len(b) for b in saved_batches), 12)
-                self.assertLess(max(len(b) for b in saved_batches), 12)
+                self.assertEqual(sum(len(b) for b in saved_batches), 60)
+                self.assertLess(max(len(b) for b in saved_batches), 60)
             finally:
                 STATE["ffmpeg"] = old_ffmpeg
 
     def test_partial_probe_is_kept_when_later_persist_fails(self) -> None:
         with TemporaryDirectory() as td:
             items = []
-            for i in range(6):
+            for i in range(30):
                 path = Path(td) / f"v{i}.mp4"
                 path.write_bytes(b"video")
                 items.append(
@@ -340,7 +513,7 @@ class MetadataSettingsTests(unittest.TestCase):
 
             def fake_persist(batch):
                 saved.extend(it["id"] for it in batch)
-                if len(saved) >= 5:
+                if len(saved) >= 25:
                     raise RuntimeError("disk full after first flush")
 
             old_ffmpeg = STATE.get("ffmpeg")
@@ -356,11 +529,11 @@ class MetadataSettingsTests(unittest.TestCase):
                         return_value={"ok": True, "duration": 3.0},
                     ),
                     mock.patch.object(media, "_persist_probed_items", side_effect=fake_persist),
-                    mock.patch.object(media, "thumb_worker_count", return_value=1),
+                    mock.patch.object(media, "meta_worker_count", return_value=1),
                 ):
                     with self.assertRaises(RuntimeError):
                         media.enrich_metadata_parallel(items, label="测试")
-                self.assertGreaterEqual(len(saved), 5)
+                self.assertGreaterEqual(len(saved), 25)
             finally:
                 STATE["ffmpeg"] = old_ffmpeg
 

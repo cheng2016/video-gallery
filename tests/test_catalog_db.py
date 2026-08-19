@@ -1,0 +1,140 @@
+# -*- coding: utf-8 -*-
+"""SQLite catalog: replace save, row UPSERT, and cross-cache probe donor."""
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from vg import catalog_db
+from vg.catalog_db import (
+    CATALOG_DB_NAME,
+    find_probe_donor,
+    load_catalog_videos,
+    read_catalog_counts,
+    save_catalog,
+    upsert_catalog_videos,
+)
+
+
+class CatalogDbTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.old_vg = catalog_db.VGDATA_DIR
+        catalog_db.VGDATA_DIR = self.base / "preview_cache"
+        catalog_db.VGDATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        catalog_db.VGDATA_DIR = self.old_vg
+        self._tmp.cleanup()
+
+    def _item(
+        self,
+        *,
+        vid: str,
+        rel: str,
+        size: int = 5_000_000,
+        file_sig: str = "",
+        duration: float | None = None,
+        bad: bool = False,
+    ) -> dict:
+        name = Path(rel).stem
+        out = {
+            "id": vid,
+            "name": name,
+            "filename": Path(rel).name,
+            "rel": rel,
+            "folder": str(Path(rel).parent).replace("\\", "/") if "/" in rel or "\\" in rel else "",
+            "ext": Path(rel).suffix.lower() or ".mp4",
+            "size": size,
+        }
+        if file_sig:
+            out["file_sig"] = file_sig
+        if duration is not None:
+            out["duration"] = duration
+            out["probe_duration_done"] = True
+        if bad:
+            out["bad"] = True
+        return out
+
+    def test_save_catalog_creates_sqlite_not_json(self) -> None:
+        root = self.base / "lib"
+        cache = self.base / "cache"
+        root.mkdir()
+        item = self._item(vid="aaaaaaaaaaaaaaaa", rel="a.mp4")
+        self.assertTrue(
+            save_catalog(cache, root, [item], file_count=1, folder_counts={"": 1})
+        )
+        self.assertTrue((cache / CATALOG_DB_NAME).is_file())
+        self.assertFalse((cache / "index.json").exists())
+        videos = load_catalog_videos(cache, root)
+        self.assertEqual(len(videos), 1)
+        self.assertEqual(videos[0]["id"], "aaaaaaaaaaaaaaaa")
+        count, folders = read_catalog_counts(cache)
+        self.assertEqual(count, 1)
+        self.assertEqual(folders, {"": 1})
+
+    def test_upsert_updates_probe_fields_without_losing_other_rows(self) -> None:
+        root = self.base / "lib"
+        cache = self.base / "cache"
+        root.mkdir()
+        a = self._item(vid="aaaaaaaaaaaaaaaa", rel="a.mp4")
+        b = self._item(vid="bbbbbbbbbbbbbbbb", rel="b.mp4")
+        save_catalog(cache, root, [a, b], file_count=2, folder_counts={"": 2})
+
+        a["duration"] = 12.5
+        a["probe_duration_done"] = True
+        n = upsert_catalog_videos(cache, root, [a], allow_insert=False)
+        self.assertEqual(n, 1)
+
+        by_rel = {v["rel"]: v for v in load_catalog_videos(cache, root)}
+        self.assertEqual(len(by_rel), 2)
+        self.assertEqual(by_rel["a.mp4"]["duration"], 12.5)
+        self.assertEqual(by_rel["b.mp4"]["id"], "bbbbbbbbbbbbbbbb")
+
+    def test_find_probe_donor_matches_sig_and_skips_bad(self) -> None:
+        root_a = self.base / "disk-a"
+        root_b = self.base / "disk-b"
+        cache_a = catalog_db.VGDATA_DIR / "A_hash"
+        cache_b = catalog_db.VGDATA_DIR / "B_hash"
+        root_a.mkdir()
+        root_b.mkdir()
+        cache_a.mkdir(parents=True)
+        cache_b.mkdir(parents=True)
+
+        donor = self._item(
+            vid="dddddddddddddddd",
+            rel="same.mp4",
+            size=8_000_000,
+            file_sig="b2:8000000:face",
+            duration=100.0,
+        )
+        bad = self._item(
+            vid="xxxxxxxxxxxxxxxx",
+            rel="same.mp4",
+            size=8_000_000,
+            file_sig="b2:8000000:face",
+            bad=True,
+        )
+        save_catalog(cache_a, root_a, [donor])
+        save_catalog(cache_b, root_b, [bad])
+
+        hit = find_probe_donor(file_sig="b2:8000000:face", skip_bad=True)
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit["duration"], 100.0)
+        self.assertFalse(hit.get("bad"))
+
+        by_name = find_probe_donor(
+            name_key="same",
+            size=8_000_000,
+            skip_bad=True,
+        )
+        self.assertIsNotNone(by_name)
+        assert by_name is not None
+        self.assertEqual(by_name.get("duration"), 100.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -46,6 +46,12 @@ def thumb_worker_count(total: int = 0, *, burst: bool = False) -> int:
         n = max(1, min(n, total))
     return n
 
+
+def meta_worker_count(total: int = 0) -> int:
+    """Full-CPU ffprobe pool — same burst sizing as first-scan thumbnails."""
+    return thumb_worker_count(total, burst=True)
+
+
 def _fmt_bytes(n: int) -> str:
     x = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):

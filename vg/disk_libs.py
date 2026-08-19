@@ -2,14 +2,13 @@
 """Keep recently opened disk indexes so history/stream still work after switching drives."""
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
 from pathlib import Path
 
 from vg.cache import ensure_cache_dir, save_index
-from vg.config import INDEX_NAME, VGDATA_DIR
+from vg.config import VGDATA_DIR
 from vg.schema import RUNTIME_ONLY_FIELDS, serialize_video_item
 from vg.state import STATE
 from vg.util import log
@@ -78,10 +77,11 @@ def item_belongs_to_root(item: dict, root: Path | str) -> bool:
 
 
 def read_root_library(root: Path | str) -> list[dict] | None:
-    """Read one per-disk catalog; prefer in-memory cache to avoid re-parsing JSON."""
+    """Read one per-disk catalog; prefer in-memory cache to avoid reopening SQLite."""
+    from vg.catalog_db import catalog_exists, catalog_mtime, load_catalog_videos
+
     root_s = _norm_root_str(root)
     cache = ensure_cache_dir(Path(root_s))
-    index_path = cache / INDEX_NAME
 
     # Live scan snapshot beats stale index while this root is being scanned.
     with _libs_lock:
@@ -94,13 +94,10 @@ def read_root_library(root: Path | str) -> list[dict] | None:
         if existing and existing.get("by_id") and existing.get("live"):
             return list(existing["by_id"].values())
 
-    if not index_path.is_file():
+    if not catalog_exists(cache):
         return None
 
-    try:
-        index_mtime = index_path.stat().st_mtime
-    except OSError:
-        index_mtime = 0
+    index_mtime = catalog_mtime(cache)
 
     with _libs_lock:
         existing = (STATE.get("disk_libs") or {}).get(root_s)
@@ -112,13 +109,8 @@ def read_root_library(root: Path | str) -> list[dict] | None:
         ):
             return list(existing["by_id"].values())
 
-    try:
-        payload = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        log(f"[索引] 读取失败 {index_path}: {e}")
-        return None
-    videos = payload.get("videos")
-    if not isinstance(videos, list):
+    videos = load_catalog_videos(cache, root_s)
+    if not videos:
         return None
     clean = [
         _disk_item(v, root_s, cache)
@@ -131,7 +123,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
 
 
 def store_live_library(root: Path | str, videos: list[dict]) -> None:
-    """Publish in-progress scan results into disk_libs without writing index.json.
+    """Publish in-progress scan results into disk_libs without writing the catalog.
 
     Lets other disks keep their indexes while the scanning disk becomes visible
     immediately in /api/tree and /api/videos.
@@ -167,7 +159,7 @@ def store_live_library(root: Path | str, videos: list[dict]) -> None:
 
 
 def sync_disk_lib_memory(root: Path | str, videos: list[dict]) -> None:
-    """Refresh in-memory disk_libs after index.json was written (clears live flag)."""
+    """Refresh in-memory disk_libs after the catalog was written (clears live flag)."""
     root_s = _norm_root_str(root)
     try:
         cache = ensure_cache_dir(Path(root_s))
@@ -186,10 +178,9 @@ def sync_disk_lib_memory(root: Path | str, videos: list[dict]) -> None:
             by_id[stamped.get("_thumb_id") or stamped["id"]] = stamped
     index_mtime = 0.0
     if cache is not None:
-        try:
-            index_mtime = (Path(cache) / INDEX_NAME).stat().st_mtime
-        except OSError:
-            index_mtime = 0.0
+        from vg.catalog_db import catalog_mtime
+
+        index_mtime = catalog_mtime(cache)
     _store_lib(root_s, cache, by_id, index_mtime=index_mtime)
 
 
@@ -219,7 +210,7 @@ def save_root_library(root: Path | str, videos: list[dict]) -> list[dict]:
     by_id = {v["id"]: v for v in clean if v.get("id")}
     with _libs_lock:
         if not save_index(cache, Path(root_s), list(by_id.values())):
-            raise OSError(f"保存片库索引失败: {cache / INDEX_NAME}")
+            raise OSError(f"保存片库索引失败: {cache}")
         _store_lib(root_s, cache, by_id)
     return list(by_id.values())
 
@@ -251,51 +242,132 @@ def save_libraries_by_root(
     return saved
 
 
-def save_library_item(item: dict, *, allow_insert: bool = False) -> bool:
+def save_library_item(
+    item: dict,
+    *,
+    allow_insert: bool = False,
+    bump_gen: bool = True,
+) -> bool:
     """Persist one changed item without touching other disks.
 
     Existing records are updated by source id or relative path. Insertion is
     opt-in so a late metadata/thumbnail worker cannot resurrect an item that
     was deleted while that worker was running.
+
+    bump_gen=False keeps the API response cache valid during bulk background
+    probes; callers should advance lib_gen once when the batch finishes.
     """
+    from vg.catalog_db import upsert_catalog_videos
+
     raw_root = (item.get("_lib_root") or item.get("root") or "").strip()
     if not raw_root or not item.get("id"):
         return False
     root_s = _norm_root_str(raw_root)
     cache = ensure_cache_dir(Path(root_s))
     with _libs_lock:
-        current: list[dict] = []
-        index_path = cache / INDEX_NAME
-        try:
-            if index_path.is_file():
-                payload = json.loads(index_path.read_text(encoding="utf-8"))
-                if isinstance(payload.get("videos"), list):
-                    current = [v for v in payload["videos"] if isinstance(v, dict)]
-        except (OSError, json.JSONDecodeError) as e:
-            log(f"[索引] 读取旧索引失败，未覆盖 {root_s}: {e}")
+        n = upsert_catalog_videos(
+            cache,
+            root_s,
+            [item],
+            allow_insert=allow_insert,
+        )
+        if n <= 0:
             return False
-
+        # Keep memory archive in sync without a full reload.
+        existing = (STATE.get("disk_libs") or {}).get(root_s)
         source_id = (item.get("_thumb_id") or item.get("id") or "").strip()
-        rel = (item.get("rel") or "").replace("\\", "/").strip("/").casefold()
-        replaced = False
-        for i, old in enumerate(current):
-            old_rel = (old.get("rel") or "").replace("\\", "/").strip("/").casefold()
-            if old.get("id") == source_id or (rel and old_rel == rel):
-                current[i] = item
-                replaced = True
-                break
-        if not replaced and allow_insert:
-            current.append(item)
-            replaced = True
-        if not replaced:
-            return False
-        save_root_library(root_s, current)
-        # Single-item metadata/thumbnail updates do not rebuild STATE, but
-        # they still change what /api/videos serializes.  Advance the same
-        # generation used by the response cache so the next request observes
-        # the persisted row.
-        STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+        stamped = _disk_item(item, root_s, cache)
+        from vg.catalog_db import catalog_mtime
+
+        if existing and isinstance(existing.get("by_id"), dict) and source_id:
+            by_id = existing["by_id"]
+            if source_id in by_id:
+                by_id[source_id] = stamped
+            else:
+                rel = (item.get("rel") or "").replace("\\", "/").strip("/").casefold()
+                replaced = False
+                for key, old in list(by_id.items()):
+                    old_rel = (old.get("rel") or "").replace("\\", "/").strip("/").casefold()
+                    if old.get("id") == source_id or (rel and old_rel == rel):
+                        by_id.pop(key, None)
+                        by_id[source_id] = stamped
+                        replaced = True
+                        break
+                if not replaced and allow_insert:
+                    by_id[source_id] = stamped
+            existing["index_mtime"] = catalog_mtime(cache)
+            existing["live"] = False
+        elif allow_insert and source_id:
+            _store_lib(root_s, cache, {source_id: stamped}, index_mtime=catalog_mtime(cache))
+        if bump_gen:
+            STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
     return True
+
+
+def save_library_items(
+    items: list[dict],
+    *,
+    allow_insert: bool = False,
+    bump_gen: bool = True,
+) -> int:
+    """Persist many items with one SQLite UPSERT transaction per owning root."""
+    from vg.catalog_db import catalog_mtime, upsert_catalog_videos
+
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        raw_root = (item.get("_lib_root") or item.get("root") or "").strip()
+        if not raw_root:
+            continue
+        try:
+            root_s = _norm_root_str(raw_root)
+        except Exception:
+            root_s = raw_root
+        groups.setdefault(root_s, []).append(item)
+    if not groups:
+        return 0
+
+    saved = 0
+    for root_s, batch in groups.items():
+        cache = ensure_cache_dir(Path(root_s))
+        with _libs_lock:
+            n = upsert_catalog_videos(
+                cache,
+                root_s,
+                batch,
+                allow_insert=allow_insert,
+            )
+            if n <= 0:
+                continue
+            saved += n
+            existing = (STATE.get("disk_libs") or {}).get(root_s)
+            if existing and isinstance(existing.get("by_id"), dict):
+                by_id = existing["by_id"]
+                for item in batch:
+                    source_id = (item.get("_thumb_id") or item.get("id") or "").strip()
+                    if not source_id:
+                        continue
+                    stamped = _disk_item(item, root_s, cache)
+                    if source_id in by_id:
+                        by_id[source_id] = stamped
+                        continue
+                    rel = (item.get("rel") or "").replace("\\", "/").strip("/").casefold()
+                    replaced = False
+                    for key, old in list(by_id.items()):
+                        old_rel = (old.get("rel") or "").replace("\\", "/").strip("/").casefold()
+                        if old.get("id") == source_id or (rel and old_rel == rel):
+                            by_id.pop(key, None)
+                            by_id[source_id] = stamped
+                            replaced = True
+                            break
+                    if not replaced and allow_insert:
+                        by_id[source_id] = stamped
+                existing["index_mtime"] = catalog_mtime(cache)
+                existing["live"] = False
+            if bump_gen:
+                STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+    return saved
 
 
 def archive_current_library() -> None:
@@ -384,12 +456,11 @@ def _store_lib(
     *,
     index_mtime: float | None = None,
 ) -> None:
+    from vg.catalog_db import catalog_mtime
+
     stamp_lib_meta(list(by_id.values()), root=root_s, cache=cache)
     if index_mtime is None and cache:
-        try:
-            index_mtime = (Path(cache) / INDEX_NAME).stat().st_mtime
-        except OSError:
-            index_mtime = 0
+        index_mtime = catalog_mtime(cache)
     with _libs_lock:
         libs = STATE.setdefault("disk_libs", {})
         libs[root_s] = {
@@ -403,7 +474,9 @@ def _store_lib(
 
 
 def load_library_from_index(root: Path | str) -> bool:
-    """Load a disk's saved index into disk_libs without switching the active UI root."""
+    """Load a disk's saved catalog into disk_libs without switching the active UI root."""
+    from vg.catalog_db import catalog_exists, catalog_mtime, load_catalog_videos
+
     try:
         root_p = Path(root).expanduser().resolve()
     except OSError:
@@ -422,13 +495,9 @@ def load_library_from_index(root: Path | str) -> bool:
         return True
 
     cache = ensure_cache_dir(root_p)
-    index_path = cache / INDEX_NAME
-    if not index_path.is_file():
+    if not catalog_exists(cache):
         return False
-    try:
-        index_mtime = index_path.stat().st_mtime
-    except OSError:
-        index_mtime = 0
+    index_mtime = catalog_mtime(cache)
     with _libs_lock:
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         if (
@@ -437,15 +506,7 @@ def load_library_from_index(root: Path | str) -> bool:
             and float(existing.get("index_mtime") or 0) == index_mtime
         ):
             return True
-    try:
-        data = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        log(f"[跨盘] 读索引失败 {index_path}: {e}")
-        return False
-    videos = data.get("videos")
-    if not isinstance(videos, list):
-        return False
-    # Normalize legacy records on every load; actual mounted path is canonical.
+    videos = load_catalog_videos(cache, root_s)
     clean = []
     for raw in videos:
         if not isinstance(raw, dict) or not raw.get("id"):
@@ -457,13 +518,8 @@ def load_library_from_index(root: Path | str) -> bool:
     by_id = {v["id"]: v for v in clean}
     if not by_id:
         return False
-    try:
-        final_mtime = index_path.stat().st_mtime
-    except OSError:
-        final_mtime = index_mtime
+    final_mtime = catalog_mtime(cache)
     if final_mtime != index_mtime:
-        # Atomic writer replaced the file while it was being read. Do not tag
-        # the old content with the new mtime; the next lookup will reload it.
         return False
     _store_lib(root_s, cache, by_id, index_mtime=final_mtime)
     log(f"[跨盘] 已加载历史盘索引: {root_s}（{len(by_id)} 部）")
@@ -471,7 +527,7 @@ def load_library_from_index(root: Path | str) -> bool:
 
 
 def ensure_cached_indexes_scanned() -> None:
-    """One-time: pull indexes from program preview_cache and (if enabled) disk caches."""
+    """One-time: pull catalogs from program preview_cache and (if enabled) disk caches."""
     global _scanned_caches
     if _scanned_caches:
         return
@@ -480,17 +536,14 @@ def ensure_cached_indexes_scanned() -> None:
             return
         _scanned_caches = True
     try:
+        from vg.catalog_db import CATALOG_DB_NAME, catalog_exists, read_catalog_root
         from vg.config import THUMB_DIR_NAME
         from vg.privacy import cache_location
 
         seen_roots: set[str] = set()
         if VGDATA_DIR.is_dir():
-            for index_path in VGDATA_DIR.glob(f"*/{INDEX_NAME}"):
-                try:
-                    data = json.loads(index_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                root_raw = (data.get("root") or "").strip()
+            for db_path in VGDATA_DIR.glob(f"*/{CATALOG_DB_NAME}"):
+                root_raw = read_catalog_root(db_path.parent)
                 if not root_raw:
                     continue
                 try:
@@ -505,14 +558,13 @@ def ensure_cached_indexes_scanned() -> None:
                 seen_roots.add(key)
                 load_library_from_index(root_p)
 
-        # 盘内缓存模式：挂载列表里的盘也可能只有 .video_gallery_cache
         if cache_location() == "disk":
             for raw in list(STATE.get("mounted_roots") or []):
                 try:
                     root_p = Path(raw).expanduser().resolve()
                     if not root_p.is_dir():
                         continue
-                    if not (root_p / THUMB_DIR_NAME / INDEX_NAME).is_file():
+                    if not catalog_exists(root_p / THUMB_DIR_NAME):
                         continue
                     key = str(root_p).lower()
                     if key in seen_roots:
@@ -529,9 +581,11 @@ def discover_indexed_roots() -> list[str]:
     """Discover online roots that already have a persisted catalog.
 
     This is the startup fallback when ``prefs.mounted_roots`` is incomplete.
-    Program-cache indexes contain their source root, so a previously scanned
+    Program-cache catalogs contain their source root, so a previously scanned
     disk can be mounted again without rescanning it first.
     """
+    from vg.catalog_db import CATALOG_DB_NAME, catalog_exists, read_catalog_root
+
     roots: list[str] = []
     seen: set[str] = set()
 
@@ -552,31 +606,21 @@ def discover_indexed_roots() -> list[str]:
 
     try:
         if VGDATA_DIR.is_dir():
-            for index_path in VGDATA_DIR.glob(f"*/{INDEX_NAME}"):
-                try:
-                    payload = json.loads(index_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if isinstance(payload, dict):
-                    add(payload.get("root"))
+            for db_path in VGDATA_DIR.glob(f"*/{CATALOG_DB_NAME}"):
+                add(read_catalog_root(db_path.parent))
     except OSError as e:
         log(f"[多盘] 发现缓存片库失败: {e}")
 
-    # In disk-cache mode the program cache may not contain the index. Checking
-    # drive roots is cheap and avoids recursively scanning whole disks.
     try:
         from vg.config import THUMB_DIR_NAME
         from vg.drives import list_ready_drives
 
         for drive in list_ready_drives():
-            index_path = drive / THUMB_DIR_NAME / INDEX_NAME
-            if not index_path.is_file():
+            cache = drive / THUMB_DIR_NAME
+            if not catalog_exists(cache):
                 continue
-            try:
-                payload = json.loads(index_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            add(payload.get("root") if isinstance(payload, dict) else drive)
+            root_raw = read_catalog_root(cache)
+            add(root_raw if root_raw else drive)
     except OSError:
         pass
 

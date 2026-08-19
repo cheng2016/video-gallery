@@ -2,13 +2,12 @@
 """Thumbnail identity, cache-dir listing, and cross-disk reuse."""
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from pathlib import Path
 
 from vg.cache import list_thumb_ids, thumb_file_ready, thumb_path
-from vg.config import INDEX_NAME, MIN_VIDEO_FILE_BYTES, THUMB_EXT, VGDATA_DIR
+from vg.config import MIN_VIDEO_FILE_BYTES, THUMB_EXT
 from vg.duplicates import duplicate_name_key, video_identity
 from vg.state import STATE
 from vg.util import log
@@ -103,20 +102,13 @@ def _iter_memory_videos() -> list[dict]:
 
 
 def _iter_preview_cache_index_videos() -> list[tuple[dict, Path]]:
+    """Yield (video, cache_dir) from all known SQLite catalogs."""
+    from vg.catalog_db import iter_catalog_cache_dirs, load_catalog_videos
+
     rows: list[tuple[dict, Path]] = []
     try:
-        if not VGDATA_DIR.is_dir():
-            return rows
-        for index_path in VGDATA_DIR.glob(f"*/{INDEX_NAME}"):
-            cache = index_path.parent
-            try:
-                payload = json.loads(index_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            videos = payload.get("videos") if isinstance(payload, dict) else None
-            if not isinstance(videos, list):
-                continue
-            for video in videos:
+        for cache in iter_catalog_cache_dirs():
+            for video in load_catalog_videos(cache):
                 if isinstance(video, dict):
                     rows.append((video, cache))
     except OSError:

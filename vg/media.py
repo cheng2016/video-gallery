@@ -34,9 +34,9 @@ from vg.util import (
     _clear_path_attrs_windows,
     format_duration,
     log,
+    meta_worker_count,
     resolve_under_root,
     resolve_video_path,
-    thumb_worker_count,
 )
 
 def find_ffmpeg() -> str | None:
@@ -93,10 +93,18 @@ def probe_media_info(
         for entry in entries:
             cmd.extend(["-show_entries", entry])
         cmd.extend(["-of", "json", str(path)])
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if sys.platform == "win32"
+            else 0
+        )
+        # Bulk probes run after scan; keep them below the web UI / player.
+        if sys.platform == "win32":
+            creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
         r = subprocess.run(
             cmd,
             capture_output=True, text=True, timeout=25,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
+            creationflags=creationflags,
         )
         err = (r.stderr or "").strip()
         if r.returncode != 0:
@@ -348,17 +356,36 @@ def _audio_already_known(item: dict) -> bool:
     return "audio_codec" in item
 
 
+def _probe_scope_label(*, want_duration: bool, want_audio: bool) -> str:
+    """Human-readable probe target for logs / UI progress."""
+    if want_duration and want_audio:
+        return "时长+声音"
+    if want_duration:
+        return "时长"
+    if want_audio:
+        return "声音"
+    return "无"
+
+
+def _probe_cpu_label(workers: int) -> str:
+    cpus = max(1, os.cpu_count() or 1)
+    return f"{workers} 线程 / {cpus} 逻辑核"
+
+
 def _persist_probed_items(items: list[dict]) -> None:
-    """Write probed rows to index.json immediately so a mid-run exit keeps progress."""
+    """UPSERT probed rows into SQLite so a mid-run exit keeps progress.
+
+    Batches by disk (one transaction each). Does not bump lib_gen — callers bump
+    once via rebuild_indexes when the whole enrichment finishes.
+    """
     if not items:
         return
-    from vg.disk_libs import save_library_item
+    from vg.disk_libs import save_library_items
 
-    for item in items:
-        try:
-            save_library_item(item)
-        except Exception as e:
-            log(f"[元数据] 中途保存失败: {e}")
+    try:
+        save_library_items(items, bump_gen=False)
+    except Exception as e:
+        log(f"[元数据] 中途保存失败: {e}")
 
 
 def _needs_metadata_probe(
@@ -386,6 +413,186 @@ def _needs_metadata_probe(
     return True
 
 
+def _metadata_reuse_snapshot(
+    video: dict,
+    *,
+    want_duration: bool,
+    want_audio: bool,
+) -> dict | None:
+    """Copyable probe fields from a known good catalog row. Never copies bad marks."""
+    if video.get("bad"):
+        return None
+    out: dict = {}
+    if want_duration and _duration_already_known(video):
+        dur = video.get("duration")
+        try:
+            if dur is not None and float(dur) > 0:
+                out["duration"] = float(dur)
+                if video.get("duration_h"):
+                    out["duration_h"] = video["duration_h"]
+        except (TypeError, ValueError):
+            if video.get("duration_h"):
+                out["duration_h"] = video["duration_h"]
+        out["probe_duration_done"] = True
+    if want_audio and _audio_already_known(video):
+        out["audio_codec"] = (video.get("audio_codec") or "").lower().strip()
+        if "audio_hard" in video:
+            out["audio_hard"] = bool(video.get("audio_hard"))
+        else:
+            out["audio_hard"] = bool(out["audio_codec"]) and out["audio_codec"] not in BROWSER_FRIENDLY_AUDIO
+        out["probe_audio_done"] = True
+    if not out:
+        return None
+    out["probe_ver"] = video.get("probe_ver") if video.get("probe_ver") is not None else PROBE_META_VER
+    return out
+
+
+def build_metadata_source_index(
+    *,
+    want_duration: bool,
+    want_audio: bool,
+) -> dict[str, dict]:
+    """Map file_sig / name+size -> probed fields from in-memory catalogs only."""
+    from vg.thumbs import _iter_memory_videos, thumb_content_keys
+
+    index: dict[str, dict] = {}
+
+    def richer(a: dict, b: dict) -> dict:
+        merged = dict(a)
+        for key, value in b.items():
+            if key not in merged or (key == "duration" and value and not merged.get(key)):
+                merged[key] = value
+        return merged
+
+    def register(video: dict) -> None:
+        snap = _metadata_reuse_snapshot(
+            video,
+            want_duration=want_duration,
+            want_audio=want_audio,
+        )
+        if not snap:
+            return
+        for key in thumb_content_keys(video):
+            prev = index.get(key)
+            index[key] = snap if prev is None else richer(prev, snap)
+
+    for video in _iter_memory_videos():
+        register(video)
+    return index
+
+
+def _lookup_probe_snapshot(
+    item: dict,
+    sources: dict[str, dict],
+    *,
+    want_duration: bool,
+    want_audio: bool,
+) -> dict | None:
+    """Memory hit first, then indexed SQLite cross-cache donor lookup."""
+    from vg.thumbs import thumb_content_keys
+
+    for key in thumb_content_keys(item):
+        found = sources.get(key)
+        if found is not None:
+            return found
+
+    from vg.catalog_db import find_probe_donor
+    from vg.duplicates import duplicate_name_key
+
+    try:
+        size = int(item.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    donor = find_probe_donor(
+        file_sig=str(item.get("file_sig") or "").strip(),
+        name_key=duplicate_name_key(item),
+        size=size,
+        skip_bad=True,
+    )
+    if not donor:
+        return None
+    return _metadata_reuse_snapshot(
+        donor,
+        want_duration=want_duration,
+        want_audio=want_audio,
+    )
+
+
+def reuse_existing_metadata(
+    item: dict,
+    sources: dict[str, dict],
+    *,
+    want_duration: bool,
+    want_audio: bool,
+) -> bool:
+    """Adopt duration/audio from another disk's catalog row. No ffprobe."""
+    hit = _lookup_probe_snapshot(
+        item,
+        sources,
+        want_duration=want_duration,
+        want_audio=want_audio,
+    )
+    if hit is None:
+        return False
+
+    applied = False
+    if want_duration and not _duration_already_known(item):
+        if "duration" in hit:
+            item["duration"] = hit["duration"]
+        if hit.get("duration_h"):
+            item["duration_h"] = hit["duration_h"]
+        if hit.get("probe_duration_done") or hit.get("duration"):
+            item["probe_duration_done"] = True
+            applied = True
+    if want_audio and not _audio_already_known(item):
+        if "audio_codec" in hit or hit.get("probe_audio_done"):
+            item["audio_codec"] = hit.get("audio_codec") or ""
+            if "audio_hard" in hit:
+                item["audio_hard"] = bool(hit["audio_hard"])
+            item["probe_audio_done"] = True
+            applied = True
+    if not applied:
+        return False
+    item["probe_ver"] = hit.get("probe_ver") if hit.get("probe_ver") is not None else PROBE_META_VER
+    return not _needs_metadata_probe(
+        item,
+        want_duration=want_duration,
+        want_audio=want_audio,
+    )
+
+
+def adopt_metadata_from_catalog(
+    need: list[dict],
+    *,
+    want_duration: bool,
+    want_audio: bool,
+) -> tuple[list[dict], int]:
+    """Reuse cross-disk probe results. Returns (still_need_ffprobe, reused_count)."""
+    if not need:
+        return [], 0
+    sources = build_metadata_source_index(
+        want_duration=want_duration,
+        want_audio=want_audio,
+    )
+    leftover: list[dict] = []
+    reused: list[dict] = []
+    for item in need:
+        if reuse_existing_metadata(
+            item,
+            sources,
+            want_duration=want_duration,
+            want_audio=want_audio,
+        ):
+            reused.append(item)
+        else:
+            leftover.append(item)
+    if reused:
+        _persist_probed_items(reused)
+        scope = _probe_scope_label(want_duration=want_duration, want_audio=want_audio)
+        log(f"[元数据] 跨盘复用 {len(reused)} 个（{scope}），无需重新 ffprobe")
+    return leftover, len(reused)
+
+
 def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tuple[int, int]:
     """并行 ffprobe：补时长 + 损坏标记。返回 (成功, 失败)。"""
     ffmpeg = STATE.get("ffmpeg")
@@ -396,8 +603,11 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
     if not include_duration and not include_audio:
         return 0, 0
     total = len(items)
-    workers = max(1, min(4, thumb_worker_count(total)))
-    STATE["meta_progress"] = f"{label}探测 0/{total}（{workers} 线程）…"
+    workers = meta_worker_count(total)
+    scope = _probe_scope_label(want_duration=include_duration, want_audio=include_audio)
+    cpu = _probe_cpu_label(workers)
+    STATE["meta_progress"] = f"{label}探测{scope} 0/{total}（{cpu}）…"
+    log(f"[元数据] {label}探测{scope}：共 {total} 个，占用 {cpu}")
     ok_n = fail_n = done = 0
     lock = threading.Lock()
 
@@ -441,7 +651,7 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
         return item, bool(info.get("ok")), name
 
     dirty: list[dict] = []
-    flush_every = 5
+    flush_every = 40
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(one, it) for it in items]
@@ -458,9 +668,15 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
                     if len(dirty) >= flush_every or done == total:
                         flush_now = dirty
                         dirty = []
-                    STATE["meta_progress"] = f"{label}探测 {done}/{total}（可读 {ok_n}，异常 {fail_n}）…"
+                    STATE["meta_progress"] = (
+                        f"{label}探测{scope} {done}/{total}"
+                        f"（可读 {ok_n}，异常 {fail_n}，{cpu}）…"
+                    )
                     if done % 40 == 0 or done == total:
-                        log(f"[元数据] ({done}/{total}) {'OK' if ok else '异常'} {name}")
+                        log(
+                            f"[元数据] ({done}/{total}) {'OK' if ok else '异常'}"
+                            f" [{scope}] {name}"
+                        )
                 if flush_now:
                     _persist_probed_items(flush_now)
     finally:
@@ -502,17 +718,40 @@ def _bg_enrich_metadata() -> None:
                 want_audio=want_audio,
             )
         ]
+        need, reused_n = adopt_metadata_from_catalog(
+            need,
+            want_duration=want_duration,
+            want_audio=want_audio,
+        )
         if not need:
-            STATE["meta_progress"] = ""
+            if reused_n:
+                rebuild_indexes(list(STATE.get("videos") or []))
+                scope = _probe_scope_label(
+                    want_duration=want_duration,
+                    want_audio=want_audio,
+                )
+                STATE["meta_progress"] = f"元数据完成：跨盘复用 {reused_n}（{scope}）"
+                log(f"[元数据] 完成：全部跨盘复用 {reused_n}（{scope}）")
+            else:
+                STATE["meta_progress"] = ""
             return
-        log(f"[元数据] 后台探测 {len(need)} 个（已有时长/音频的会跳过）…")
+        tip = f"，跨盘已复用 {reused_n}" if reused_n else ""
+        scope = _probe_scope_label(want_duration=want_duration, want_audio=want_audio)
+        log(
+            f"[元数据] 后台探测{scope}：待 ffprobe {len(need)} 个"
+            f"（本盘已缓存的会跳过{tip}）…"
+        )
         ok_n, fail_n = enrich_metadata_parallel(need, label="后台")
         current = list(STATE.get("videos") or [])
+        # Incremental batches already UPSERTed; one catalog rebuild
+        # advances lib_gen. Do NOT re-save every probed row here — that used to
+        # rewrite the whole catalog thousands of times after "完成".
         rebuild_indexes(current)
-        # Incremental saves already happened; one last pass covers a short tail.
-        _persist_probed_items(need)
-        STATE["meta_progress"] = f"元数据完成：可读 {ok_n}，异常 {fail_n}"
-        log(f"[元数据] 完成：可读 {ok_n}，异常 {fail_n}")
+        reuse_tip = f"，复用 {reused_n}" if reused_n else ""
+        STATE["meta_progress"] = (
+            f"元数据完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}"
+        )
+        log(f"[元数据] 完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}")
     except Exception as e:
         STATE["meta_progress"] = f"元数据探测失败: {e}"
         log(f"[元数据] 失败: {e}")

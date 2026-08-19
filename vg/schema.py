@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Shared video-item data contract and index serialization rules.
 
-Feature modules may add derived runtime fields, but every ``index.json`` writer
+Feature modules may add derived runtime fields, but every catalog writer
 must pass through :func:`serialize_video_item`.  Unknown persisted fields are
 kept for forward compatibility; only fields explicitly declared runtime-only
 are removed.
@@ -74,7 +74,7 @@ class VideoItem(TypedDict, total=False):
     episodes: list[dict[str, Any]]
 
 
-# This is the single source of truth for fields that must never enter index.json.
+# This is the single source of truth for fields that must never enter the catalog.
 RUNTIME_ONLY_FIELDS = frozenset({
     "_q",
     "_thumb_id",

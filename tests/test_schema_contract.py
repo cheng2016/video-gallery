@@ -2,13 +2,13 @@
 """Shared video schema and persistence contract tests."""
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from vg.cache import save_index
-from vg.schema import INDEX_SCHEMA_VERSION, RUNTIME_ONLY_FIELDS, serialize_video_item
+from vg.catalog_db import CATALOG_DB_NAME, load_catalog_videos, read_catalog_counts, read_catalog_root
+from vg.schema import RUNTIME_ONLY_FIELDS, serialize_video_item
 
 
 class VideoSchemaContractTests(unittest.TestCase):
@@ -67,15 +67,16 @@ class VideoSchemaContractTests(unittest.TestCase):
             root.mkdir()
 
             self.assertTrue(save_index(cache, root, [self.item()]))
-            payload = json.loads((cache / "index.json").read_text(encoding="utf-8"))
-            row = payload["videos"][0]
+            self.assertTrue((cache / CATALOG_DB_NAME).is_file())
+            row = load_catalog_videos(cache, root)[0]
+            file_count, folder_counts = read_catalog_counts(cache)
 
-            self.assertEqual(payload["schema_ver"], INDEX_SCHEMA_VERSION)
+            self.assertEqual(read_catalog_root(cache), str(root.resolve()))
             self.assertEqual(row["id"], "source-id")
             self.assertTrue(RUNTIME_ONLY_FIELDS.isdisjoint(row))
             self.assertIn("custom_future_field", row)
-            self.assertIn("folder_counts", payload)
-            self.assertIn("file_count", payload)
+            self.assertIsNotNone(folder_counts)
+            self.assertIsNotNone(file_count)
 
 
 if __name__ == "__main__":

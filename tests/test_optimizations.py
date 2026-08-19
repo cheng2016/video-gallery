@@ -2,7 +2,6 @@
 """Regression tests for index, scan and API hot-path hardening."""
 from __future__ import annotations
 
-import json
 import tempfile
 import threading
 import unittest
@@ -10,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from vg.cache import save_index
+from vg.catalog_db import CATALOG_DB_NAME, load_catalog_videos
 from vg.scan import _file_fingerprint
 from vg.state import STATE
 
@@ -42,8 +42,9 @@ class IndexWriteTests(unittest.TestCase):
 
             self.assertEqual(len(results), 8)
             self.assertTrue(all(results))
-            payload = json.loads((cache / "index.json").read_text(encoding="utf-8"))
-            self.assertEqual(len(payload["videos"]), 1)
+            self.assertTrue((cache / CATALOG_DB_NAME).is_file())
+            videos = load_catalog_videos(cache, root)
+            self.assertEqual(len(videos), 1)
             self.assertFalse(list(cache.glob("*.tmp")))
 
 

@@ -23,6 +23,16 @@ class ThumbnailSchedulingTests(unittest.TestCase):
             self.assertEqual(thumb_worker_count(1), 1)
             self.assertEqual(thumb_worker_count(1, burst=True), 1)
 
+    def test_meta_worker_count_matches_thumb_burst(self) -> None:
+        from vg.util import meta_worker_count
+
+        with mock.patch("vg.util.os.cpu_count", return_value=16):
+            self.assertEqual(meta_worker_count(500), 16)
+        with mock.patch("vg.util.os.cpu_count", return_value=2):
+            self.assertEqual(meta_worker_count(500), 2)
+        with mock.patch("vg.util.os.cpu_count", return_value=16):
+            self.assertEqual(meta_worker_count(3), 3)
+
     def test_background_ffmpeg_is_single_thread_and_low_priority(self) -> None:
         with TemporaryDirectory() as td:
             base = Path(td)
