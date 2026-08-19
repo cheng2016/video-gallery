@@ -30,6 +30,19 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn("&defer=1", html)
         self.assertNotIn("dataset.retried", html)
 
+    def test_feedback_and_probe_preferences_live_in_settings(self) -> None:
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        header = html.split('<div class="header-actions">', 1)[1].split("</header>", 1)[0]
+        settings = html.split('<div class="modal" id="privacyModal">', 1)[1].split(
+            '<div class="modal" id="cleanupModal">', 1
+        )[0]
+
+        self.assertIn('id="settingsBtn"', header)
+        self.assertNotIn('id="feedbackBtn"', header)
+        self.assertIn('id="probeVideoDuration"', settings)
+        self.assertIn('id="probeVideoAudio"', settings)
+        self.assertIn("反馈问题", settings)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,7 @@ _jobs: dict[str, _ThumbJob] = {}
 _jobs_lock = threading.Lock()
 _start_lock = threading.Lock()
 _sequence = itertools.count()
-_workers_started = False
+_worker_n = 0
 _foreground_until = 0.0
 
 
@@ -91,20 +91,22 @@ def _worker() -> None:
             _queue.task_done()
 
 
-def _ensure_workers() -> None:
-    global _workers_started
-    if _workers_started:
-        return
+def ensure_thumbnail_workers(n: int | None = None) -> None:
+    """Start daemon workers; later burst scans may expand the pool, never shrink it."""
+    global _worker_n
+    want = max(1, int(n) if n is not None else thumb_worker_count())
     with _start_lock:
-        if _workers_started:
-            return
-        for index in range(thumb_worker_count()):
+        while _worker_n < want:
+            _worker_n += 1
             threading.Thread(
                 target=_worker,
                 daemon=True,
-                name=f"thumb-worker-{index + 1}",
+                name=f"thumb-worker-{_worker_n}",
             ).start()
-        _workers_started = True
+
+
+def _ensure_workers() -> None:
+    ensure_thumbnail_workers()
 
 
 def submit_thumbnail_job(

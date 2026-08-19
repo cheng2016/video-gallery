@@ -17,7 +17,12 @@ from pathlib import Path
 from vg.cache import (
     thumb_path,
 )
-from vg.privacy import pack_thumb_bytes, unpack_thumb_bytes
+from vg.privacy import (
+    pack_thumb_bytes,
+    probe_audio_enabled,
+    probe_duration_enabled,
+    unpack_thumb_bytes,
+)
 from vg.config import (
     BROWSER_FRIENDLY_AUDIO,
     MIN_VIDEO_FILE_BYTES,
@@ -65,22 +70,31 @@ def probe_duration(ffmpeg: str, path: Path) -> float | None:
     return float(dur) if dur else None
 
 
-def probe_media_info(ffmpeg: str, path: Path) -> dict:
-    """ffprobe 轻量检测：视频流 + 时长 + 首条音轨编码。"""
+def probe_media_info(
+    ffmpeg: str,
+    path: Path,
+    *,
+    include_duration: bool = True,
+    include_audio: bool = True,
+) -> dict:
+    """ffprobe detection, limited to the metadata dimensions requested."""
     if not path or not path.is_file():
         return {"ok": False, "err": "文件不存在"}
     ffprobe = _ffprobe_path(ffmpeg)
     if not ffprobe:
         return {"ok": False, "err": "未找到 ffprobe"}
     try:
+        entries = ["stream=index,codec_type"]
+        if include_audio:
+            entries[0] += ",codec_name"
+        if include_duration:
+            entries.append("format=duration")
+        cmd = [ffprobe, "-v", "error"]
+        for entry in entries:
+            cmd.extend(["-show_entries", entry])
+        cmd.extend(["-of", "json", str(path)])
         r = subprocess.run(
-            [
-                ffprobe, "-v", "error",
-                "-show_entries", "stream=index,codec_type,codec_name",
-                "-show_entries", "format=duration",
-                "-of", "json",
-                str(path),
-            ],
+            cmd,
             capture_output=True, text=True, timeout=25,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
         )
@@ -100,21 +114,21 @@ def probe_media_info(ffmpeg: str, path: Path) -> dict:
                 audio_codec = cname
         if not has_video:
             return {"ok": False, "err": "无视频流"}
-        dur = None
+        result = {"ok": True}
         fmt = payload.get("format") or {}
-        if fmt.get("duration"):
+        if include_duration and fmt.get("duration"):
             try:
                 d = float(fmt["duration"])
                 if d > 0:
-                    dur = d
+                    result["duration"] = d
             except (TypeError, ValueError):
                 pass
-        return {
-            "ok": True,
-            "duration": dur,
-            "audio_codec": audio_codec,
-            "audio_hard": bool(audio_codec) and audio_codec not in BROWSER_FRIENDLY_AUDIO,
-        }
+        if include_audio:
+            result["audio_codec"] = audio_codec
+            result["audio_hard"] = (
+                bool(audio_codec) and audio_codec not in BROWSER_FRIENDLY_AUDIO
+            )
+        return result
     except subprocess.TimeoutExpired:
         return {"ok": False, "err": "探测超时"}
     except Exception as e:
@@ -136,6 +150,7 @@ def make_thumbnail(
     force: bool = False,
     *,
     background: bool = False,
+    burst: bool = False,
 ) -> bool:
     """截帧写入预览图 out（.vgt；按隐私设置加密或明文）。有效缓存则跳过；force 或损坏则重建。"""
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -171,7 +186,8 @@ def make_thumbnail(
             except OSError:
                 pass
             try:
-                thread_args = ["-threads", "1"] if background else []
+                polite = background and not burst
+                thread_args = ["-threads", "1"] if (background or burst) else []
                 cmd = [
                     ffmpeg, "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
                     *thread_args, "-ss", str(ss), "-i", str(video),
@@ -180,7 +196,7 @@ def make_thumbnail(
                     "-q:v", "4", str(tmp),
                 ]
                 run_cmd = cmd
-                if background and sys.platform != "win32":
+                if polite and sys.platform != "win32":
                     nice = shutil.which("nice")
                     if nice:
                         run_cmd = [nice, "-n", "10", *cmd]
@@ -189,7 +205,7 @@ def make_thumbnail(
                     if sys.platform == "win32"
                     else 0
                 )
-                if background and sys.platform == "win32":
+                if polite and sys.platform == "win32":
                     creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
                 r = subprocess.run(
                     run_cmd,
@@ -271,16 +287,27 @@ def _video_file_for_thumb(item: dict) -> Path | None:
     return resolve_item_rel(item, item.get("rel") or "")
 
 
-def _apply_probe_to_item(item: dict, info: dict) -> None:
+def _apply_probe_to_item(
+    item: dict,
+    info: dict,
+    *,
+    include_duration: bool = True,
+    include_audio: bool = True,
+) -> None:
     item["probe_ver"] = PROBE_META_VER
+    if include_duration:
+        item["probe_duration_done"] = True
+    if include_audio:
+        item["probe_audio_done"] = True
     if info.get("ok"):
         item.pop("bad", None)
         item.pop("bad_reason", None)
-        dur = info.get("duration")
-        if dur:
-            item["duration"] = dur
-            item["duration_h"] = format_duration(dur)
-        if "audio_codec" in info:
+        if include_duration:
+            dur = info.get("duration")
+            if dur:
+                item["duration"] = dur
+                item["duration_h"] = format_duration(dur)
+        if include_audio and "audio_codec" in info:
             ac = (info.get("audio_codec") or "").lower().strip()
             item["audio_codec"] = ac
             item["audio_hard"] = bool(info.get("audio_hard")) if "audio_hard" in info else (
@@ -303,11 +330,53 @@ def _item_probe_path(item: dict) -> Path | None:
     return None
 
 
-def _needs_metadata_probe(item: dict) -> bool:
-    ver = int(item.get("probe_ver") or 0)
-    if ver >= PROBE_META_VER and ("audio_codec" in item or item.get("bad")):
+def _duration_already_known(item: dict) -> bool:
+    """True when duration was probed before, or a real duration is already cached."""
+    if item.get("probe_duration_done") or item.get("bad"):
+        return True
+    dur = item.get("duration")
+    try:
+        return dur is not None and float(dur) > 0
+    except (TypeError, ValueError):
+        return bool(item.get("duration_h"))
+
+
+def _audio_already_known(item: dict) -> bool:
+    """True when audio was probed before; empty codec still counts as done."""
+    if item.get("probe_audio_done") or item.get("bad"):
+        return True
+    return "audio_codec" in item
+
+
+def _persist_probed_items(items: list[dict]) -> None:
+    """Write probed rows to index.json immediately so a mid-run exit keeps progress."""
+    if not items:
+        return
+    from vg.disk_libs import save_library_item
+
+    for item in items:
+        try:
+            save_library_item(item)
+        except Exception as e:
+            log(f"[元数据] 中途保存失败: {e}")
+
+
+def _needs_metadata_probe(
+    item: dict,
+    *,
+    want_duration: bool | None = None,
+    want_audio: bool | None = None,
+) -> bool:
+    if want_duration is None:
+        want_duration = probe_duration_enabled()
+    if want_audio is None:
+        want_audio = probe_audio_enabled()
+    if not want_duration and not want_audio:
         return False
-    # 旧缓存：有时长但缺音频信息 → 仍需补探测
+    duration_done = _duration_already_known(item)
+    audio_done = _audio_already_known(item)
+    if (not want_duration or duration_done) and (not want_audio or audio_done):
+        return False
     kind = item.get("kind") or ""
     if kind == "ts_set" and not item.get("segments"):
         return False
@@ -322,6 +391,10 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
     ffmpeg = STATE.get("ffmpeg")
     if not items or not ffmpeg:
         return 0, 0
+    include_duration = probe_duration_enabled()
+    include_audio = probe_audio_enabled()
+    if not include_duration and not include_audio:
+        return 0, 0
     total = len(items)
     workers = max(1, min(4, thumb_worker_count(total)))
     STATE["meta_progress"] = f"{label}探测 0/{total}（{workers} 线程）…"
@@ -335,6 +408,10 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
         path = _item_probe_path(item)
         if not path or not path.is_file():
             item["probe_ver"] = PROBE_META_VER
+            if include_duration:
+                item["probe_duration_done"] = True
+            if include_audio:
+                item["probe_audio_done"] = True
             if not is_stream:
                 item["bad"] = True
                 item["bad_reason"] = "文件不存在"
@@ -342,31 +419,61 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
         # 播放列表：只对真实媒体分片探测；若落到 .m3u8 本身则只记 probe，不标坏
         if is_stream and path.suffix.lower() == ".m3u8":
             item["probe_ver"] = PROBE_META_VER
-            item["audio_codec"] = item.get("audio_codec") or ""
-            item["audio_hard"] = False
+            if include_duration:
+                item["probe_duration_done"] = True
+            if include_audio:
+                item["probe_audio_done"] = True
+                item["audio_codec"] = item.get("audio_codec") or ""
+                item["audio_hard"] = False
             return item, True, name
-        info = probe_media_info(ffmpeg, path)
-        _apply_probe_to_item(item, info)
+        info = probe_media_info(
+            ffmpeg,
+            path,
+            include_duration=include_duration,
+            include_audio=include_audio,
+        )
+        _apply_probe_to_item(
+            item,
+            info,
+            include_duration=include_duration,
+            include_audio=include_audio,
+        )
         return item, bool(info.get("ok")), name
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(one, it) for it in items]
-        for fut in as_completed(futures):
-            item, ok, name = fut.result()
-            with lock:
-                done += 1
-                if ok:
-                    ok_n += 1
-                else:
-                    fail_n += 1
-                STATE["meta_progress"] = f"{label}探测 {done}/{total}（可读 {ok_n}，异常 {fail_n}）…"
-                if done % 40 == 0 or done == total:
-                    log(f"[元数据] ({done}/{total}) {'OK' if ok else '异常'} {name}")
+    dirty: list[dict] = []
+    flush_every = 5
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(one, it) for it in items]
+            for fut in as_completed(futures):
+                item, ok, name = fut.result()
+                flush_now: list[dict] = []
+                with lock:
+                    done += 1
+                    if ok:
+                        ok_n += 1
+                    else:
+                        fail_n += 1
+                    dirty.append(item)
+                    if len(dirty) >= flush_every or done == total:
+                        flush_now = dirty
+                        dirty = []
+                    STATE["meta_progress"] = f"{label}探测 {done}/{total}（可读 {ok_n}，异常 {fail_n}）…"
+                    if done % 40 == 0 or done == total:
+                        log(f"[元数据] ({done}/{total}) {'OK' if ok else '异常'} {name}")
+                if flush_now:
+                    _persist_probed_items(flush_now)
+    finally:
+        if dirty:
+            _persist_probed_items(dirty)
     return ok_n, fail_n
 
 
 def start_metadata_enrichment() -> None:
     """后台补时长 / 损坏检测（不阻塞浏览）。"""
+    if not probe_duration_enabled() and not probe_audio_enabled():
+        STATE["meta_progress"] = ""
+        return
     if not STATE.get("ffmpeg") or not STATE.get("videos"):
         return
     if not _meta_lock.acquire(blocking=False):
@@ -381,36 +488,29 @@ def start_metadata_enrichment() -> None:
 
 def _bg_enrich_metadata() -> None:
     from vg.catalog import rebuild_indexes
-    from vg.disk_libs import save_library_item
 
     try:
         videos = STATE.get("videos") or []
-        need = [v for v in videos if _needs_metadata_probe(v)]
+        want_duration = probe_duration_enabled()
+        want_audio = probe_audio_enabled()
+        need = [
+            v
+            for v in videos
+            if _needs_metadata_probe(
+                v,
+                want_duration=want_duration,
+                want_audio=want_audio,
+            )
+        ]
         if not need:
             STATE["meta_progress"] = ""
             return
-        log(f"[元数据] 后台探测 {len(need)} 个…")
+        log(f"[元数据] 后台探测 {len(need)} 个（已有时长/音频的会跳过）…")
         ok_n, fail_n = enrich_metadata_parallel(need, label="后台")
         current = list(STATE.get("videos") or [])
-        current_keys = {
-            (
-                (v.get("_lib_root") or v.get("root") or "").strip().casefold(),
-                (v.get("rel") or "").replace("\\", "/").strip("/").casefold(),
-            )
-            for v in current
-        }
         rebuild_indexes(current)
-        for item in need:
-            key = (
-                (item.get("_lib_root") or item.get("root") or "").strip().casefold(),
-                (item.get("rel") or "").replace("\\", "/").strip("/").casefold(),
-            )
-            if key not in current_keys:
-                continue
-            try:
-                save_library_item(item)
-            except Exception as e:
-                log(f"[元数据] 保存单条索引失败: {e}")
+        # Incremental saves already happened; one last pass covers a short tail.
+        _persist_probed_items(need)
         STATE["meta_progress"] = f"元数据完成：可读 {ok_n}，异常 {fail_n}"
         log(f"[元数据] 完成：可读 {ok_n}，异常 {fail_n}")
     except Exception as e:

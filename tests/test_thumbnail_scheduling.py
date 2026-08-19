@@ -15,10 +15,13 @@ class ThumbnailSchedulingTests(unittest.TestCase):
     def test_worker_count_keeps_cpu_headroom_and_caps_background_work(self) -> None:
         with mock.patch("vg.util.os.cpu_count", return_value=64):
             self.assertEqual(thumb_worker_count(500), 2)
+            self.assertEqual(thumb_worker_count(500, burst=True), 64)
         with mock.patch("vg.util.os.cpu_count", return_value=1):
             self.assertEqual(thumb_worker_count(500), 1)
+            self.assertEqual(thumb_worker_count(500, burst=True), 1)
         with mock.patch("vg.util.os.cpu_count", return_value=64):
             self.assertEqual(thumb_worker_count(1), 1)
+            self.assertEqual(thumb_worker_count(1, burst=True), 1)
 
     def test_background_ffmpeg_is_single_thread_and_low_priority(self) -> None:
         with TemporaryDirectory() as td:
@@ -54,6 +57,40 @@ class ThumbnailSchedulingTests(unittest.TestCase):
             self.assertIn("-an", cmd)
             self.assertEqual(kwargs["timeout"], 25)
             self.assertTrue(kwargs["creationflags"] & 0x00004000)
+
+    def test_burst_ffmpeg_keeps_single_thread_and_normal_priority(self) -> None:
+        with TemporaryDirectory() as td:
+            base = Path(td)
+            video = base / "video.mp4"
+            out = base / "thumb.vgt"
+            video.write_bytes(b"video")
+            calls = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append((cmd, kwargs))
+                Path(cmd[-1]).write_bytes(b"\xff\xd8" + b"x" * 200)
+                return SimpleNamespace(returncode=0)
+
+            with (
+                mock.patch.object(media.subprocess, "run", side_effect=fake_run),
+                mock.patch.object(media.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+                mock.patch.object(
+                    media.subprocess,
+                    "BELOW_NORMAL_PRIORITY_CLASS",
+                    0x00004000,
+                    create=True,
+                ),
+                mock.patch.object(media.sys, "platform", "win32"),
+                mock.patch.object(media, "_clear_path_attrs_windows"),
+                mock.patch.object(media, "pack_thumb_bytes", side_effect=lambda raw: raw),
+            ):
+                self.assertTrue(
+                    media.make_thumbnail("ffmpeg", video, out, background=True, burst=True)
+                )
+
+            cmd, kwargs = calls[0]
+            self.assertEqual(cmd.count("-threads"), 2)
+            self.assertFalse(kwargs["creationflags"] & 0x00004000)
 
     def test_deferred_thumb_request_queues_without_running_ffmpeg_inline(self) -> None:
         vid = "a" * 16
@@ -103,13 +140,15 @@ class ThumbnailSchedulingTests(unittest.TestCase):
             try:
                 with (
                     mock.patch.object(scan, "submit_thumbnail_job", side_effect=immediate_submit),
+                    mock.patch.object(scan, "ensure_thumbnail_workers"),
                     mock.patch.object(scan, "_video_file_for_thumb", return_value=video),
                     mock.patch.object(scan, "make_thumbnail", return_value=True) as make,
                     mock.patch.object(scan, "thumb_version", return_value=1),
                 ):
-                    self.assertEqual(scan.generate_thumbs_parallel([item]), (1, 0))
+                    self.assertEqual(scan.generate_thumbs_parallel([item], burst=True), (1, 0))
                 self.assertEqual(submitted[0][1], THUMB_PRIORITY_BATCH)
                 self.assertTrue(make.call_args.kwargs["background"])
+                self.assertTrue(make.call_args.kwargs["burst"])
             finally:
                 STATE["ffmpeg"] = old_ffmpeg
                 STATE["cache_dir"] = old_cache

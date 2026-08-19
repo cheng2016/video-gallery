@@ -14,13 +14,20 @@ from vg.state import STATE
 def register(app) -> None:
     @app.route("/api/privacy", methods=["GET", "POST"])
     def api_privacy():
-        """隐私模式：预览图加密、缓存写在程序目录还是视频盘。"""
+        """设置：隐私、缓存位置和可选的视频元数据探测。"""
         if request.method == "GET":
             return jsonify({"ok": True, **privacy_snapshot()})
         data = request.get_json(silent=True) or {}
         encrypt = data.get("encrypt_thumbs")
         location = data.get("cache_location")
-        if encrypt is None and location is None:
+        probe_duration = data.get("probe_video_duration")
+        probe_audio = data.get("probe_video_audio")
+        if (
+            encrypt is None
+            and location is None
+            and probe_duration is None
+            and probe_audio is None
+        ):
             return jsonify({"ok": False, "msg": "未提供设置项"}), 400
         if (
             location is not None
@@ -35,6 +42,10 @@ def register(app) -> None:
         after = set_privacy(
             encrypt_thumbs=bool(encrypt) if encrypt is not None else None,
             cache_location_value=str(location) if location is not None else None,
+            probe_video_duration=(
+                bool(probe_duration) if probe_duration is not None else None
+            ),
+            probe_video_audio=bool(probe_audio) if probe_audio is not None else None,
         )
         tips = []
         if encrypt is not None and bool(encrypt) != before["encrypt_thumbs"]:
@@ -50,6 +61,24 @@ def register(app) -> None:
                     STATE["cache_dir"] = ensure_cache_dir(Path(root))
                 except OSError:
                     pass
+        if (
+            probe_duration is not None
+            and after["probe_video_duration"] != before["probe_video_duration"]
+        ):
+            tips.append(
+                "视频时长探测已开启；将在本次或下次扫描时补全。"
+                if after["probe_video_duration"]
+                else "视频时长探测已关闭。"
+            )
+        if (
+            probe_audio is not None
+            and after["probe_video_audio"] != before["probe_video_audio"]
+        ):
+            tips.append(
+                "视频音频探测已开启；将在本次或下次扫描时补全。"
+                if after["probe_video_audio"]
+                else "视频音频探测已关闭。"
+            )
         return jsonify({
             "ok": True,
             "msg": " ".join(tips) if tips else "已保存",

@@ -16,6 +16,7 @@ from vg.config import (
     PLAYLIST_EXTS,
     SEGMENT_EXTS,
     SKIP_DIR_NAMES,
+    THUMB_WORKERS_BURST,
     THUMB_WORKERS_MAX,
 )
 from vg.state import STATE
@@ -33,10 +34,14 @@ def log(msg: str) -> None:
         pass
 
 
-def thumb_worker_count(total: int = 0) -> int:
-    cpus = os.cpu_count() or 4
-    # Leave at least half of the logical CPUs available to the web UI/player.
-    n = max(1, min(THUMB_WORKERS_MAX, max(1, cpus // 2)))
+def thumb_worker_count(total: int = 0, *, burst: bool = False) -> int:
+    cpus = max(1, os.cpu_count() or 4)
+    if burst:
+        cap = THUMB_WORKERS_BURST if THUMB_WORKERS_BURST > 0 else cpus
+        n = max(1, min(cap, cpus))
+    else:
+        # Leave at least half of the logical CPUs available to the web UI/player.
+        n = max(1, min(THUMB_WORKERS_MAX, max(1, cpus // 2)))
     if total > 0:
         n = max(1, min(n, total))
     return n

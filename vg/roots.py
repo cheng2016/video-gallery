@@ -55,17 +55,26 @@ def get_mounted_roots() -> list[str]:
     return out
 
 
-def set_mounted_roots(roots: list[str], primary: str | None = None) -> list[str]:
+def set_mounted_roots(
+    roots: list[str],
+    primary: str | None = None,
+    *,
+    drop_offline: bool = True,
+) -> list[str]:
     cleaned: list[str] = []
     seen: set[str] = set()
     for r in roots:
         try:
             p = Path(r).expanduser().resolve()
-            if not p.is_dir():
+            if drop_offline and not p.is_dir():
                 continue
             key = str(p)
         except OSError:
-            continue
+            if drop_offline:
+                continue
+            key = str(r).strip()
+            if not key:
+                continue
         low = key.lower()
         if low in seen:
             continue
@@ -76,9 +85,13 @@ def set_mounted_roots(roots: list[str], primary: str | None = None) -> list[str]
         if primary:
             try:
                 pk = _norm_root_str(primary)
-                if pk in cleaned:
+                if any(m.lower() == pk.lower() for m in cleaned):
+                    pk = next(m for m in cleaned if m.lower() == pk.lower())
                     STATE["root"] = Path(pk)
-                    STATE["cache_dir"] = ensure_cache_dir(Path(pk))
+                    try:
+                        STATE["cache_dir"] = ensure_cache_dir(Path(pk))
+                    except OSError:
+                        pass
             except OSError:
                 pass
         elif cleaned:
@@ -89,6 +102,25 @@ def set_mounted_roots(roots: list[str], primary: str | None = None) -> list[str]
                 pass
     save_prefs(mounted_roots=cleaned, last_root=str(STATE.get("root") or "") or None)
     return cleaned
+
+
+def activate_mount(path: str | Path) -> list[str]:
+    """Add/activate one root without dropping other mounts (even if offline).
+
+    Rescan/join-library must never shrink the mounted set just because another
+    disk briefly fails ``is_dir()`` — that made other disks vanish from the UI.
+    """
+    try:
+        root = Path(path).expanduser().resolve()
+    except OSError as e:
+        raise ValueError(f"路径无效: {e}") from e
+    if not root.is_dir():
+        raise ValueError(f"目录不存在: {root}")
+    root_s = str(root)
+    current = get_mounted_roots()
+    if root_s.lower() not in {m.lower() for m in current}:
+        current = list(current) + [root_s]
+    return set_mounted_roots(current, primary=root_s, drop_offline=False)
 
 
 def _restore_folder(item: dict, root_s: str, label: str) -> str:
@@ -437,9 +469,29 @@ def on_scan_finished(root: Path | str) -> None:
     mounts = get_mounted_roots()
     # Windows 路径大小写不一致时不能当成「未挂载」，否则会冲掉其它盘
     if not any(m.lower() == root_s.lower() for m in mounts):
-        set_mounted_roots([root_s], primary=root_s)
-        mounts = [root_s]
+        try:
+            activate_mount(root_s)
+        except ValueError:
+            set_mounted_roots([root_s], primary=root_s)
+        mounts = get_mounted_roots()
     if len(mounts) == 1:
+        # Still merge if other disks remain archived in memory.
+        other_libs = [
+            key
+            for key in (STATE.get("disk_libs") or {})
+            if str(key).lower() != root_s.lower()
+            and ((STATE.get("disk_libs") or {}).get(key) or {}).get("by_id")
+        ]
+        if other_libs:
+            # Restore mounts that were dropped, then publish the full catalog.
+            restored = list(mounts)
+            for key in other_libs:
+                if key.lower() not in {m.lower() for m in restored}:
+                    restored.append(key)
+            set_mounted_roots(restored, primary=root_s, drop_offline=False)
+            archive_current_library()
+            publish_unified_library()
+            return
         stamp_lib_meta(STATE.get("videos") or [], root=root_s, cache=STATE.get("cache_dir"))
         for v in STATE.get("videos") or []:
             v["lib_label"] = root_label(root_s)
@@ -461,14 +513,14 @@ def add_mount(path: str | Path, scan_if_needed: bool = True) -> tuple[bool, str]
     if not root.is_dir():
         return False, f"目录不存在: {root}"
     root_s = str(root)
-    mounts = get_mounted_roots()
-    if root_s.lower() not in {m.lower() for m in mounts}:
-        mounts = list(mounts) + [root_s]
     try:
         archive_current_library()
     except Exception:
         pass
-    set_mounted_roots(mounts, primary=root_s)
+    try:
+        activate_mount(root_s)
+    except ValueError as e:
+        return False, str(e)
 
     if ensure_library(root_s):
         publish_unified_library()

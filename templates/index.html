@@ -1109,8 +1109,7 @@
       <button class="btn" id="lanBtn" title="允许同一 WiFi 下其它设备访问">局域网共享</button>
       <button class="btn" id="historyBtn" title="最近播放 / 继续看 / 已看完">播放历史</button>
       <button class="btn" id="exportStaticBtn" title="导出到当前盘/_video_gallery_static/，双击即可离线浏览，无需启动服务">导出静态站</button>
-      <button class="btn" id="privacyBtn" title="隐私：预览图加密、缓存是否写视频盘">隐私</button>
-      <a class="btn" id="feedbackBtn" href="https://github.com/cheng2016/video-gallery/issues/new/choose" target="_blank" rel="noopener" title="反馈问题（扫不到 / 没声音 / 封面错）">反馈</a>
+      <button class="btn" id="settingsBtn" title="隐私、性能与问题反馈">设置</button>
     </div>
   </header>
 
@@ -1225,11 +1224,12 @@
 
   <div class="modal" id="privacyModal">
     <div class="modal-bar">
-      <div class="title">隐私模式</div>
+      <div class="title">设置</div>
       <button class="modal-close" id="privacyModalClose" title="关闭">×</button>
     </div>
     <div class="modal-info" style="line-height:1.6;max-width:36rem">
-      <p style="margin:0 0 12px;opacity:.85">囤片场景常用：预览图不想被文件管理器直接打开看；缓存不想写到视频盘占空间或暴露目录。</p>
+      <div style="margin:0 0 6px"><strong>隐私与缓存</strong></div>
+      <p style="margin:0 0 12px;opacity:.85">控制预览图加密方式和缓存保存位置。</p>
       <label style="display:flex;align-items:flex-start;gap:10px;margin:12px 0;cursor:pointer">
         <input type="checkbox" id="privacyEncrypt" style="margin-top:4px" />
         <span>
@@ -1253,6 +1253,24 @@
         </span>
       </label>
       <p id="privacyPathHint" style="margin:12px 0 0;font-size:.85em;opacity:.7;word-break:break-all"></p>
+      <div style="margin:18px 0 6px;padding-top:14px;border-top:1px solid var(--border)"><strong>视频探测</strong></div>
+      <p style="margin:0 0 10px;opacity:.75;font-size:.9em">默认关闭。开启后会调用 ffprobe 扫描对应信息，并记住选择供下次启动使用。</p>
+      <label style="display:flex;align-items:flex-start;gap:10px;margin:10px 0;cursor:pointer">
+        <input type="checkbox" id="probeVideoDuration" style="margin-top:4px" />
+        <span>
+          <strong>探测视频时长</strong><br>
+          <span style="opacity:.75;font-size:.9em">读取并显示每个视频的播放时长，会增加首次探测的磁盘和 CPU 开销。</span>
+        </span>
+      </label>
+      <label style="display:flex;align-items:flex-start;gap:10px;margin:10px 0;cursor:pointer">
+        <input type="checkbox" id="probeVideoAudio" style="margin-top:4px" />
+        <span>
+          <strong>探测视频音频</strong><br>
+          <span style="opacity:.75;font-size:.9em">识别音频编码以及浏览器兼容性，会增加首次探测开销。</span>
+        </span>
+      </label>
+      <div style="margin:18px 0 6px;padding-top:14px;border-top:1px solid var(--border)"><strong>反馈</strong></div>
+      <p style="margin:0;opacity:.8">遇到扫不到、没声音或封面错误，可提交问题反馈。</p>
     </div>
     <div class="modal-actions" style="justify-content:flex-end;flex-wrap:wrap;gap:8px">
       <a class="btn" href="https://github.com/cheng2016/video-gallery/issues/new/choose" target="_blank" rel="noopener">反馈问题</a>
@@ -4165,7 +4183,7 @@
 
     renderMountChips();
 
-    // —— 隐私模式 ——
+    // —— 设置：隐私、性能与反馈 ——
     async function openPrivacyModal() {
       try {
         const data = await fetch("/api/privacy").then((r) => r.json());
@@ -4174,6 +4192,8 @@
           return;
         }
         $("privacyEncrypt").checked = !!data.encrypt_thumbs;
+        $("probeVideoDuration").checked = !!data.probe_video_duration;
+        $("probeVideoAudio").checked = !!data.probe_video_audio;
         const loc = data.cache_location === "disk" ? "disk" : "program";
         document.querySelectorAll('input[name="privacyCacheLoc"]').forEach((el) => {
           el.checked = el.value === loc;
@@ -4184,7 +4204,7 @@
         alert("读取失败: " + e);
       }
     }
-    if ($("privacyBtn")) $("privacyBtn").addEventListener("click", openPrivacyModal);
+    if ($("settingsBtn")) $("settingsBtn").addEventListener("click", openPrivacyModal);
     if ($("privacyModalClose")) $("privacyModalClose").addEventListener("click", () => $("privacyModal").classList.remove("open"));
     if ($("privacyCancel")) $("privacyCancel").addEventListener("click", () => $("privacyModal").classList.remove("open"));
     if ($("privacyModal")) $("privacyModal").addEventListener("click", (e) => {
@@ -4192,13 +4212,20 @@
     });
     if ($("privacySave")) $("privacySave").addEventListener("click", async () => {
       const encrypt = !!($("privacyEncrypt") && $("privacyEncrypt").checked);
+      const probe_video_duration = !!($("probeVideoDuration") && $("probeVideoDuration").checked);
+      const probe_video_audio = !!($("probeVideoAudio") && $("probeVideoAudio").checked);
       const locEl = document.querySelector('input[name="privacyCacheLoc"]:checked');
       const cache_location = (locEl && locEl.value) || "program";
       try {
         const r = await fetch("/api/privacy", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ encrypt_thumbs: encrypt, cache_location }),
+          body: JSON.stringify({
+            encrypt_thumbs: encrypt,
+            cache_location,
+            probe_video_duration,
+            probe_video_audio,
+          }),
         });
         const data = await r.json();
         if (!data.ok) {

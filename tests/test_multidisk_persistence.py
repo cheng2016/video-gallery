@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 from vg import cache
+from vg import config
 from vg import disk_libs
+from vg import drives
 from vg import web
 from vg.cache import ensure_cache_dir, thumb_cache_get, thumb_cache_put
 from vg.catalog import rebuild_indexes
@@ -17,7 +19,9 @@ from vg.disk_libs import (
     save_library_item,
     save_root_library,
 )
+from vg.privacy import set_privacy
 from vg.roots import publish_unified_library, videos_for_scope
+from vg.schema import INDEX_SCHEMA_VERSION
 from vg.state import STATE
 from vg.util import video_id
 
@@ -36,9 +40,19 @@ class MultiDiskPersistenceTests(unittest.TestCase):
         self.old_vgdata = cache.VGDATA_DIR
         self.old_key = cache.KEY_FILE
         self.old_disk_vgdata = disk_libs.VGDATA_DIR
+        self.old_config_vg = config.VGDATA_DIR
+        self.old_config_prefs = config.PREFS_FILE
+        self.old_drives_prefs = drives.PREFS_FILE
+        self.old_drives_vg = drives.VGDATA_DIR
         cache.VGDATA_DIR = self.base / "cache"
         cache.KEY_FILE = cache.VGDATA_DIR / "vault.key"
         disk_libs.VGDATA_DIR = cache.VGDATA_DIR
+        config.VGDATA_DIR = cache.VGDATA_DIR
+        config.PREFS_FILE = cache.VGDATA_DIR / "prefs.json"
+        drives.PREFS_FILE = config.PREFS_FILE
+        drives.VGDATA_DIR = cache.VGDATA_DIR
+        cache.VGDATA_DIR.mkdir(parents=True, exist_ok=True)
+        set_privacy(cache_location_value="program")
 
         self.old_state = {
             key: STATE.get(key)
@@ -67,6 +81,10 @@ class MultiDiskPersistenceTests(unittest.TestCase):
         cache.VGDATA_DIR = self.old_vgdata
         cache.KEY_FILE = self.old_key
         disk_libs.VGDATA_DIR = self.old_disk_vgdata
+        config.VGDATA_DIR = self.old_config_vg
+        config.PREFS_FILE = self.old_config_prefs
+        drives.PREFS_FILE = self.old_drives_prefs
+        drives.VGDATA_DIR = self.old_drives_vg
         self.tmp.cleanup()
 
     def item(self, root: Path, *, runtime_id=None, source_id=None):
@@ -106,7 +124,7 @@ class MultiDiskPersistenceTests(unittest.TestCase):
         self.assertEqual(saved[str(self.root_b.resolve())], 1)
         for root in (self.root_a, self.root_b):
             payload = self.read_index(root)
-            self.assertEqual(payload["schema_ver"], 2)
+            self.assertEqual(payload["schema_ver"], INDEX_SCHEMA_VERSION)
             self.assertEqual(payload["root"], str(root.resolve()))
             self.assertEqual(len(payload["videos"]), 1)
             self.assertEqual(payload["videos"][0]["id"], source_id)

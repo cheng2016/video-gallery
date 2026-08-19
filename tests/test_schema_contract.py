@@ -74,6 +74,8 @@ class VideoSchemaContractTests(unittest.TestCase):
             self.assertEqual(row["id"], "source-id")
             self.assertTrue(RUNTIME_ONLY_FIELDS.isdisjoint(row))
             self.assertIn("custom_future_field", row)
+            self.assertIn("folder_counts", payload)
+            self.assertIn("file_count", payload)
 
 
 if __name__ == "__main__":

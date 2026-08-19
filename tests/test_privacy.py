@@ -75,6 +75,27 @@ class PrivacyModeTests(unittest.TestCase):
         prog = privacy.resolve_cache_dir_for_root(root)
         self.assertTrue(str(prog).startswith(str(cache.VGDATA_DIR)))
 
+    def test_probe_settings_default_off_and_persist(self):
+        initial = privacy_snapshot()
+        self.assertFalse(initial["probe_video_duration"])
+        self.assertFalse(initial["probe_video_audio"])
+
+        saved = set_privacy(
+            probe_video_duration=True,
+            probe_video_audio=True,
+        )
+        self.assertTrue(saved["probe_video_duration"])
+        self.assertTrue(saved["probe_video_audio"])
+        self.assertTrue(load_prefs()["probe_video_duration"])
+        self.assertTrue(load_prefs()["probe_video_audio"])
+
+        reset = set_privacy(
+            probe_video_duration=False,
+            probe_video_audio=False,
+        )
+        self.assertFalse(reset["probe_video_duration"])
+        self.assertFalse(reset["probe_video_audio"])
+
 
 if __name__ == "__main__":
     unittest.main()

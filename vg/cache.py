@@ -243,7 +243,60 @@ def cleanup_legacy_disk_cache(root: Path) -> None:
             log(f"[清理] 删不掉旧缓存 {p}: {e}（可在文件管理器里手动删除）")
 
 
-def save_index(cache: Path, root: Path, videos: list[dict]) -> bool:
+def _normalize_folder_counts(raw: object) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            folder = str(key or "").replace("\\", "/").strip("/")
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            out[folder] = count
+    return out
+
+
+def read_index_counts(cache: Path) -> tuple[int | None, dict[str, int] | None]:
+    """Return (file_count, folder_counts). Both None when the index predates counts."""
+    path = cache / INDEX_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(data, dict) or "folder_counts" not in data:
+        return None, None
+    folders = _normalize_folder_counts(data.get("folder_counts"))
+    try:
+        file_count = int(data.get("file_count") or 0)
+    except (TypeError, ValueError):
+        file_count = sum(folders.values())
+    return file_count, folders
+
+
+def list_thumb_ids(cache: Path | None) -> set[str]:
+    """Stem names of .vgt files in one cache directory (one readdir, no video disk)."""
+    ids: set[str] = set()
+    if not cache:
+        return ids
+    try:
+        for path in cache.glob(f"*{THUMB_EXT}"):
+            if path.is_file():
+                ids.add(path.stem)
+    except OSError:
+        pass
+    return ids
+
+
+def save_index(
+    cache: Path,
+    root: Path,
+    videos: list[dict],
+    *,
+    file_count: int | None = None,
+    folder_counts: dict[str, int] | None = None,
+) -> bool:
     path = cache / INDEX_NAME
     with _index_lock(cache):
         tmp: Path | None = None
@@ -251,6 +304,29 @@ def save_index(cache: Path, root: Path, videos: list[dict]) -> bool:
         try:
             cache.mkdir(parents=True, exist_ok=True)
             _clear_path_attrs_windows(path)
+            preserved_count: int | None = None
+            preserved_folders: dict[str, int] | None = None
+            if file_count is None or folder_counts is None:
+                try:
+                    old = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, TypeError):
+                    old = None
+                if isinstance(old, dict):
+                    if file_count is None:
+                        try:
+                            preserved_count = int(old["file_count"])
+                        except (KeyError, TypeError, ValueError):
+                            preserved_count = None
+                    if folder_counts is None and "folder_counts" in old:
+                        preserved_folders = _normalize_folder_counts(old.get("folder_counts"))
+            use_folders = (
+                _normalize_folder_counts(folder_counts)
+                if folder_counts is not None
+                else (preserved_folders or {})
+            )
+            use_count = file_count if file_count is not None else preserved_count
+            if use_count is None:
+                use_count = sum(use_folders.values())
             # A unique sibling temp file prevents writers in different
             # processes from deleting or replacing each other's snapshot.
             fd, tmp_name = tempfile.mkstemp(
@@ -264,6 +340,8 @@ def save_index(cache: Path, root: Path, videos: list[dict]) -> bool:
                     "schema_ver": INDEX_SCHEMA_VERSION,
                     "root": str(root.resolve()),
                     "videos": clean,
+                    "file_count": int(use_count),
+                    "folder_counts": use_folders,
                     "updated": datetime.now().isoformat(),
                 },
                 ensure_ascii=False,

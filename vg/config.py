@@ -120,6 +120,9 @@ THUMB_EXT = ".vgt"
 # otherwise fan out to several decoder threads.  Keep enough parallelism to
 # make progress without starving the web UI or video playback.
 THUMB_WORKERS_MAX = 2
+# First-scan burst: one ffmpeg process per logical CPU (each already uses
+# -threads 1).  0 means "use os.cpu_count()".
+THUMB_WORKERS_BURST = 0
 THUMB_JPEG_CACHE_MAX = 256
 # 转码/修声音同时跑的任务数（1=最稳，不打满 CPU；可在 prefs 覆盖）
 CONVERT_MAX_PARALLEL = 1

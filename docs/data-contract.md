@@ -26,7 +26,7 @@
 - 属性：`size`、`size_h`、`mtime`、`mtime_h`、`duration`、`duration_h`
 - 归属：`root`、`_lib_root`、`_lib_cache`、`_folder_raw`
 - 类型：`kind`、`segments`、`seg_count`
-- 元数据：`genres`、`probe_ver`、`audio_codec`、`audio_hard`
+- 元数据：`genres`、`probe_ver`、`probe_duration_done`、`probe_audio_done`、`audio_codec`、`audio_hard`
 - 状态：`thumb`、`has_thumb`、`thumb_v`、`bad`、`bad_reason`
 
 `id` 在多盘合并时可能为避免冲突而临时改写；原磁盘 ID 存在运行时字段

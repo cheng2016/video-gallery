@@ -69,10 +69,15 @@ from vg.drives import list_drives_info
 from vg.genres import ensure_video_genres
 from vg.http_helpers import filter_videos_by_scope, resolve_local_path
 from vg.lan_service import lan_urls
-from vg.privacy import privacy_snapshot
+from vg.privacy import (
+    privacy_snapshot,
+    probe_audio_enabled,
+    probe_duration_enabled,
+)
 from vg.media import (
     _apply_probe_to_item,
     _item_probe_path,
+    _needs_metadata_probe,
     _video_file_for_thumb,
     make_thumbnail,
     probe_media_info,
@@ -1042,26 +1047,40 @@ def api_info(vid: str):
     item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
         abort(404)
-    # 懒加载时长 / 音频编码 / 损坏标记
-    need_probe = (
-        STATE.get("ffmpeg")
-        and (
-            int(item.get("probe_ver") or 0) < PROBE_META_VER
-            or ("audio_codec" not in item and not item.get("bad"))
-            or (not item.get("duration") and not item.get("bad"))
-        )
+    # Only lazily probe metadata dimensions explicitly enabled in Settings.
+    # Skip if duration/audio is already in the index from a previous session.
+    want_duration = probe_duration_enabled()
+    want_audio = probe_audio_enabled()
+    need_probe = bool(STATE.get("ffmpeg")) and _needs_metadata_probe(
+        item,
+        want_duration=want_duration,
+        want_audio=want_audio,
     )
     metadata_changed = False
     if need_probe:
         path = _item_probe_path(item)
         if path and path.is_file() and path.suffix.lower() != ".m3u8":
-            info = probe_media_info(STATE["ffmpeg"], path)
-            _apply_probe_to_item(item, info)
+            info = probe_media_info(
+                STATE["ffmpeg"],
+                path,
+                include_duration=want_duration,
+                include_audio=want_audio,
+            )
+            _apply_probe_to_item(
+                item,
+                info,
+                include_duration=want_duration,
+                include_audio=want_audio,
+            )
             metadata_changed = True
         elif not path or not path.is_file():
             kind = item.get("kind") or ""
             if kind not in ("m3u8", "ts_set") and (item.get("ext") or "").lower() != ".m3u8":
                 item["probe_ver"] = PROBE_META_VER
+                if want_duration:
+                    item["probe_duration_done"] = True
+                if want_audio:
+                    item["probe_audio_done"] = True
                 item["bad"] = True
                 item["bad_reason"] = "文件不存在"
                 metadata_changed = True

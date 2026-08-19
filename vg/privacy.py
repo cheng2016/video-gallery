@@ -22,11 +22,23 @@ def cache_location() -> str:
     return "disk" if loc == "disk" else "program"
 
 
+def probe_duration_enabled() -> bool:
+    """Whether ffprobe may read video duration. Default OFF."""
+    return bool(load_prefs().get("probe_video_duration", False))
+
+
+def probe_audio_enabled() -> bool:
+    """Whether ffprobe may inspect the first audio stream. Default OFF."""
+    return bool(load_prefs().get("probe_video_audio", False))
+
+
 def privacy_snapshot() -> dict:
     loc = cache_location()
     return {
         "encrypt_thumbs": encrypt_thumbs_enabled(),
         "cache_location": loc,
+        "probe_video_duration": probe_duration_enabled(),
+        "probe_video_audio": probe_audio_enabled(),
         "cache_path": str(VGDATA_DIR.resolve()),
         "cache_hint": (
             "每个视频盘根目录下的 .video_gallery_cache"
@@ -37,14 +49,24 @@ def privacy_snapshot() -> dict:
     }
 
 
-def set_privacy(*, encrypt_thumbs: bool | None = None, cache_location_value: str | None = None) -> dict:
-    """Persist privacy prefs. cache_location change needs remount/rescan to take full effect."""
+def set_privacy(
+    *,
+    encrypt_thumbs: bool | None = None,
+    cache_location_value: str | None = None,
+    probe_video_duration: bool | None = None,
+    probe_video_audio: bool | None = None,
+) -> dict:
+    """Persist settings. cache_location change needs remount/rescan to take full effect."""
     kwargs = {}
     if encrypt_thumbs is not None:
         kwargs["encrypt_thumbs"] = bool(encrypt_thumbs)
     if cache_location_value is not None:
         loc = str(cache_location_value).strip().lower()
         kwargs["cache_location"] = "disk" if loc == "disk" else "program"
+    if probe_video_duration is not None:
+        kwargs["probe_video_duration"] = bool(probe_video_duration)
+    if probe_video_audio is not None:
+        kwargs["probe_video_audio"] = bool(probe_video_audio)
     if kwargs:
         save_prefs(**kwargs)
     return privacy_snapshot()
