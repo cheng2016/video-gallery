@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from vg.cleanup import build_cleanup_response, cleanup_categories_for_lib
 from vg.config import MIN_VIDEO_FILE_BYTES
@@ -16,13 +17,39 @@ from vg.state import STATE
 class CleanupServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "disk"
+        base = Path(self.tmp.name)
+        self.root = base / "disk"
+        self.cache_dir = base / "cache"
         self.root.mkdir()
+        self.cache_dir.mkdir()
+        self._old_state = {
+            key: STATE.get(key)
+            for key in (
+                "root",
+                "cache_dir",
+                "videos",
+                "by_id",
+                "by_thumb_id",
+                "by_category",
+                "facets",
+                "tree",
+                "disk_libs",
+                "mounted_roots",
+            )
+        }
+        self._patchers = [
+            mock.patch("vg.roots.save_prefs"),
+            mock.patch("vg.roots.ensure_cache_dir", return_value=self.cache_dir),
+            mock.patch("vg.disk_libs.ensure_cache_dir", return_value=self.cache_dir),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
         STATE["videos"] = []
         STATE["disk_libs"] = {}
         STATE["mounted_roots"] = []
         STATE["root"] = self.root
-        STATE["cache_dir"] = None
+        STATE["cache_dir"] = self.cache_dir
         set_mounted_roots([str(self.root.resolve())], primary=str(self.root))
         size = MIN_VIDEO_FILE_BYTES + 1
         save_root_library(self.root, [
@@ -33,6 +60,8 @@ class CleanupServiceTests(unittest.TestCase):
         publish_unified_library()
 
     def tearDown(self) -> None:
+        for key, value in self._old_state.items():
+            STATE[key] = value
         self.tmp.cleanup()
 
     @staticmethod

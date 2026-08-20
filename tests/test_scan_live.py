@@ -17,8 +17,36 @@ class ScanLiveTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root_a = Path(self._tmp.name) / "A"
         self.root_b = Path(self._tmp.name) / "B"
+        self.cache_dir = Path(self._tmp.name) / "cache"
         self.root_a.mkdir()
         self.root_b.mkdir()
+        self.cache_dir.mkdir()
+        self._old_state = {
+            key: STATE.get(key)
+            for key in (
+                "root",
+                "cache_dir",
+                "videos",
+                "by_id",
+                "by_thumb_id",
+                "by_category",
+                "facets",
+                "tree",
+                "disk_libs",
+                "mounted_roots",
+                "scan_root",
+                "scan_live",
+                "lib_gen",
+            )
+        }
+        self._patchers = [
+            mock.patch("vg.roots.save_prefs"),
+            mock.patch("vg.roots.ensure_cache_dir", return_value=self.cache_dir),
+            mock.patch("vg.disk_libs.ensure_cache_dir", return_value=self.cache_dir),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
         STATE["videos"] = []
         STATE["disk_libs"] = {}
         STATE["mounted_roots"] = []
@@ -26,12 +54,15 @@ class ScanLiveTests(unittest.TestCase):
         STATE["scan_live"] = None
         STATE["lib_gen"] = 0
         STATE["root"] = self.root_a
-        STATE["cache_dir"] = None
-        set_mounted_roots([str(self.root_a.resolve()), str(self.root_b.resolve())], primary=str(self.root_a))
+        STATE["cache_dir"] = self.cache_dir
+        set_mounted_roots(
+            [str(self.root_a.resolve()), str(self.root_b.resolve())],
+            primary=str(self.root_a),
+        )
 
     def tearDown(self) -> None:
-        STATE["scan_root"] = ""
-        STATE["scan_live"] = None
+        for key, value in self._old_state.items():
+            STATE[key] = value
         self._tmp.cleanup()
 
     def test_scan_live_visible_while_other_disk_stays(self) -> None:

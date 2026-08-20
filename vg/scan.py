@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
+import time
 from concurrent.futures import as_completed
 from datetime import datetime
 from pathlib import Path
 
 from vg.cache import (
     ensure_cache_dir,
+    list_thumb_ids,
     read_index_counts,
     save_index,
     thumb_cache_invalidate,
@@ -25,6 +28,7 @@ from vg.catalog import (
 )
 from vg.config import (
     PLAYLIST_EXTS,
+    SEGMENT_EXTS,
     THUMB_EXT,
     VIDEO_EXTS,
 )
@@ -119,13 +123,59 @@ def start_scan(
     """切换根目录。force=False 优先读缓存（秒开）再后台按目录核个数；force=True 增量全盘扫描。
     replace_mounts=True：片库只保留这一根；False：保留已挂载目录（用于「加入片库」）。
     """
-    if STATE["scanning"] or not _scan_lock.acquire(blocking=False):
+    requested_at = time.perf_counter()
+    if STATE["scanning"]:
+        from vg.diagnostics import emit
+
+        emit(
+            "WARN",
+            "scan_start_rejected",
+            force=True,
+            reason="state_scanning_true",
+            requested_root=root,
+            active_root=STATE.get("scan_root") or STATE.get("root"),
+            thread=threading.current_thread().name,
+        )
+        return False, "正在扫描中，请稍候"
+    if not _scan_lock.acquire(blocking=False):
+        from vg.diagnostics import emit
+
+        emit(
+            "WARN",
+            "scan_start_rejected",
+            force=True,
+            reason="scan_lock_busy",
+            requested_root=root,
+            active_root=STATE.get("scan_root") or STATE.get("root"),
+            thread=threading.current_thread().name,
+        )
         return False, "正在扫描中，请稍候"
 
     root = root.expanduser().resolve()
     if not root.is_dir():
         _scan_lock.release()
+        from vg.diagnostics import emit
+
+        emit(
+            "WARN",
+            "scan_start_rejected",
+            force=True,
+            reason="root_not_directory",
+            requested_root=root,
+        )
         return False, f"目录不存在: {root}"
+
+    from vg.diagnostics import emit
+
+    emit(
+        "INFO",
+        "scan_lock_acquired",
+        force=True,
+        root=root,
+        wait_ms=f"{(time.perf_counter() - requested_at) * 1000.0:.1f}",
+        force_scan=force,
+        replace_mounts=replace_mounts,
+    )
 
     want_bg_verify = False
 
@@ -219,14 +269,25 @@ def start_scan(
                 want_bg_verify = bool(used_cache)
         except Exception as e:
             STATE["scan_progress"] = f"扫描失败: {e}"
-            log(f"[扫描] 失败: {e}")
+            from vg.diagnostics import error
+
+            error("scan_thread_failed", e, root=root, force_scan=force)
             STATE["scanning"] = False
         finally:
             STATE["scanning"] = False
             try:
                 _scan_lock.release()
-            except RuntimeError:
-                pass
+                emit(
+                    "INFO",
+                    "scan_lock_released",
+                    force=True,
+                    root=root,
+                    thread=threading.current_thread().name,
+                )
+            except RuntimeError as exc:
+                from vg.diagnostics import error
+
+                error("scan_lock_release_failed", exc, root=root)
             if want_bg_verify:
                 threading.Thread(
                     target=_bg_count_then_maybe_scan,
@@ -339,12 +400,17 @@ def _load_old_video_map(cache: Path, root: Path) -> dict[str, dict]:
     from vg.catalog_db import catalog_exists, load_catalog_by_rel, read_catalog_root
 
     if not catalog_exists(cache):
+        log(f"[增量] 无目录库，无法复用: {cache}")
         return {}
     stored_root = read_catalog_root(cache)
     if stored_root and not _same_root(stored_root, root):
+        log(f"[增量] 目录库根路径不匹配，跳过复用: stored={stored_root!r} root={root!r}")
         return {}
     try:
-        return load_catalog_by_rel(cache)
+        mapping = load_catalog_by_rel(cache)
+        if not mapping:
+            log(f"[增量] 目录库为空，无法复用: {cache}")
+        return mapping
     except Exception as e:
         log(f"[增量] 读取旧索引失败: {e}")
         return {}
@@ -371,9 +437,20 @@ def generate_thumbs_parallel(
         f"（{mode} {workers} 路）…"
     )
     log(f"[预览图] {label} {total} 个，{mode} {workers} 路生成")
+    from vg.diagnostics import call as diagnostic_call
+
+    diagnostic_call(
+        "generate_thumbs_parallel",
+        total=total,
+        cached=cached_n,
+        workers=workers,
+        burst=burst,
+        label=label,
+    )
     ok_n = 0
     fail_n = 0
     done = 0
+    last_log_i = 0
     def one(item: dict) -> bool:
         try:
             out = thumb_path(cache, item["id"])
@@ -410,12 +487,17 @@ def generate_thumbs_parallel(
                     item["has_thumb"] = True
                     item["thumb"] = f"{item['id']}{THUMB_EXT}"
                     item["thumb_v"] = thumb_version(cache, item["id"])
-                    log(f"[预览图] ({i}/{total}) OK  {name}")
                 else:
                     fail_n += 1
                     item["has_thumb"] = False
                     item["thumb_v"] = 0
                     log(f"[预览图] ({i}/{total}) 失败  {name}")
+                # Success lines are aggregated; failures always print.
+                if (i == total) or (i - last_log_i >= 40):
+                    last_log_i = i
+                    log(
+                        f"[预览图] 进度 {i}/{total}（成功 {ok_n}，失败 {fail_n}）"
+                    )
                 STATE["thumb_progress"] = (
                     f"{label}加密预览图 {i}/{total}（已有缓存 {cached_n}，成功 {ok_n}）…"
                 )
@@ -443,7 +525,35 @@ def fill_thumbs_for_videos(
         log("[预览图] 未找到 ffmpeg，已跳过")
         return 0, 0
     missing = missing_thumb_items(videos, cache)
+    missing_before_reuse = len(missing)
+    local_hits = len(videos) - missing_before_reuse
+    missing_sample_ids = "|".join(
+        str(item.get("id") or "") for item in missing[:5]
+    )
+    cache_vgt_files: int | None = None
+    if missing_before_reuse >= 50:
+        # A whole-library miss is suspicious (wrong cache path, cleanup race,
+        # or an ID migration). Capture enough state to identify which one on
+        # the next occurrence without logging every thumbnail.
+        cache_vgt_files = len(list_thumb_ids(cache))
     missing, reused = adopt_thumbs_from_caches(missing, cache)
+    if missing_before_reuse >= 50:
+        from vg.diagnostics import emit
+
+        emit(
+            "WARN",
+            "thumbnail_cache_bulk_miss",
+            force=True,
+            cache=cache,
+            root=root,
+            videos=len(videos),
+            local_hits=local_hits,
+            missing_before_reuse=missing_before_reuse,
+            reused_from_other_caches=reused,
+            missing_after_reuse=len(missing),
+            cache_vgt_files=cache_vgt_files,
+            sample_ids=missing_sample_ids,
+        )
     cached_n = len(videos) - len(missing)
     ok_n = fail_n = 0
     if missing:
@@ -486,6 +596,43 @@ def _load_index_videos(cache: Path, root: Path) -> list[dict]:
         return []
 
 
+def _final_scan_change_counts(
+    videos: list[dict],
+    old_by_id: dict[str, dict],
+    *,
+    incremental: bool,
+) -> tuple[int, int]:
+    """Return final-output (reused, changed) counts after TS/HLS collapsing."""
+    if not incremental:
+        return 0, len(videos)
+
+    changed = 0
+    for item in videos:
+        vid = str(item.get("id") or "").strip()
+        previous = old_by_id.get(vid) if vid else None
+        if previous is None:
+            changed += 1
+            continue
+        try:
+            size_changed = int(item.get("size") or 0) != int(previous.get("size") or 0)
+        except (TypeError, ValueError):
+            size_changed = item.get("size") != previous.get("size")
+        try:
+            mtime_changed = abs(
+                float(item.get("mtime") or 0) - float(previous.get("mtime") or 0)
+            ) >= 1.0
+        except (TypeError, ValueError):
+            mtime_changed = item.get("mtime") != previous.get("mtime")
+        previous_fingerprint = str(previous.get("file_sig") or "")
+        fingerprint_changed = bool(
+            previous_fingerprint
+            and str(item.get("file_sig") or "") != previous_fingerprint
+        )
+        if size_changed or mtime_changed or fingerprint_changed:
+            changed += 1
+    return len(videos) - changed, changed
+
+
 def scan_videos(
     root: Path,
     do_thumbs: bool = True,
@@ -495,6 +642,16 @@ def scan_videos(
     folder_counts: dict[str, int] | None = None,
     burst_thumbs: bool | None = None,
 ) -> None:
+    scan_started = time.perf_counter()
+    from vg.diagnostics import call as diagnostic_call
+
+    diagnostic_call(
+        "scan_videos",
+        root=root,
+        incremental=incremental,
+        do_thumbs=do_thumbs,
+        quiet=quiet,
+    )
     if not quiet:
         STATE["scanning"] = True
     STATE["scan_progress"] = "正在增量扫描…" if incremental else "正在扫描…"
@@ -518,8 +675,35 @@ def scan_videos(
         STATE["cache_dir"] = cache
 
     old_map = _load_old_video_map(cache, root) if incremental else {}
+    old_by_id: dict[str, dict] = {}
     if old_map:
         log(f"[增量] 可复用旧条目 {len(old_map)} 个")
+        for item in old_map.values():
+            vid = (item.get("id") or "").strip()
+            if vid:
+                old_by_id[vid] = item
+    # Also keep ts_set / m3u8 rows skipped by load_catalog_by_rel.
+    if incremental:
+        try:
+            from vg.catalog_db import catalog_exists, load_catalog_videos
+
+            if catalog_exists(cache):
+                # Use the catalog repository's guarded connection instead of
+                # opening SQLite directly while another scan may be flushing
+                # the same cache.  Direct reads could observe a half-created
+                # schema and hide the error in a broad ``except``.
+                for item in load_catalog_videos(cache, root):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("kind") not in {"ts_set", "m3u8"}:
+                        continue
+                    vid = (item.get("id") or "").strip()
+                    if vid and vid not in old_by_id:
+                        old_by_id[vid] = item
+        except Exception as exc:
+            from vg.diagnostics import error
+
+            error("scan_catalog_special_rows_failed", exc, cache=cache, root=root)
     if burst_thumbs is None:
         burst_thumbs = not quiet
 
@@ -536,6 +720,16 @@ def scan_videos(
     reused = added = 0
     last_progress_ts = 0.0
     last_tree_n = 0
+    scan_counts: dict[str, int] = {}
+    scan_samples: dict[str, list[str]] = {}
+
+    def count_scan(reason: str, path: Path | str | None = None, detail: str = "") -> None:
+        scan_counts[reason] = scan_counts.get(reason, 0) + 1
+        if path is not None and len(scan_samples.setdefault(reason, [])) < 3:
+            sample = str(path)
+            if detail:
+                sample += f" ({detail})"
+            scan_samples[reason].append(sample)
 
     def _publish_live(force_tree: bool = False) -> None:
         """Push mid-scan catalog without wiping other disks from STATE."""
@@ -570,6 +764,7 @@ def scan_videos(
             last_progress_ts = now
 
     def on_walk_error(err: OSError) -> None:
+        count_scan("directory_error", detail=str(err))
         if len(errors) < 5:
             errors.append(str(err))
             log(f"[扫描] 跳过无权限目录: {err}")
@@ -580,13 +775,30 @@ def scan_videos(
         try:
             rel = safe_rel(full, root)
             st = full.stat()
-        except (ValueError, OSError):
+        except (ValueError, OSError) as exc:
+            count_scan("file_stat_failed", full, str(exc))
             return None
         folder = folder_key(str(Path(rel).parent) if Path(rel).parent != Path(".") else "")
         if count_folder and accumulate_counts:
             walk_counts[folder] = walk_counts.get(folder, 0) + 1
         if is_too_small_video(ext, st.st_size):
+            count_scan("video_too_small", full, f"ext={ext} size={st.st_size}")
             return None
+        # Reject non-MPEG .ts (e.g. TypeScript) before ffmpeg ever sees them.
+        if ext in SEGMENT_EXTS:
+            try:
+                with full.open("rb") as stream:
+                    head = stream.read(1)
+                if head != b"\x47":
+                    count_scan(
+                        "ts_sync_byte_invalid",
+                        full,
+                        f"first_byte={head.hex() if head else 'empty'} size={st.st_size}",
+                    )
+                    return None
+            except OSError as exc:
+                count_scan("ts_header_read_failed", full, str(exc))
+                return None
         old = old_map.get(rel)
         metadata_match = bool(
             old
@@ -614,7 +826,26 @@ def scan_videos(
             ensure_video_genres(item)
             reused += 1
         else:
+            if old is None:
+                count_scan("new_video", full)
+            elif int(old.get("size") or -1) != st.st_size:
+                count_scan(
+                    "video_size_changed",
+                    full,
+                    f"old={old.get('size')} new={st.st_size}",
+                )
+            elif abs(float(old.get("mtime") or 0) - st.st_mtime) >= 1.0:
+                count_scan(
+                    "video_mtime_changed",
+                    full,
+                    f"old={old.get('mtime')} new={st.st_mtime}",
+                )
+            elif not signature_match:
+                count_scan("video_fingerprint_changed", full)
             vid = video_id(rel)
+            file_sig = _file_fingerprint(full, st)
+            if not file_sig:
+                count_scan("video_fingerprint_failed", full)
             item = {
                 "id": vid,
                 "name": full.stem,
@@ -626,7 +857,7 @@ def scan_videos(
                 "size_h": format_size(st.st_size),
                 "mtime": st.st_mtime,
                 "mtime_h": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
-                "file_sig": _file_fingerprint(full, st),
+                "file_sig": file_sig,
                 "duration": None,
                 "duration_h": "",
                 "thumb": f"{vid}{THUMB_EXT}",
@@ -649,7 +880,10 @@ def scan_videos(
         if n % 100 == 0:
             _publish_live(force_tree=(n % 500 == 0))
             if n % 200 == 0:
-                log(f"[扫描] 已发现 {n} 个…（复用 {reused} / 新建 {added}）")
+                log(
+                    f"[扫描] 已发现 {n} 个…"
+                    f"（候选复用 {reused} / 候选需重建 {added}）"
+                )
         elif n == 25:
             _publish_live(force_tree=True)
 
@@ -662,6 +896,7 @@ def scan_videos(
         ]
         for folder in sorted(target_folders):
             dirpath = root / folder if folder else root
+            count_scan("directories_scanned")
             try:
                 if not dirpath.is_dir():
                     continue
@@ -679,6 +914,7 @@ def scan_videos(
                 ext = Path(name).suffix.lower()
                 if ext not in VIDEO_EXTS and ext not in PLAYLIST_EXTS:
                     continue
+                count_scan("candidate_files")
                 item = ingest_file(full, name, ext, count_folder=False)
                 if item:
                     scanned.append(item)
@@ -688,17 +924,56 @@ def scan_videos(
         found = kept + scanned
     else:
         for dirpath, dirnames, filenames in os.walk(root, onerror=on_walk_error):
+            count_scan("directories_scanned")
             dirnames[:] = [d for d in dirnames if not should_skip_dir(d)]
             for name in filenames:
                 ext = Path(name).suffix.lower()
                 if ext not in VIDEO_EXTS and ext not in PLAYLIST_EXTS:
                     continue
+                count_scan("candidate_files")
                 full = Path(dirpath) / name
                 item = ingest_file(full, name, ext, count_folder=True)
                 if item:
                     found.append(item)
                     note_found()
         found = collapse_segment_sets(found)
+
+    if old_by_id:
+        adopted = 0
+        for item in found:
+            vid = (item.get("id") or "").strip()
+            prev = old_by_id.get(vid)
+            if not prev:
+                continue
+            changed_meta = False
+            for key in (
+                "duration",
+                "duration_h",
+                "has_audio",
+                "audio_codec",
+                "audio_channels",
+                "sample_rate",
+                "bad",
+                "bad_reason",
+            ):
+                if item.get(key) in (None, "", []) and prev.get(key) not in (None, "", []):
+                    item[key] = prev.get(key)
+                    changed_meta = True
+            if prev.get("has_thumb") and not item.get("has_thumb"):
+                item["has_thumb"] = True
+                item["thumb"] = prev.get("thumb") or item.get("thumb")
+                item["thumb_v"] = prev.get("thumb_v") or item.get("thumb_v") or 1
+                changed_meta = True
+            if changed_meta:
+                adopted += 1
+        if adopted:
+            log(f"[增量] 合集/条目继承旧元数据 {adopted} 个")
+
+    output_reused, output_changed = _final_scan_change_counts(
+        found,
+        old_by_id,
+        incremental=incremental,
+    )
 
     found.sort(key=lambda x: (x.get("rel") or "").lower())
     stamp_lib_meta(found, root=root_s, cache=cache, overwrite=True)
@@ -737,7 +1012,11 @@ def scan_videos(
         rebuild_indexes(found)
 
     extra = f"（{len(errors)} 个目录跳过）" if errors else ""
-    tip = f"，复用 {reused}，新建/变更 {added}" if incremental else ""
+    tip = (
+        f"，复用 {output_reused}，新建/变更 {output_changed}"
+        if incremental
+        else ""
+    )
     STATE["scan_progress"] = f"扫描完成，共 {len(found)} 个视频{tip}{extra}"
     log(f"[扫描] 完成，共 {len(found)} 个{tip}{extra}")
     saved_counts = walk_counts
@@ -795,11 +1074,60 @@ def scan_videos(
         if not multi:
             STATE["tree"] = build_tree(root, found)
 
+    try:
+        from vg.cache import cleanup_thumb_files
+        from vg.catalog_db import checkpoint_catalog
+        from vg.roots import thumb_id_for_item
+
+        keep_ids = {
+            thumb_id_for_item(item)
+            for item in found
+            if thumb_id_for_item(item)
+        }
+        removed, freed = cleanup_thumb_files(cache, keep_ids)
+        if removed:
+            log(f"[缓存] 清理预览图 {removed} 个，释放 {format_size(freed)}")
+        checkpoint_catalog(cache)
+    except Exception as e:
+        from vg.util import log_error
+
+        log_error("scan_cache_maintenance_failed", e, root=root)
+
     STATE["scan_live"] = None
     STATE["scan_root"] = ""
     if not quiet:
         STATE["scanning"] = False
     log("[扫描] 全部结束，可在浏览器浏览")
+    from vg.diagnostics import emit as diagnostic_emit, perf as diagnostic_perf
+
+    diagnostic_emit(
+        "INFO",
+        "scan_decision_summary",
+        force=True,
+        root=root_s,
+        mode=mode,
+        counts=json.dumps(scan_counts, ensure_ascii=False, separators=(",", ":")),
+        samples=json.dumps(scan_samples, ensure_ascii=False, separators=(",", ":")),
+        output_videos=len(found),
+        reused=output_reused,
+        changed=output_changed,
+        raw_reused_candidates=reused,
+        raw_changed_candidates=added,
+    )
+
+    diagnostic_perf(
+        "scan_videos",
+        (time.perf_counter() - scan_started) * 1000.0,
+        force=True,
+        mode=mode,
+        videos=len(found),
+        reused=output_reused,
+        changed=output_changed,
+        raw_reused_candidates=reused,
+        raw_changed_candidates=added,
+        skipped_dirs=len(errors),
+        root=root_s,
+    )
     start_metadata_enrichment()
 
 

@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -78,11 +79,29 @@ def probe_media_info(
     include_audio: bool = True,
 ) -> dict:
     """ffprobe detection, limited to the metadata dimensions requested."""
+    from vg.diagnostics import emit, error
+
+    started = time.perf_counter()
+
+    def failed(reason: str, **fields) -> dict:
+        emit(
+            "WARN",
+            "media_probe_failed",
+            force=True,
+            path=path,
+            reason=reason,
+            include_duration=include_duration,
+            include_audio=include_audio,
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
+            **fields,
+        )
+        return {"ok": False, "err": reason[:120]}
+
     if not path or not path.is_file():
-        return {"ok": False, "err": "文件不存在"}
+        return failed("文件不存在")
     ffprobe = _ffprobe_path(ffmpeg)
     if not ffprobe:
-        return {"ok": False, "err": "未找到 ffprobe"}
+        return failed("未找到 ffprobe")
     try:
         entries = ["stream=index,codec_type"]
         if include_audio:
@@ -108,7 +127,8 @@ def probe_media_info(
         )
         err = (r.stderr or "").strip()
         if r.returncode != 0:
-            return {"ok": False, "err": (err or "ffprobe 失败")[:120]}
+            reason = (err or "ffprobe 失败")[:120]
+            return failed(reason, returncode=r.returncode, stderr=err[-500:])
         payload = json.loads(r.stdout or "{}") if r.stdout else {}
         streams = payload.get("streams") or []
         has_video = False
@@ -121,7 +141,7 @@ def probe_media_info(
             elif ctype == "audio" and not audio_codec and cname:
                 audio_codec = cname
         if not has_video:
-            return {"ok": False, "err": "无视频流"}
+            return failed("无视频流", stream_count=len(streams))
         result = {"ok": True}
         fmt = payload.get("format") or {}
         if include_duration and fmt.get("duration"):
@@ -136,10 +156,20 @@ def probe_media_info(
             result["audio_hard"] = (
                 bool(audio_codec) and audio_codec not in BROWSER_FRIENDLY_AUDIO
             )
+        from vg.diagnostics import aggregate
+
+        aggregate("media_probe_ok", (time.perf_counter() - started) * 1000.0)
         return result
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "err": "探测超时"}
+    except subprocess.TimeoutExpired as exc:
+        return failed("探测超时", timeout=exc.timeout)
     except Exception as e:
+        error(
+            "media_probe_exception",
+            e,
+            path=path,
+            include_duration=include_duration,
+            include_audio=include_audio,
+        )
         return {"ok": False, "err": str(e)[:120]}
 
 
@@ -161,26 +191,51 @@ def make_thumbnail(
     burst: bool = False,
 ) -> bool:
     """截帧写入预览图 out（.vgt；按隐私设置加密或明文）。有效缓存则跳过；force 或损坏则重建。"""
-    out.parent.mkdir(parents=True, exist_ok=True)
+    from vg.diagnostics import emit, error
+
+    started = time.perf_counter()
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        error("thumbnail_output_dir_failed", exc, video=video, output=out)
+        return False
     _clear_path_attrs_windows(out)
     if out.exists() and not force:
         try:
             raw = unpack_thumb_bytes(out.read_bytes())
             if raw and raw[:2] == b"\xff\xd8" and len(raw) > 100:
                 return True
+            emit(
+                "WARN",
+                "thumbnail_existing_invalid",
+                force=True,
+                video=video,
+                output=out,
+                action="delete_and_regenerate",
+            )
             out.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            error("thumbnail_existing_read_failed", exc, video=video, output=out)
     elif out.exists() and force:
         try:
             out.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            error("thumbnail_force_delete_failed", exc, video=video, output=out)
+            return False
 
     if not video.is_file():
+        emit(
+            "WARN",
+            "thumbnail_source_missing",
+            force=True,
+            video=video,
+            output=out,
+        )
         return False
 
     tmp = out.with_suffix(".tmp.jpg")
+    attempts: list[str] = []
+    no_video_stream = False
     try:
         seeks = [seek]
         fallbacks = (1.0, 0.0) if background else (1.0, 0.0, 10.0, 30.0)
@@ -224,31 +279,93 @@ def make_thumbnail(
                 if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
                     raw = tmp.read_bytes()
                     if not (raw[:2] == b"\xff\xd8"):
+                        attempts.append(f"seek={ss}:invalid_jpeg bytes={len(raw)}")
                         continue
                     _clear_path_attrs_windows(out)
                     out.write_bytes(pack_thumb_bytes(raw))
+                    from vg.diagnostics import aggregate
+
+                    aggregate(
+                        "thumbnail_generated",
+                        (time.perf_counter() - started) * 1000.0,
+                    )
                     return True
-            except Exception:
+                stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+                attempts.append(
+                    f"seek={ss}:exit={r.returncode}:"
+                    f"{stderr[-500:] if stderr else 'no_output'}"
+                )
+                # Audio-only containers are still valid media files, but they
+                # cannot produce a video frame.  Retrying different seek
+                # positions only starts more ffmpeg processes and repeats the
+                # same failure (as seen for audio-only .mp4 files in scans).
+                stderr_lower = stderr.casefold()
+                if (
+                    "output file does not contain any stream" in stderr_lower
+                    or "matches no streams" in stderr_lower
+                    or "no video stream" in stderr_lower
+                ):
+                    emit(
+                        "WARN",
+                        "thumbnail_source_no_video_stream",
+                        force=True,
+                        video=video,
+                        output=out,
+                        elapsed_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
+                        attempt=f"seek={ss}",
+                        reason="no_video_stream",
+                    )
+                    no_video_stream = True
+                    break
+            except subprocess.TimeoutExpired as exc:
+                attempts.append(f"seek={ss}:timeout={exc.timeout}s")
+            except Exception as exc:
+                attempts.append(f"seek={ss}:exception={type(exc).__name__}:{exc}")
                 continue
+        if not no_video_stream:
+            emit(
+                "WARN",
+                "thumbnail_generation_failed",
+                force=True,
+                video=video,
+                output=out,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
+                attempts=" || ".join(attempts),
+                background=background,
+                burst=burst,
+            )
         return False
     finally:
         try:
             if tmp.exists():
                 tmp.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            error("thumbnail_temp_cleanup_failed", exc, temp=tmp, video=video)
 
 
 def save_thumbnail_jpeg(out: Path, jpeg_bytes: bytes) -> bool:
     """把 JPEG 写入预览图文件（按隐私设置加密或明文）。"""
     if not jpeg_bytes or jpeg_bytes[:2] != b"\xff\xd8":
+        from vg.diagnostics import emit
+
+        emit(
+            "WARN",
+            "thumbnail_jpeg_rejected",
+            force=True,
+            output=out,
+            reason="invalid_jpeg_header",
+            bytes=len(jpeg_bytes or b""),
+        )
         return False
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         _clear_path_attrs_windows(out)
         out.write_bytes(pack_thumb_bytes(jpeg_bytes))
         return True
-    except OSError:
+    except OSError as exc:
+        from vg.diagnostics import error
+
+        error("thumbnail_jpeg_write_failed", exc, output=out, bytes=len(jpeg_bytes))
         return False
 
 
@@ -608,6 +725,15 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
     cpu = _probe_cpu_label(workers)
     STATE["meta_progress"] = f"{label}探测{scope} 0/{total}（{cpu}）…"
     log(f"[元数据] {label}探测{scope}：共 {total} 个，占用 {cpu}")
+    from vg.diagnostics import call as diagnostic_call
+
+    diagnostic_call(
+        "enrich_metadata_parallel",
+        total=total,
+        workers=workers,
+        scope=scope,
+        label=label,
+    )
     ok_n = fail_n = done = 0
     lock = threading.Lock()
 
@@ -705,6 +831,7 @@ def start_metadata_enrichment() -> None:
 def _bg_enrich_metadata() -> None:
     from vg.catalog import rebuild_indexes
 
+    started = time.perf_counter()
     try:
         videos = STATE.get("videos") or []
         want_duration = probe_duration_enabled()
@@ -752,9 +879,22 @@ def _bg_enrich_metadata() -> None:
             f"元数据完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}"
         )
         log(f"[元数据] 完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}")
+        from vg.diagnostics import perf as diagnostic_perf
+
+        diagnostic_perf(
+            "metadata_enrichment",
+            (time.perf_counter() - started) * 1000.0,
+            force=True,
+            scope=scope,
+            readable=ok_n,
+            failed=fail_n,
+            reused=reused_n,
+        )
     except Exception as e:
         STATE["meta_progress"] = f"元数据探测失败: {e}"
-        log(f"[元数据] 失败: {e}")
+        from vg.util import log_error
+
+        log_error("metadata_enrichment_failed", e)
     finally:
         _state._meta_running = False
         threading.Timer(4.0, lambda: STATE.update(meta_progress="")).start()

@@ -10,7 +10,7 @@ from vg.disk_libs import stamp_lib_meta
 from vg.duplicates import mark_duplicates
 from vg.genres import ensure_video_genres
 from vg.series import attach_series
-from vg.state import STATE
+from vg.state import STATE, invalidate_query_caches
 from vg.taxonomy import ensure_video_taxonomy, taxonomy_facets
 
 CATEGORY_PREFER_ORDER = (
@@ -32,6 +32,7 @@ _CATEGORY_RANK = {name: index for index, name in enumerate(CATEGORY_PREFER_ORDER
 
 class CatalogIndexes(TypedDict):
     by_id: dict[str, dict]
+    by_thumb_id: dict[str, dict]
     by_category: dict[str, list[dict]]
     facets: dict
 
@@ -137,6 +138,7 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
 
     by_category: dict[str, list[dict]] = {}
     by_id: dict[str, dict] = {}
+    by_thumb_id: dict[str, dict] = {}
     type_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
     genre_counts: dict[str, int] = {}
@@ -145,6 +147,9 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
         vid = video.get("id")
         if vid:
             by_id[vid] = video
+        thumb_id = (video.get("_thumb_id") or vid or "").strip()
+        if thumb_id:
+            by_thumb_id[thumb_id] = video
         if heavy:
             video.pop("_q", None)
         ensure_video_taxonomy(video)
@@ -176,6 +181,7 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
     ]
     return {
         "by_id": by_id,
+        "by_thumb_id": by_thumb_id,
         "by_category": by_category,
         "facets": {
             "types": types,
@@ -193,10 +199,18 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
     STATE["videos"] = videos
     STATE["by_category"] = indexes["by_category"]
     STATE["by_id"] = indexes["by_id"]
+    STATE["by_thumb_id"] = indexes["by_thumb_id"]
     # Existing ownership must survive a unified multi-disk rebuild.
     stamp_lib_meta(videos, overwrite=False)
     STATE["facets"] = indexes["facets"]
     STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+    invalidate_query_caches()
+    try:
+        from vg.web import invalidate_response_caches
+
+        invalidate_response_caches()
+    except ImportError:
+        pass
 
 
 def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> None:

@@ -19,7 +19,7 @@ from vg.roots import (
     tree_for_scope,
     videos_for_scope,
 )
-from vg.scan import scan_videos
+from vg.scan import _final_scan_change_counts, scan_videos
 from vg.state import STATE
 from vg.util import format_size, video_id
 
@@ -219,6 +219,32 @@ class MultiDiskRescanTests(unittest.TestCase):
         mounts = get_mounted_roots()
         self.assertEqual(len(mounts), 2)
         self.assertTrue(any(m.lower() == offline.lower() for m in mounts))
+
+    def test_final_change_count_ignores_collapsed_raw_segment_candidates(self) -> None:
+        previous = {
+            "set-1": {
+                "id": "set-1",
+                "kind": "ts_set",
+                "size": 300,
+                "mtime": 100.25,
+            }
+        }
+        collapsed = [
+            {
+                "id": "set-1",
+                "kind": "ts_set",
+                "size": 300,
+                "mtime": 100.75,
+            }
+        ]
+
+        reused, changed = _final_scan_change_counts(
+            collapsed,
+            previous,
+            incremental=True,
+        )
+
+        self.assertEqual((reused, changed), (1, 0))
 
 
 if __name__ == "__main__":

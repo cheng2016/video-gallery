@@ -96,6 +96,14 @@ class PrivacyModeTests(unittest.TestCase):
         self.assertFalse(reset["probe_video_duration"])
         self.assertFalse(reset["probe_video_audio"])
 
+    def test_full_logging_defaults_to_aggregated_and_persists(self):
+        self.assertFalse(privacy_snapshot()["full_logging"])
+        enabled = set_privacy(full_logging=True)
+        self.assertTrue(enabled["full_logging"])
+        self.assertTrue(load_prefs()["full_logging"])
+        disabled = set_privacy(full_logging=False)
+        self.assertFalse(disabled["full_logging"])
+
 
 if __name__ == "__main__":
     unittest.main()

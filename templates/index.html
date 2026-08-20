@@ -1033,6 +1033,180 @@
       color: #041016;
       font-weight: 600;
     }
+    .settings-modal {
+      align-items: center;
+      justify-content: center;
+      padding: 28px 16px;
+      background: rgba(6, 10, 16, 0.62);
+      backdrop-filter: blur(8px);
+    }
+    .settings-panel {
+      display: flex;
+      flex-direction: column;
+      width: min(440px, 100%);
+      max-height: min(86vh, 720px);
+      background: #171d27;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+    }
+    .settings-panel .modal-bar {
+      flex-shrink: 0;
+      background: transparent;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      padding: 16px 20px 14px;
+    }
+    .settings-panel .modal-bar .title {
+      font-size: 1.02rem;
+      font-weight: 650;
+      letter-spacing: 0.01em;
+    }
+    .settings-panel .modal-close {
+      width: 32px;
+      height: 32px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-size: 1.35rem;
+    }
+    .settings-panel .modal-close:hover {
+      background: rgba(232, 93, 93, 0.16);
+      color: #fff;
+    }
+    .settings-panel .modal-info {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      padding: 6px 16px 18px;
+      max-width: none;
+      color: var(--text);
+      scrollbar-width: thin;
+      scrollbar-color: #3a4660 transparent;
+      -webkit-overflow-scrolling: touch;
+    }
+    .settings-panel .modal-info::-webkit-scrollbar {
+      width: 8px;
+    }
+    .settings-panel .modal-info::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .settings-panel .modal-info::-webkit-scrollbar-thumb {
+      background: #3a4660;
+      border-radius: 8px;
+      border: 2px solid #171d27;
+    }
+    .settings-panel .modal-actions {
+      flex-shrink: 0;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 12px 16px 16px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      background: #131820;
+    }
+    .settings-section {
+      padding: 14px 4px 6px;
+    }
+    .settings-section h3 {
+      margin: 0 0 8px 4px;
+      font-size: 0.72rem;
+      font-weight: 650;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .settings-list {
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 12px;
+      background: rgba(8, 12, 18, 0.45);
+      overflow: hidden;
+    }
+    .settings-option,
+    .settings-link {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin: 0;
+      padding: 12px 14px;
+      border: 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      background: transparent;
+      cursor: pointer;
+      color: inherit;
+      text-decoration: none;
+    }
+    .settings-option:last-child,
+    .settings-link:last-child {
+      border-bottom: 0;
+    }
+    .settings-option:hover,
+    .settings-link:hover {
+      background: rgba(255,255,255,0.035);
+    }
+    .settings-option input {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      margin: 2px 0 0;
+      flex-shrink: 0;
+      border: 1.5px solid #4a5568;
+      background: #121820;
+      cursor: pointer;
+    }
+    .settings-option input[type="checkbox"] {
+      border-radius: 5px;
+    }
+    .settings-option input[type="radio"] {
+      border-radius: 50%;
+    }
+    .settings-option input:checked {
+      border-color: var(--accent);
+      background: var(--accent);
+      box-shadow: inset 0 0 0 3px #121820;
+    }
+    .settings-option input[type="checkbox"]:checked {
+      box-shadow: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='%23041016' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.2 6.6 11.2 12.5 4.8'/></svg>");
+      background-size: 12px 12px;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+    .settings-option span,
+    .settings-link span {
+      min-width: 0;
+    }
+    .settings-option strong,
+    .settings-link strong {
+      display: block;
+      color: var(--text);
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    .settings-option small,
+    .settings-link small {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+    .settings-link {
+      align-items: center;
+    }
+    .settings-link-go {
+      margin-left: auto;
+      color: var(--accent);
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+    .settings-hint {
+      margin: 8px 8px 0;
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.45;
+      word-break: break-all;
+    }
 
     /* mobile */
     .menu-toggle {
@@ -1222,60 +1396,88 @@
     <div class="modal-info" id="seriesModalList" style="flex:1;overflow:auto;max-height:70vh"></div>
   </div>
 
-  <div class="modal" id="privacyModal">
-    <div class="modal-bar">
-      <div class="title">设置</div>
-      <button class="modal-close" id="privacyModalClose" title="关闭">×</button>
-    </div>
-    <div class="modal-info" style="line-height:1.6;max-width:36rem">
-      <div style="margin:0 0 6px"><strong>隐私与缓存</strong></div>
-      <p style="margin:0 0 12px;opacity:.85">控制预览图加密方式和缓存保存位置。</p>
-      <label style="display:flex;align-items:flex-start;gap:10px;margin:12px 0;cursor:pointer">
-        <input type="checkbox" id="privacyEncrypt" style="margin-top:4px" />
-        <span>
-          <strong>加密预览图</strong><br>
-          <span style="opacity:.75;font-size:.9em">开启后缓存为加密文件，不能当普通图片打开；关闭则为普通 JPEG（文件名仍是 .vgt）。</span>
-        </span>
-      </label>
-      <div style="margin:14px 0 6px"><strong>缓存位置</strong></div>
-      <label style="display:flex;align-items:flex-start;gap:10px;margin:8px 0;cursor:pointer">
-        <input type="radio" name="privacyCacheLoc" value="program" style="margin-top:4px" />
-        <span>
-          <strong>程序目录（推荐）</strong><br>
-          <span style="opacity:.75;font-size:.9em">写到软件旁的 preview_cache，不污染视频盘；换机/重装时注意备份。</span>
-        </span>
-      </label>
-      <label style="display:flex;align-items:flex-start;gap:10px;margin:8px 0;cursor:pointer">
-        <input type="radio" name="privacyCacheLoc" value="disk" style="margin-top:4px" />
-        <span>
-          <strong>视频盘内</strong><br>
-          <span style="opacity:.75;font-size:.9em">写到各盘根目录 .video_gallery_cache（隐藏文件夹）；盘带走封面也在，但会占用盘空间。</span>
-        </span>
-      </label>
-      <p id="privacyPathHint" style="margin:12px 0 0;font-size:.85em;opacity:.7;word-break:break-all"></p>
-      <div style="margin:18px 0 6px;padding-top:14px;border-top:1px solid var(--border)"><strong>视频探测</strong></div>
-      <p style="margin:0 0 10px;opacity:.75;font-size:.9em">默认关闭。开启后会调用 ffprobe 扫描对应信息，并记住选择供下次启动使用。</p>
-      <label style="display:flex;align-items:flex-start;gap:10px;margin:10px 0;cursor:pointer">
-        <input type="checkbox" id="probeVideoDuration" style="margin-top:4px" />
-        <span>
-          <strong>探测视频时长</strong><br>
-          <span style="opacity:.75;font-size:.9em">读取并显示每个视频的播放时长，会增加首次探测的磁盘和 CPU 开销。</span>
-        </span>
-      </label>
-      <label style="display:flex;align-items:flex-start;gap:10px;margin:10px 0;cursor:pointer">
-        <input type="checkbox" id="probeVideoAudio" style="margin-top:4px" />
-        <span>
-          <strong>探测视频音频</strong><br>
-          <span style="opacity:.75;font-size:.9em">识别音频编码以及浏览器兼容性，会增加首次探测开销。</span>
-        </span>
-      </label>
-      <div style="margin:18px 0 6px;padding-top:14px;border-top:1px solid var(--border)"><strong>反馈</strong></div>
-      <p style="margin:0;opacity:.8">遇到扫不到、没声音或封面错误，可提交问题反馈。</p>
-    </div>
-    <div class="modal-actions" style="justify-content:flex-end;flex-wrap:wrap;gap:8px">
-      <a class="btn" href="https://github.com/cheng2016/video-gallery/issues/new/choose" target="_blank" rel="noopener">反馈问题</a>
-      <button type="button" class="btn" id="privacyCancel">取消</button>
-      <button type="button" class="btn primary" id="privacySave">保存</button>
+  <div class="modal settings-modal" id="privacyModal">
+    <div class="settings-panel">
+      <div class="modal-bar">
+        <div class="title">设置</div>
+        <button class="modal-close" id="privacyModalClose" title="关闭">×</button>
+      </div>
+      <div class="modal-info" id="privacyBody">
+        <section class="settings-section">
+          <h3>隐私与缓存</h3>
+          <div class="settings-list">
+            <label class="settings-option">
+              <input type="checkbox" id="privacyEncrypt" />
+              <span>
+                <strong>加密预览图</strong>
+                <small>开启后缓存为加密文件，不能当普通图片打开。</small>
+              </span>
+            </label>
+            <label class="settings-option">
+              <input type="radio" name="privacyCacheLoc" value="program" />
+              <span>
+                <strong>程序目录（推荐）</strong>
+                <small>写到软件旁的 preview_cache，不占用视频盘。</small>
+              </span>
+            </label>
+            <label class="settings-option">
+              <input type="radio" name="privacyCacheLoc" value="disk" />
+              <span>
+                <strong>视频盘内</strong>
+                <small>写到各盘隐藏目录，盘带走封面也在。</small>
+              </span>
+            </label>
+          </div>
+          <p class="settings-hint" id="privacyPathHint"></p>
+        </section>
+        <section class="settings-section">
+          <h3>视频探测</h3>
+          <div class="settings-list">
+            <label class="settings-option">
+              <input type="checkbox" id="probeVideoDuration" />
+              <span>
+                <strong>探测视频时长</strong>
+                <small>显示播放时长，首次会多占磁盘和 CPU。</small>
+              </span>
+            </label>
+            <label class="settings-option">
+              <input type="checkbox" id="probeVideoAudio" />
+              <span>
+                <strong>探测视频音频</strong>
+                <small>识别音频编码和浏览器兼容性。</small>
+              </span>
+            </label>
+          </div>
+        </section>
+        <section class="settings-section">
+          <h3>性能诊断</h3>
+          <div class="settings-list">
+            <label class="settings-option">
+              <input type="checkbox" id="fullLogging" />
+              <span>
+                <strong>打印全量性能日志</strong>
+                <small>按时间打印关键方法；关闭后仍记录异常和慢操作。</small>
+              </span>
+            </label>
+          </div>
+        </section>
+        <section class="settings-section">
+          <h3>反馈</h3>
+          <div class="settings-list">
+            <a class="settings-link" href="https://github.com/cheng2016/video-gallery/issues/new/choose" target="_blank" rel="noopener">
+              <span>
+                <strong>反馈问题</strong>
+                <small>扫不到、没声音或封面错误时可提交。</small>
+              </span>
+              <span class="settings-link-go">打开</span>
+            </a>
+          </div>
+        </section>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="privacyCancel">取消</button>
+        <button type="button" class="btn primary" id="privacySave">保存</button>
+      </div>
     </div>
   </div>
 
@@ -1366,6 +1568,7 @@
       rawCount: 0,
       lastPlayId: "",
       loadedVideos: [],
+      loadedBaseOffset: 0,
       virtualEnabled: false,
       lib: "",           // 当前浏览的挂载根；空=全部
       mountedRoots: [],  // [{path,label,count,categories}]
@@ -1408,6 +1611,119 @@
     const VIRTUAL_GAP = 18;
 
     const $ = (id) => document.getElementById(id);
+    let currentOperationId = "";
+    let lastUiOperationId = "";
+    let lastUiOperationAt = 0;
+    const CLIENT_SESSION_ID =
+      (Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+
+    function newOperationId(prefix) {
+      return `${prefix || "op"}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    function clientLog(event, fields, level, operationId) {
+      const payload = {
+        event: String(event || "unknown"),
+        level: level || "INFO",
+        operation_id: operationId || currentOperationId || lastUiOperationId || "",
+        page: location.pathname + location.search,
+        fields: {
+          session_id: CLIENT_SESSION_ID,
+          ...(fields || {}),
+        },
+      };
+      try {
+        fetch("/api/client-log", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(payload.operation_id ? { "X-VG-Operation-ID": payload.operation_id } : {}),
+          },
+          body: JSON.stringify(payload),
+          keepalive: true,
+        }).catch(() => {});
+      } catch (_) {}
+    }
+
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = function tracedFetch(input, init) {
+      const options = { ...(init || {}) };
+      const operationId =
+        currentOperationId ||
+        (Date.now() - lastUiOperationAt < 10000 ? lastUiOperationId : "");
+      if (operationId) {
+        const headers = new Headers(
+          options.headers || (input instanceof Request ? input.headers : undefined)
+        );
+        if (!headers.has("X-VG-Operation-ID")) {
+          headers.set("X-VG-Operation-ID", operationId);
+        }
+        options.headers = headers;
+      }
+      return nativeFetch(input, options);
+    };
+
+    document.addEventListener("click", (e) => {
+      const target = e.target && e.target.closest
+        ? e.target.closest("button,a,[role='button'],.card,video")
+        : null;
+      if (!target) return;
+      const operationId = currentOperationId || newOperationId("ui");
+      lastUiOperationId = operationId;
+      lastUiOperationAt = Date.now();
+      clientLog("ui_click", {
+        target_id: target.id || "",
+        tag: target.tagName || "",
+        action: target.dataset ? (target.dataset.action || "") : "",
+        item_id: target.dataset ? (target.dataset.id || target.dataset.epid || "") : "",
+        kind: target.dataset ? (target.dataset.kind || "") : "",
+        label: String(target.getAttribute("aria-label") || target.title || target.textContent || "").trim().slice(0, 120),
+      }, "INFO", operationId);
+    }, true);
+
+    document.addEventListener("change", (e) => {
+      const target = e.target;
+      if (!target) return;
+      const operationId = currentOperationId || newOperationId("ui");
+      lastUiOperationId = operationId;
+      lastUiOperationAt = Date.now();
+      clientLog("ui_change", {
+        target_id: target.id || "",
+        tag: target.tagName || "",
+        value: target.type === "file" ? (target.files ? target.files.length : 0) : String(target.value || "").slice(0, 120),
+      }, "INFO", operationId);
+    }, true);
+
+    let clientInputLogTimer = 0;
+    document.addEventListener("input", (e) => {
+      const target = e.target;
+      if (!target || !target.id) return;
+      clearTimeout(clientInputLogTimer);
+      clientInputLogTimer = setTimeout(() => {
+        clientLog("ui_input", {
+          target_id: target.id,
+          value: target.type === "password" ? "[hidden]" : String(target.value || "").slice(0, 120),
+          value_length: String(target.value || "").length,
+        });
+      }, 500);
+    }, true);
+
+    window.addEventListener("error", (e) => {
+      clientLog("browser_javascript_error", {
+        message: e.message || "",
+        source: e.filename || "",
+        line: e.lineno || 0,
+        column: e.colno || 0,
+        error: e.error ? String(e.error.stack || e.error) : "",
+      }, "ERROR");
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      const reason = e && e.reason;
+      if (isAbortError(reason)) return;
+      clientLog("browser_unhandled_rejection", {
+        reason: String(reason && (reason.stack || reason) || "unknown"),
+      }, "ERROR");
+    });
 
     const PREFS_KEY = "vg_ui_prefs_v2";
     const PLAY_PROG_KEY = "vg_play_progress";
@@ -1532,16 +1848,33 @@
       return hints;
     }
 
-    function infoUrl(id, root) {
-      let u = "/api/info/" + encodeURIComponent(id);
-      if (root) u += "?root=" + encodeURIComponent(root);
-      return u;
+    function beginPlaybackOperation(id, source, root, extra) {
+      currentOperationId = newOperationId("play");
+      clientLog("video_open_requested", {
+        video_id: id,
+        source: source || "unknown",
+        root: root || "",
+        ...(extra || {}),
+      }, "INFO", currentOperationId);
+      return currentOperationId;
+    }
+
+    function infoUrl(id, root, operationId) {
+      const params = new URLSearchParams();
+      if (root) params.set("root", root);
+      const op = operationId || currentOperationId || "";
+      if (op) params.set("op", op);
+      const query = params.toString();
+      return "/api/info/" + encodeURIComponent(id) + (query ? ("?" + query) : "");
     }
 
     async function openFromHistory(id, rootHint) {
       const row = getPlayRow(id) || {};
       const root = rootHint || row.root || "";
-      const r = await fetch(infoUrl(id, root));
+      const operationId = beginPlaybackOperation(id, "history", root);
+      const r = await fetch(infoUrl(id, root, operationId), {
+        headers: { "X-VG-Operation-ID": operationId },
+      });
       if (!r.ok) {
         const offline = root && !(state.root && String(state.root).toLowerCase() === String(root).toLowerCase());
         throw new Error(
@@ -1643,19 +1976,58 @@
     }
 
     async function fetchTree() {
+      const operationId = newOperationId("tree");
       const params = new URLSearchParams();
       if (state.lib) params.set("lib", state.lib);
+      params.set("op", operationId);
+      clientLog("tree_load_requested", {
+        lib: state.lib || "all",
+      }, "INFO", operationId);
       const r = await fetch("/api/tree" + (params.toString() ? ("?" + params) : ""), {
         cache: "no-store",
+        headers: { "X-VG-Operation-ID": operationId },
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
+        clientLog("tree_load_failed", {
+          status: r.status,
+          request_id: r.headers.get("X-VG-Request-ID") || "",
+          reason: err.msg || "",
+        }, "ERROR", operationId);
         throw new Error(err.msg || ("树接口失败 HTTP " + r.status));
       }
-      return r.json();
+      const data = await r.json();
+      clientLog("tree_load_completed", {
+        request_id: r.headers.get("X-VG-Request-ID") || "",
+        count: data.count || 0,
+        roots: Array.isArray(data.roots) ? data.roots.length : 0,
+        scanning: !!data.scanning,
+      }, "INFO", operationId);
+      return data;
+    }
+
+    const activeListControllers = new Set();
+    function isAbortError(err) {
+      if (err == null) return false;
+      const text = String((err && (err.message || err.reason || err)) || err);
+      return (
+        err === "channel-switch" ||
+        err.name === "AbortError" ||
+        err.name === "TimeoutError" ||
+        /aborted|AbortError|channel-switch/i.test(text)
+      );
+    }
+    function cancelListRequests() {
+      activeListControllers.forEach((controller) => {
+        try {
+          controller.abort("channel-switch");
+        } catch (_) {}
+      });
+      activeListControllers.clear();
     }
 
     async function fetchVideos(offset) {
+      const operationId = newOperationId("page");
       const params = new URLSearchParams();
       if (state.category) params.set("category", state.category);
       if (state.folder) params.set("folder", state.folder);
@@ -1670,12 +2042,53 @@
       if (state.lib) params.set("lib", state.lib);
       params.set("offset", String(offset == null ? state.offset : offset));
       params.set("limit", String(state.pageSize));
-      const r = await fetch("/api/videos?" + params, { cache: "no-store" });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.msg || ("列表接口失败 HTTP " + r.status));
+      params.set("op", operationId);
+      clientLog("page_load_requested", {
+        offset: offset == null ? state.offset : offset,
+        limit: state.pageSize,
+        lib: state.lib || "all",
+        category: state.category || "",
+        folder: state.folder || "",
+        view: state.view || "",
+        sort: state.sort || "",
+        query_length: (state.query || "").length,
+      }, "INFO", operationId);
+      const controller = new AbortController();
+      activeListControllers.add(controller);
+      try {
+        const r = await fetch("/api/videos?" + params, {
+          cache: "no-store",
+          signal: controller.signal,
+          headers: { "X-VG-Operation-ID": operationId },
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.msg || ("列表接口失败 HTTP " + r.status));
+        }
+        const data = await r.json();
+        clientLog("page_load_completed", {
+          request_id: r.headers.get("X-VG-Request-ID") || "",
+          offset: data.offset || 0,
+          rows: Array.isArray(data.videos) ? data.videos.length : 0,
+          total: data.count || 0,
+          has_more: !!data.has_more,
+        }, "INFO", operationId);
+        return data;
+      } catch (e) {
+        // 切换频道/筛选时主动取消旧请求，不算失败
+        if (controller.signal.aborted || isAbortError(e)) {
+          clientLog("page_load_aborted", {
+            reason: controller.signal.aborted ? "channel-switch" : String(e),
+          }, "INFO", operationId);
+          return null;
+        }
+        clientLog("page_load_failed", {
+          reason: String(e),
+        }, "ERROR", operationId);
+        throw e;
+      } finally {
+        activeListControllers.delete(controller);
       }
-      return r.json();
     }
 
     async function loadDrives() {
@@ -1858,7 +2271,7 @@
       '<rect fill="#1a1d24" width="480" height="270"/>' +
       '<polygon points="210,100 210,170 280,135" fill="#4a5568"/></svg>'
     );
-    const THUMB_CONCURRENCY = 4;
+    const THUMB_CONCURRENCY = 8;
     const thumbsLoaded = new Set();
     const thumbWait = [];
     let thumbBusy = 0;
@@ -1873,6 +2286,18 @@
     function lazyThumbMarkup(id, tv, root) {
       const url = thumbUrlFor(id, tv, root);
       return `src="${THUMB_PENDING_SRC}" data-thumb-url="${escapeAttr(url)}" alt="" decoding="async"`;
+    }
+
+    function resetThumbQueue() {
+      thumbWait.length = 0;
+      if (thumbObserver) {
+        thumbObserver.disconnect();
+        thumbObserver = null;
+      }
+      if (pageThumbObserver) {
+        pageThumbObserver.disconnect();
+        pageThumbObserver = null;
+      }
     }
 
     function onThumbVisible(entries, observer) {
@@ -1941,25 +2366,21 @@
       if (!url) return;
       img.dataset.thumbLoading = "1";
       thumbBusy += 1;
-      const probe = new Image();
-      probe.onload = () => {
+      // One request only — a separate probe Image used to double /thumb load and
+      // starve the server when switching channels on large libraries.
+      img.onload = () => {
         img.dataset.thumbLoading = "";
         thumbBusy = Math.max(0, thumbBusy - 1);
-        if (img.isConnected) {
-          thumbsLoaded.add(url);
-          img.onload = () => thumbLoadReady(img);
-          img.onerror = () => thumbLoadFailed(img);
-          img.src = url;
-        }
+        thumbLoadReady(img);
         pumpThumbs();
       };
-      probe.onerror = () => {
+      img.onerror = () => {
         img.dataset.thumbLoading = "";
         thumbBusy = Math.max(0, thumbBusy - 1);
         if (img.isConnected) thumbLoadFailed(img);
         else pumpThumbs();
       };
-      probe.src = url;
+      img.src = url;
     }
 
     function thumbLoadReady(img) {
@@ -1983,12 +2404,13 @@
       img.dataset.thumbLoading = "";
       img.dataset.thumbWatched = "1";
       img.onerror = null;
+      img.onload = null;
       img.src = THUMB_PENDING_SRC;
-      if (attempt >= 7) {
+      if (attempt >= 10) {
         pumpThumbs();
         return;
       }
-      const delay = Math.min(5000, Math.round(650 * Math.pow(1.65, attempt - 1)));
+      const delay = Math.min(4000, Math.round(400 * Math.pow(1.55, attempt - 1)));
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img._thumbRetryTimer = setTimeout(() => {
         if (!img.isConnected) return;
@@ -2602,7 +3024,7 @@
         ? `<span class="dur">${v.ep_count || 0} 集</span>`
         : (v.seg_count ? `<span class="dur">${v.seg_count} 段</span>` : (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8" ? `<span class="dur">HLS</span>` : (v.duration_h ? `<span class="dur">${escapeHtml(v.duration_h)}</span>` : `<span class="dur">${escapeHtml((v.ext || "").toUpperCase())}</span>`)));
       return `
-        <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}">
+        <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}" data-has-thumb="${v.has_thumb ? "1" : "0"}">
           <div class="thumb">
             <img ${lazyThumbMarkup(thumbId, tv, v.root || "")} />
             <div class="play"><div class="play-icon"></div></div>
@@ -2659,21 +3081,27 @@
       }
     }
 
+    const MAX_LOADED_VIDEOS = 3000;
+
     function renderVirtualGrid() {
       const grid = $("grid");
       const root = $("contentScroll");
       if (!grid || !root) return;
       const cols = getVirtualCols();
-      const total = state.loadedVideos.length;
+      const loadedBase = Number(state.loadedBaseOffset) || 0;
+      const total = Math.max(state.totalCount || 0, loadedBase + state.loadedVideos.length);
       const totalRows = Math.ceil(total / cols) || 1;
       const rowStride = VIRTUAL_ROW_H + VIRTUAL_GAP;
       const scrollTop = root.scrollTop;
       const viewH = root.clientHeight;
       const firstRow = Math.max(0, Math.floor(scrollTop / rowStride) - 3);
       const lastRow = Math.min(totalRows - 1, Math.ceil((scrollTop + viewH) / rowStride) + 3);
-      const start = firstRow * cols;
-      const end = Math.min(total, (lastRow + 1) * cols);
-      const padTop = firstRow * rowStride;
+      const globalStart = firstRow * cols;
+      const globalEnd = Math.min(total, (lastRow + 1) * cols);
+      const start = Math.max(0, globalStart - loadedBase);
+      const end = Math.max(start, Math.min(state.loadedVideos.length, globalEnd - loadedBase));
+      const renderStartRow = Math.max(firstRow, Math.floor(loadedBase / cols));
+      const padTop = renderStartRow * rowStride;
       const padBot = Math.max(0, (totalRows - lastRow - 1) * rowStride);
       grid.innerHTML =
         `<div class="v-spacer" style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
@@ -2681,7 +3109,7 @@
         `<div class="v-spacer" style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
       updateGridHint();
       watchThumbs(grid);
-      if (state.hasMore && end >= total - cols * 2 && !loadingMore) loadMore();
+      if (state.hasMore && globalEnd >= loadedBase + state.loadedVideos.length - cols * 2 && !loadingMore) loadMore();
     }
 
     let virtualScrollBound = false;
@@ -2707,8 +3135,14 @@
       const wrap = $("loadMoreWrap");
       if (!append) {
         state.loadedVideos = (videos || []).slice();
+        state.loadedBaseOffset = 0;
       } else if (videos && videos.length) {
         state.loadedVideos = state.loadedVideos.concat(videos);
+        if (state.loadedVideos.length > MAX_LOADED_VIDEOS) {
+          const drop = state.loadedVideos.length - MAX_LOADED_VIDEOS;
+          state.loadedVideos.splice(0, drop);
+          state.loadedBaseOffset = (Number(state.loadedBaseOffset) || 0) + drop;
+        }
       }
       state.virtualEnabled = state.totalCount >= VIRTUAL_MIN;
       bindVirtualScroll();
@@ -2764,6 +3198,8 @@
       const token = ++refreshToken;
       state.offset = 0;
       loadingMore = false;
+      cancelListRequests();
+      resetThumbQueue();
       let needNav = options.nav !== false;
       if (!state.navCache) needNav = true;
 
@@ -2802,11 +3238,12 @@
       try {
         data = await fetchVideos(0);
       } catch (e) {
+        if (isAbortError(e) || token !== refreshToken) return;
         $("countLabel").textContent = "列表加载失败";
         alert(String(e.message || e));
         return;
       }
-      if (token !== refreshToken) return;
+      if (!data || token !== refreshToken) return;
       const genreBefore = state.genre;
       const themeBefore = state.theme;
       const backgroundBefore = state.background;
@@ -2819,7 +3256,7 @@
         (backgroundBefore && !state.background)
       ) {
         data = await fetchVideos(0);
-        if (token !== refreshToken) return;
+        if (!data || token !== refreshToken) return;
         renderGenreTags(data.genres || []);
         renderThemeTags(data.themes || []);
         renderBackgroundTags(data.backgrounds || []);
@@ -2851,7 +3288,7 @@
         state.background = "";
         saveUiPrefs();
         data = await fetchVideos(0);
-        if (token !== refreshToken) return;
+        if (!data || token !== refreshToken) return;
         state.totalCount = data.count || 0;
         state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
         state.hasMore = !!data.has_more;
@@ -2874,7 +3311,7 @@
           state.background = "";
           saveUiPrefs();
           data = await fetchVideos(0);
-          if (token !== refreshToken) return;
+          if (!data || token !== refreshToken) return;
           state.totalCount = data.count || 0;
           state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
           state.hasMore = !!data.has_more;
@@ -2909,12 +3346,14 @@
       if (hint) hint.textContent = "加载中…";
       try {
         const data = await fetchVideos(state.offset);
+        if (!data) return;
         const batch = data.videos || [];
         state.hasMore = !!data.has_more;
         state.offset += batch.length;
         if (!batch.length) state.hasMore = false;
         renderGrid(batch, false, true);
       } catch (e) {
+        if (isAbortError(e)) return;
         console.warn(e);
         if (hint) hint.textContent = "加载失败，请继续下滑重试";
         state.hasMore = true;
@@ -2990,6 +3429,34 @@
     let currentConvertJobId = "";
     let playProgressTimer = 0;
 
+    function playbackQuery(root) {
+      const params = new URLSearchParams();
+      if (root) params.set("root", root);
+      if (currentOperationId) params.set("op", currentOperationId);
+      const query = params.toString();
+      return query ? ("?" + query) : "";
+    }
+
+    function mediaErrorFields(video) {
+      const err = video && video.error;
+      return {
+        video_id: currentPlayId,
+        kind: currentPlayKind,
+        src: video ? (video.currentSrc || video.src || "") : "",
+        current_time: video ? Number(video.currentTime || 0).toFixed(2) : "0",
+        duration: video && Number.isFinite(video.duration) ? Number(video.duration).toFixed(2) : "",
+        ready_state: video ? video.readyState : "",
+        network_state: video ? video.networkState : "",
+        error_code: err ? err.code : "",
+        error_message: err ? (err.message || "") : "",
+      };
+    }
+
+    const playerForDiagnostics = $("player");
+    playerForDiagnostics.addEventListener("error", () => {
+      clientLog("player_error", mediaErrorFields(playerForDiagnostics), "ERROR", currentOperationId);
+    });
+
     function destroyHls() {
       if (hlsPlayer) {
         try { hlsPlayer.destroy(); } catch (_) {}
@@ -3006,9 +3473,20 @@
         segPlay.index = i;
         $("modalInfo").textContent =
           `TS 分片 ${i + 1}/${total}（浏览器原生接力播放）· 也可点「系统播放器」`;
-        const rootQ = root ? `?root=${encodeURIComponent(root)}` : "";
+        const rootQ = playbackQuery(root);
         video.src = `/stream/${id}/seg/${i}${rootQ}`;
-        video.play().catch(() => {});
+        clientLog("player_source_set", {
+          video_id: id,
+          source: "ts_segment",
+          segment_index: i,
+          url: video.src,
+        }, "INFO", currentOperationId);
+        video.play().catch((err) => {
+          clientLog("player_play_rejected", {
+            ...mediaErrorFields(video),
+            reason: String(err),
+          }, "WARN", currentOperationId);
+        });
       };
       video.onended = () => {
         if (!segPlay || segPlay.id !== id) return;
@@ -3024,9 +3502,27 @@
         hlsPlayer.loadSource(url);
         hlsPlayer.attachMedia(video);
         hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(() => {});
+          clientLog("hls_manifest_parsed", {
+            video_id: currentPlayId,
+            url,
+          }, "INFO", currentOperationId);
+          video.play().catch((err) => {
+            clientLog("player_play_rejected", {
+              ...mediaErrorFields(video),
+              reason: String(err),
+            }, "WARN", currentOperationId);
+          });
         });
         hlsPlayer.on(Hls.Events.ERROR, (_, data) => {
+          clientLog("hls_error", {
+            video_id: currentPlayId,
+            url,
+            fatal: !!(data && data.fatal),
+            type: data && data.type,
+            details: data && data.details,
+            response_code: data && data.response ? data.response.code : "",
+            error: data && data.error ? String(data.error) : "",
+          }, data && data.fatal ? "ERROR" : "WARN", currentOperationId);
           if (data && data.fatal) {
             destroyHls();
             if (typeof fallback === "function") fallback();
@@ -3040,7 +3536,12 @@
       }
       if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = url;
-        video.play().catch(() => {});
+        video.play().catch((err) => {
+          clientLog("player_play_rejected", {
+            ...mediaErrorFields(video),
+            reason: String(err),
+          }, "WARN", currentOperationId);
+        });
         return;
       }
       if (typeof fallback === "function") fallback();
@@ -3262,6 +3763,7 @@
       stopConvertPoll();
       currentConvertJobId = "";
       currentPlayId = id;
+      if (!currentOperationId) beginPlaybackOperation(id, "direct", (extra && extra.root) || "");
       currentPlayMeta = {
         name: name || "",
         folder: (extra && extra.folder) || "",
@@ -3299,26 +3801,47 @@
         $("modalInfo").textContent =
           "浏览器播放失败。请点「系统播放器」用本地播放器打开" + (path ? "：\n" + path : "");
       };
+      clientLog("player_opened", {
+        video_id: id,
+        name: name || "",
+        ext: ext || "",
+        kind: kind || "",
+        segment_count: segCount || 0,
+        root: currentPlayMeta.root,
+        rel: currentPlayMeta.rel,
+        browser_hard: hard,
+        audio_hard: audioHard,
+      }, "INFO", currentOperationId);
       $("modal").classList.add("open");
       bindPlayProgress(video);
 
       if (kind === "m3u8") {
-        const rootQ = currentPlayMeta.root ? `?root=${encodeURIComponent(currentPlayMeta.root)}` : "";
+        const rootQ = playbackQuery(currentPlayMeta.root);
         playHls(`/playlist/${id}.m3u8${rootQ}`);
         resumePlayback(video, id);
         return;
       }
       if (kind === "ts_set") {
-        const rootQ = currentPlayMeta.root ? `?root=${encodeURIComponent(currentPlayMeta.root)}` : "";
+        const rootQ = playbackQuery(currentPlayMeta.root);
         playHls(`/playlist/${id}.m3u8${rootQ}`, () => playTsSetSequential(id, segCount || 1, 0, currentPlayMeta.root));
         resumePlayback(video, id);
         return;
       }
 
-      const rootQ = currentPlayMeta.root ? `?root=${encodeURIComponent(currentPlayMeta.root)}` : "";
+      const rootQ = playbackQuery(currentPlayMeta.root);
       video.src = "/stream/" + id + rootQ;
+      clientLog("player_source_set", {
+        video_id: id,
+        source: "stream",
+        url: video.src,
+      }, "INFO", currentOperationId);
       resumePlayback(video, id);
-      video.play().catch(() => {});
+      video.play().catch((err) => {
+        clientLog("player_play_rejected", {
+          ...mediaErrorFields(video),
+          reason: String(err),
+        }, "WARN", currentOperationId);
+      });
     }
 
     async function openRemoteWithClientPlayer(playUrl) {
@@ -3366,6 +3889,7 @@
 
     function closePlayer() {
       const video = $("player");
+      clientLog("player_closed", mediaErrorFields(video), "INFO", currentOperationId);
       if (currentPlayId && video) {
         savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0, currentPlayMeta);
       }
@@ -3376,6 +3900,7 @@
         playProgressTimer = 0;
       }
       currentPlayId = "";
+      currentOperationId = "";
       currentPlayMeta = { name: "", folder: "" };
       currentPlayKind = "";
       currentConvertJobId = "";
@@ -3634,11 +4159,23 @@
       const root = card.dataset.root || "";
       const kind = card.dataset.kind || "";
       if (kind === "series") {
+        clientLog("series_open_requested", {
+          series_id: id,
+          root,
+        });
         openSeries(id);
         return;
       }
+      const operationId = beginPlaybackOperation(id, "grid_card", root, {
+        has_thumb: card.dataset.hasThumb === "1",
+        thumb_id: card.dataset.cover || "",
+        kind,
+        ext: card.dataset.ext || "",
+      });
       try {
-        const info = await fetch(infoUrl(id, root)).then((r) => {
+        const info = await fetch(infoUrl(id, root, operationId), {
+          headers: { "X-VG-Operation-ID": operationId },
+        }).then((r) => {
           if (!r.ok) throw new Error("not found");
           return r.json();
         });
@@ -3660,7 +4197,12 @@
             audio_codec: info.audio_codec || "",
           }
         );
-      } catch {
+      } catch (err) {
+        clientLog("video_open_failed", {
+          video_id: id,
+          root,
+          reason: String(err),
+        }, "ERROR", operationId);
         alert("无法打开该视频（文件可能已移动或删除）");
       }
     });
@@ -3698,8 +4240,14 @@
       const id = btn.dataset.epid;
       const root = btn.dataset.eproot || "";
       $("seriesModal").classList.remove("open");
+      const operationId = beginPlaybackOperation(id, "series_episode", root);
       try {
-        const info = await fetch(infoUrl(id, root)).then((r) => r.json());
+        const info = await fetch(infoUrl(id, root, operationId), {
+          headers: { "X-VG-Operation-ID": operationId },
+        }).then((r) => {
+          if (!r.ok) throw new Error("not found");
+          return r.json();
+        });
         openPlayer(
           id,
           info.name,
@@ -3718,7 +4266,12 @@
             audio_codec: info.audio_codec || "",
           }
         );
-      } catch {
+      } catch (err) {
+        clientLog("video_open_failed", {
+          video_id: id,
+          root,
+          reason: String(err),
+        }, "ERROR", operationId);
         alert("无法打开该分集");
       }
     });
@@ -4403,6 +4956,7 @@
         $("privacyEncrypt").checked = !!data.encrypt_thumbs;
         $("probeVideoDuration").checked = !!data.probe_video_duration;
         $("probeVideoAudio").checked = !!data.probe_video_audio;
+        $("fullLogging").checked = !!data.full_logging;
         const loc = data.cache_location === "disk" ? "disk" : "program";
         document.querySelectorAll('input[name="privacyCacheLoc"]').forEach((el) => {
           el.checked = el.value === loc;
@@ -4423,6 +4977,7 @@
       const encrypt = !!($("privacyEncrypt") && $("privacyEncrypt").checked);
       const probe_video_duration = !!($("probeVideoDuration") && $("probeVideoDuration").checked);
       const probe_video_audio = !!($("probeVideoAudio") && $("probeVideoAudio").checked);
+      const full_logging = !!($("fullLogging") && $("fullLogging").checked);
       const locEl = document.querySelector('input[name="privacyCacheLoc"]:checked');
       const cache_location = (locEl && locEl.value) || "program";
       try {
@@ -4434,6 +4989,7 @@
             cache_location,
             probe_video_duration,
             probe_video_audio,
+            full_logging,
           }),
         });
         const data = await r.json();

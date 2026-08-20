@@ -22,7 +22,7 @@ from vg.config import (
 from vg.state import STATE
 
 def log(msg: str) -> None:
-    """CMD 窗口可见日志（立即刷新），并写入 startup.log。"""
+    """Always-visible progress summary; detailed events use diagnostics.emit."""
     try:
         print(msg, flush=True)
     except Exception:
@@ -34,11 +34,26 @@ def log(msg: str) -> None:
         pass
 
 
+def log_error(event: str, exc: BaseException | None = None, **fields) -> None:
+    """Errors are always printed and durably persisted."""
+    from vg.diagnostics import error
+
+    error(event, exc, **fields)
+
+
+def log_perf(event: str, elapsed_ms: float, *, force: bool = False, **fields) -> None:
+    from vg.diagnostics import perf
+
+    perf(event, elapsed_ms, force=force, **fields)
+
+
 def thumb_worker_count(total: int = 0, *, burst: bool = False) -> int:
     cpus = max(1, os.cpu_count() or 4)
     if burst:
-        cap = THUMB_WORKERS_BURST if THUMB_WORKERS_BURST > 0 else cpus
-        n = max(1, min(cap, cpus))
+        # Leave at least 2 logical CPUs for waitress + UI while first-scan
+        # thumbnails run; full-core burst previously stalled /thumb for seconds.
+        cap = THUMB_WORKERS_BURST if THUMB_WORKERS_BURST > 0 else max(1, cpus - 2)
+        n = max(1, min(cap, max(1, cpus - 2)))
     else:
         # Leave at least half of the logical CPUs available to the web UI/player.
         n = max(1, min(THUMB_WORKERS_MAX, max(1, cpus // 2)))

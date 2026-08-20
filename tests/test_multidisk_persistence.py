@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vg import cache
 from vg import config
@@ -285,6 +286,19 @@ class MultiDiskPersistenceTests(unittest.TestCase):
         rebuild_indexes(STATE["videos"])
 
         self.assertIsNone(find_video_by_id(item["id"], prefer_root=str(self.root_b)))
+
+    def test_preferred_lookup_uses_runtime_index_without_reloading_disk(self):
+        item = self.item(self.root_a)
+        STATE["videos"] = [item]
+        rebuild_indexes(STATE["videos"])
+
+        with (
+            patch("vg.catalog_repository.find_in_disk_libs") as disk_lookup,
+        ):
+            found = find_video_by_id(item["id"], prefer_root=str(self.root_a))
+
+        self.assertIs(found, item)
+        disk_lookup.assert_not_called()
 
     def test_video_api_attaches_thumbnails_before_stripping_private_fields(self):
         source_id = video_id("same.mp4")

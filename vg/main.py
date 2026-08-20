@@ -217,6 +217,12 @@ def main():
     args = parser.parse_args()
 
     prefs = load_prefs()
+    try:
+        from vg.privacy import refresh_logging_runtime
+
+        refresh_logging_runtime()
+    except Exception as e:
+        bootlog.write(f"logging prefs failed: {e}", urgent=True)
     want_lan = bool(prefs.get("lan_share"))
     if args.lan:
         want_lan = True

@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -20,6 +21,7 @@ from urllib.parse import quote
 
 try:
     from flask import Flask, Response, abort, g, jsonify, render_template, request, send_file
+    from werkzeug.exceptions import HTTPException
 except ImportError:
     print("=" * 50)
     print("【错误】未安装依赖 Flask")
@@ -84,7 +86,6 @@ from vg.media import (
     save_thumbnail_jpeg,
 )
 from vg.roots import (
-    add_mount,
     filter_videos_by_lib,
     get_mounted_roots,
     publish_unified_library,
@@ -114,15 +115,43 @@ from vg.util import (
     resolve_under_root,
     resolve_video_path,
 )
+from vg.diagnostics import (
+    aggregate as diagnostic_aggregate,
+    call as diagnostic_call,
+    emit as diagnostic_emit,
+    emit_rate_limited as diagnostic_emit_rate_limited,
+    error as diagnostic_error,
+    perf as diagnostic_perf,
+    request_id as diagnostic_request_id,
+    timed_lock as diagnostic_timed_lock,
+)
 
 app = Flask(__name__, template_folder=str(APP_DIR / "templates"))
 _delete_lock = threading.RLock()
 _video_response_cache: OrderedDict[tuple, tuple[bytes, int, str]] = OrderedDict()
 _video_response_cache_lock = threading.RLock()
-_VIDEO_RESPONSE_CACHE_MAX = 64
+_VIDEO_RESPONSE_CACHE_MAX = 32
+_VIDEO_RESPONSE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+_video_response_cache_bytes = 0
 _tree_payload_cache: OrderedDict[tuple, dict] = OrderedDict()
 _tree_payload_cache_lock = threading.RLock()
 _TREE_PAYLOAD_CACHE_MAX = 16
+
+
+@app.errorhandler(Exception)
+def _log_unhandled_exception(exc):
+    if isinstance(exc, HTTPException):
+        return exc
+    diagnostic_error(
+        "http_unhandled_exception",
+        exc,
+        request_id=getattr(g, "_diag_request_id", ""),
+        method=request.method,
+        path=request.path,
+    )
+    if (request.path or "").startswith("/api/"):
+        return jsonify({"ok": False, "msg": "服务器内部错误"}), 500
+    return Response("服务器内部错误", status=500, mimetype="text/plain")
 
 
 def _stable_request_args() -> tuple:
@@ -131,7 +160,7 @@ def _stable_request_args() -> tuple:
         sorted(
             (key, tuple(values))
             for key, values in request.args.lists()
-            if key != "_"
+            if key not in ("_", "op")
         )
     )
 
@@ -149,7 +178,10 @@ def _video_response_cache_key() -> tuple:
 
 
 def _cached_video_response(key: tuple):
-    with _video_response_cache_lock:
+    with diagnostic_timed_lock(
+        _video_response_cache_lock,
+        "video_response_cache_read",
+    ):
         value = _video_response_cache.get(key)
         if value is not None:
             _video_response_cache.move_to_end(key)
@@ -157,21 +189,65 @@ def _cached_video_response(key: tuple):
 
 
 def _store_video_response(key: tuple, response: Response) -> None:
+    global _video_response_cache_bytes
     if response.status_code != 200:
         return
     value = (response.get_data(), response.status_code, response.mimetype)
-    with _video_response_cache_lock:
+    size = len(value[0])
+    if size > _VIDEO_RESPONSE_CACHE_MAX_BYTES // 2:
+        diagnostic_emit(
+            "WARN",
+            "api_videos_response_cache_skip",
+            force=True,
+            reason="single_response_too_large",
+            bytes=size,
+            limit=_VIDEO_RESPONSE_CACHE_MAX_BYTES // 2,
+        )
+        return
+    with diagnostic_timed_lock(
+        _video_response_cache_lock,
+        "video_response_cache_write",
+    ):
+        if not _video_response_cache:
+            _video_response_cache_bytes = 0
+        old = _video_response_cache.pop(key, None)
+        if old:
+            _video_response_cache_bytes -= len(old[0])
         _video_response_cache[key] = value
+        _video_response_cache_bytes += size
         _video_response_cache.move_to_end(key)
-        while len(_video_response_cache) > _VIDEO_RESPONSE_CACHE_MAX:
-            _video_response_cache.popitem(last=False)
+        while (
+            len(_video_response_cache) > _VIDEO_RESPONSE_CACHE_MAX
+            or _video_response_cache_bytes > _VIDEO_RESPONSE_CACHE_MAX_BYTES
+        ):
+            _, removed = _video_response_cache.popitem(last=False)
+            _video_response_cache_bytes -= len(removed[0])
+
+
+def invalidate_response_caches() -> None:
+    global _video_response_cache_bytes
+    with diagnostic_timed_lock(
+        _video_response_cache_lock,
+        "video_response_cache_invalidate",
+    ):
+        _video_response_cache.clear()
+        _video_response_cache_bytes = 0
+    with diagnostic_timed_lock(
+        _tree_payload_cache_lock,
+        "tree_payload_cache_invalidate",
+    ):
+        _tree_payload_cache.clear()
 
 
 def _serialized(lock: threading.RLock):
     def decorate(func):
         @wraps(func)
         def wrapped(*args, **kwargs):
-            with lock:
+            with diagnostic_timed_lock(
+                lock,
+                f"http_serialized_{func.__name__}",
+                path=request.path,
+            ):
                 return func(*args, **kwargs)
 
         return wrapped
@@ -182,6 +258,23 @@ def _serialized(lock: threading.RLock):
 def _client_ip() -> str:
     # 本机直连，不信任伪造的 X-Forwarded-For
     return (request.remote_addr or "").strip()
+
+
+def _operation_id() -> str:
+    raw = (
+        request.headers.get("X-VG-Operation-ID")
+        or request.args.get("op")
+        or ""
+    ).strip()
+    return raw[:64] if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", raw) else ""
+
+
+@app.before_request
+def _start_request_diagnostics():
+    g._diag_started = time.perf_counter()
+    g._diag_request_id = diagnostic_request_id()
+    g._diag_operation_id = _operation_id()
+    return None
 
 
 @app.before_request
@@ -207,6 +300,9 @@ def _enforce_lan_share():
 def _serve_cached_videos_response():
     if request.method != "GET" or request.path != "/api/videos":
         return None
+    if not hasattr(g, "_diag_started"):
+        g._diag_started = time.perf_counter()
+        g._diag_request_id = diagnostic_request_id()
     # This hook can return before later before_request handlers run.
     note_frontend_activity(0.45)
     key = (
@@ -217,7 +313,9 @@ def _serve_cached_videos_response():
     g._video_response_cache_key = key
     cached = _cached_video_response(key)
     if cached is None:
+        diagnostic_aggregate("api_videos_response_cache_miss")
         return None
+    diagnostic_aggregate("api_videos_response_cache_hit")
     body, status, mimetype = cached
     return Response(body, status=status, mimetype=mimetype)
 
@@ -235,6 +333,82 @@ def _let_foreground_requests_preempt_thumbnails():
     ):
         note_frontend_activity(0.45)
     return None
+
+
+@app.after_request
+def _log_request_diagnostics(resp):
+    started = getattr(g, "_diag_started", None)
+    if started is None:
+        return resp
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    path = request.path or ""
+    rid = getattr(g, "_diag_request_id", "")
+    operation_id = getattr(g, "_diag_operation_id", "")
+    resp.headers["X-VG-Request-ID"] = rid
+    if operation_id:
+        resp.headers["X-VG-Operation-ID"] = operation_id
+    deferred_thumb = resp.status_code == 503 and path.startswith("/thumb/")
+    quiet_404 = resp.status_code == 404 and path in ("/favicon.ico", "/robots.txt")
+    hot_path = (
+        path.startswith(("/thumb/", "/stream/", "/hls/"))
+        or path in ("/api/status", "/api/client-log", "/favicon.ico", "/robots.txt")
+    )
+    if resp.status_code >= 400 and not deferred_thumb and not quiet_404:
+        diagnostic_emit(
+            "ERROR",
+            "http_request_failed",
+            force=True,
+            request_id=rid,
+            operation_id=operation_id,
+            method=request.method,
+            path=path,
+            status=resp.status_code,
+            elapsed_ms=f"{elapsed_ms:.1f}",
+        )
+    elif quiet_404:
+        pass
+    elif hot_path:
+        diagnostic_aggregate(
+            "http_hot_path",
+            elapsed_ms,
+            failed=False,
+        )
+        # The aggregate keeps hot-path volume cheap, but used to hide which
+        # endpoint was responsible for multi-second stalls.  Keep normal
+        # requests aggregated and emit a detailed line only for slow ones.
+        if elapsed_ms >= 1000.0:
+            diagnostic_perf(
+                "http_hot_path_slow",
+                elapsed_ms,
+                force=True,
+                request_id=rid,
+                operation_id=operation_id,
+                method=request.method,
+                path=path,
+                status=resp.status_code,
+            )
+    elif elapsed_ms >= 200.0:
+        diagnostic_perf(
+            "http_request",
+            elapsed_ms,
+            force=True,
+            request_id=rid,
+            operation_id=operation_id,
+            method=request.method,
+            path=path,
+            status=resp.status_code,
+        )
+    else:
+        diagnostic_call(
+            "http_request",
+            request_id=rid,
+            operation_id=operation_id,
+            verb=request.method,
+            path=path,
+            status=resp.status_code,
+            elapsed_ms=f"{elapsed_ms:.1f}",
+        )
+    return resp
 
 
 @app.after_request
@@ -285,6 +459,70 @@ def index():
     return Response(html, mimetype="text/html; charset=utf-8")
 
 
+@app.route("/api/client-log", methods=["POST"])
+def api_client_log():
+    """Receive ordered browser actions/errors so one operation can be traced end-to-end."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "msg": "日志格式错误"}), 400
+    event = str(data.get("event") or "").strip()[:80]
+    if not event or not re.fullmatch(r"[A-Za-z0-9_.:-]+", event):
+        return jsonify({"ok": False, "msg": "事件名错误"}), 400
+    raw_fields = data.get("fields")
+    fields: dict[str, object] = {}
+    if isinstance(raw_fields, dict):
+        for key, value in list(raw_fields.items())[:24]:
+            safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", str(key))[:40]
+            if not safe_key:
+                continue
+            if isinstance(value, bool) or value is None:
+                fields[safe_key] = value
+            elif isinstance(value, (int, float)):
+                fields[safe_key] = value
+            else:
+                fields[safe_key] = str(value).replace("\r", " ").replace("\n", " ")[:500]
+    operation_id = str(data.get("operation_id") or _operation_id()).strip()[:64]
+    level = str(data.get("level") or "INFO").upper()
+    if level not in {"INFO", "WARN", "ERROR"}:
+        level = "INFO"
+    if event.startswith("player_") and event not in {
+        "player_error",
+        "player_play_rejected",
+        "player_opened",
+        "player_closed",
+        "player_source_set",
+    }:
+        diagnostic_aggregate("client_player_noise")
+        return jsonify({"ok": True})
+    # Client fields may reuse names already passed as kwargs (request_id, action).
+    renamed = {
+        "request_id": "related_request_id",
+        "action": "target_action",
+        "operation_id": "client_operation_id",
+        "page": "client_page",
+        "force": "client_force",
+        "detail": "client_detail",
+        "event": "client_event",
+        "level": "client_level",
+        "client_ip": "reported_client_ip",
+    }
+    for key, alias in renamed.items():
+        if key in fields:
+            fields[alias] = fields.pop(key)
+    diagnostic_emit(
+        level,
+        "client_action",
+        force=True,
+        action=event,
+        operation_id=operation_id,
+        request_id=getattr(g, "_diag_request_id", ""),
+        client_ip=_client_ip(),
+        page=str(data.get("page") or "")[:200],
+        **fields,
+    )
+    return jsonify({"ok": True})
+
+
 def _tree_cache_key(lib: str) -> tuple:
     return (
         int(STATE.get("lib_gen") or 0),
@@ -296,7 +534,10 @@ def _tree_cache_key(lib: str) -> tuple:
 
 
 def _cached_tree_payload(key: tuple) -> dict | None:
-    with _tree_payload_cache_lock:
+    with diagnostic_timed_lock(
+        _tree_payload_cache_lock,
+        "tree_payload_cache_read",
+    ):
         value = _tree_payload_cache.get(key)
         if value is not None:
             _tree_payload_cache.move_to_end(key)
@@ -304,7 +545,10 @@ def _cached_tree_payload(key: tuple) -> dict | None:
 
 
 def _store_tree_payload(key: tuple, payload: dict) -> None:
-    with _tree_payload_cache_lock:
+    with diagnostic_timed_lock(
+        _tree_payload_cache_lock,
+        "tree_payload_cache_write",
+    ):
         _tree_payload_cache[key] = payload
         _tree_payload_cache.move_to_end(key)
         while len(_tree_payload_cache) > _TREE_PAYLOAD_CACHE_MAX:
@@ -312,10 +556,15 @@ def _store_tree_payload(key: tuple, payload: dict) -> None:
 
 
 def _build_tree_payload(lib: str) -> dict:
+    started = time.perf_counter()
     root = STATE["root"]
     all_videos = STATE["videos"] or []
+    scope_started = time.perf_counter()
     videos = videos_for_scope(lib or None)
+    scope_ms = (time.perf_counter() - scope_started) * 1000.0
+    tree_started = time.perf_counter()
     tree = tree_for_scope(lib or None)
+    tree_ms = (time.perf_counter() - tree_started) * 1000.0
 
     # Prefer precomputed facets for the unified catalog; scoped views recompute.
     # Also reject cache when it disagrees with the folder tree (same video source).
@@ -328,6 +577,7 @@ def _build_tree_payload(lib: str) -> dict:
         and int(facets.get("count") or -1) == tree_count
         and not STATE.get("scanning")
     )
+    facets_started = time.perf_counter()
     if use_cached:
         types = facets.get("types") or []
         genres = facets.get("genres") or []
@@ -363,8 +613,11 @@ def _build_tree_payload(lib: str) -> dict:
         themes = taxonomy_facets(videos, "themes")
         backgrounds = taxonomy_facets(videos, "backgrounds")
         count = len(videos)
+    facets_ms = (time.perf_counter() - facets_started) * 1000.0
+    mounts_started = time.perf_counter()
     mounts = roots_summary(all_videos)
-    return {
+    mounts_ms = (time.perf_counter() - mounts_started) * 1000.0
+    payload = {
         "tree": tree,
         "types": types,
         "genres": genres,
@@ -377,19 +630,38 @@ def _build_tree_payload(lib: str) -> dict:
         "roots": mounts,
         "multi": len(mounts) > 1,
     }
+    diagnostic_perf(
+        "tree_build",
+        (time.perf_counter() - started) * 1000.0,
+        lib=lib or "all",
+        videos=len(videos),
+        categories=len(categories),
+        roots=len(mounts),
+        facets_cache="hit" if use_cached else "miss",
+        scope_ms=f"{scope_ms:.1f}",
+        tree_ms=f"{tree_ms:.1f}",
+        facets_ms=f"{facets_ms:.1f}",
+        mounts_ms=f"{mounts_ms:.1f}",
+        scanning=bool(STATE.get("scanning")),
+    )
+    return payload
 
 
 @app.route("/api/tree")
 def api_tree():
+    started = time.perf_counter()
     lib = (request.args.get("lib") or "").strip()
+    diagnostic_call("api_tree", lib=lib or "all")
     cache_key = _tree_cache_key(lib)
     heavy = _cached_tree_payload(cache_key)
+    cache_result = "hit" if heavy is not None else "miss"
     if heavy is None:
         heavy = _build_tree_payload(lib)
         if not STATE.get("scanning") and not STATE.get("updating"):
             _store_tree_payload(cache_key, heavy)
 
-    return jsonify({
+    serialize_started = time.perf_counter()
+    response = jsonify({
         **heavy,
         "scanning": STATE["scanning"],
         "updating": bool(STATE.get("updating")),
@@ -409,6 +681,21 @@ def api_tree():
         "lan_urls": lan_urls(),
         "privacy": privacy_snapshot(),
     })
+    serialize_ms = (time.perf_counter() - serialize_started) * 1000.0
+    diagnostic_perf(
+        "api_tree",
+        (time.perf_counter() - started) * 1000.0,
+        force=True,
+        request_id=getattr(g, "_diag_request_id", ""),
+        lib=lib or "all",
+        cache=cache_result,
+        count=heavy.get("count"),
+        roots=len(heavy.get("roots") or []),
+        serialize_ms=f"{serialize_ms:.1f}",
+        response_bytes=response.calculate_content_length(),
+        scanning=bool(STATE.get("scanning")),
+    )
+    return response
 
 
 @app.route("/api/videos-by-ids", methods=["POST"])
@@ -424,11 +711,13 @@ def api_videos_by_ids():
 
     # 先按历史里的 root 预加载索引（不切换当前盘）
     roots_needed = []
+    seen_roots: set[str] = set()
     for vid in ids[:100]:
         h = hints.get(str(vid)) or hints.get(vid) or {}
         if isinstance(h, dict):
             r = (h.get("root") or "").strip()
-            if r:
+            if r and r.casefold() not in seen_roots:
+                seen_roots.add(r.casefold())
                 roots_needed.append(r)
                 ensure_library(r)
 
@@ -668,6 +957,9 @@ def _prepare_video_query(
 
 @app.route("/api/videos")
 def api_videos():
+    api_started = time.perf_counter()
+    query_ms = 0.0
+    page_ms = 0.0
     folder = request.args.get("folder", "").strip().strip("/")
     category = request.args.get("category", "").strip().strip("/")
     genre = request.args.get("genre", "").strip()
@@ -695,6 +987,195 @@ def api_videos():
     folder_all = request.args.get("folder_all", "").strip() in ("1", "true", "yes")
     view = (request.args.get("view") or "flat").strip().lower()
     view = view if view in ("series", "flat") else "flat"
+    try:
+        offset = max(0, int(request.args.get("offset", 0) or 0))
+    except ValueError:
+        offset = 0
+    try:
+        limit = int(request.args.get("limit", 60) or 60)
+    except ValueError:
+        limit = 60
+    limit = max(1, min(limit, 200))
+    diagnostic_call(
+        "api_videos",
+        lib=lib or "all",
+        category=category or "all",
+        folder=folder,
+        view=view,
+        sort=sort,
+        offset=offset,
+        limit=limit,
+        query_len=len(q_raw),
+    )
+
+    mounted = [str(root) for root in (STATE.get("mounted_roots") or []) if root]
+    sql_roots = [lib] if lib else mounted
+    if not sql_roots and STATE.get("root"):
+        sql_roots = [str(STATE["root"])]
+    sql_skip_reason = ""
+    if view != "flat":
+        sql_skip_reason = f"view={view}"
+    elif ":" in q_raw:
+        sql_skip_reason = "complex_search"
+    elif not sql_roots:
+        sql_skip_reason = "no_roots"
+    sql_eligible = not sql_skip_reason
+    if sql_eligible:
+        from vg.catalog_db import (
+            merge_catalog_facets,
+            query_catalog_facets,
+            query_catalog_page,
+            query_catalogs_page,
+        )
+
+        sql_caches = _catalog_caches_for_roots(sql_roots)
+        if not sql_caches:
+            sql_skip_reason = "no_catalog_cache"
+            sql_eligible = False
+        else:
+            # Match Python scope: exact folder only when user unchecked「全部」
+            # on a folder that still has children; otherwise include descendants.
+            include_descendants = True
+            if folder and not folder_all:
+                has_children = False
+                for cache in sql_caches:
+                    probe = query_catalog_facets(
+                        cache,
+                        category=category,
+                        folder=folder,
+                        include_descendants=True,
+                        ext=ext,
+                        search=q_raw,
+                    )
+                    if probe.get("subfolders"):
+                        has_children = True
+                        break
+                include_descendants = not has_children
+
+            sql_started = time.perf_counter()
+            query_kwargs = dict(
+                category=category,
+                folder=folder,
+                include_descendants=include_descendants,
+                ext=ext,
+                search=q_raw,
+                genre=genre,
+                theme=theme,
+                background=background,
+                sort=sort,
+            )
+            if len(sql_caches) == 1:
+                page, total = query_catalog_page(
+                    sql_caches[0],
+                    offset=offset,
+                    limit=limit,
+                    **query_kwargs,
+                )
+            else:
+                page, total = query_catalogs_page(
+                    sql_caches,
+                    offset=offset,
+                    limit=limit,
+                    **query_kwargs,
+                )
+            sql_ms = (time.perf_counter() - sql_started) * 1000.0
+            thumb_started = time.perf_counter()
+            slim = []
+            for video in page:
+                enriched = dict(video)
+                if not enriched.get("root"):
+                    enriched["root"] = lib or enriched.get("_lib_root") or ""
+                if lib and not enriched.get("root"):
+                    enriched["root"] = lib
+                attach_thumb_meta(enriched)
+                excluded = {
+                    "_q", "_lib_root", "_lib_cache", "_folder_raw", "_thumb_id", "segments"
+                }
+                row = {key: enriched[key] for key in enriched if key not in excluded}
+                if not row.get("root"):
+                    row["root"] = lib or ""
+                slim.append(row)
+            thumb_meta_ms = (time.perf_counter() - thumb_started) * 1000.0
+            facet_started = time.perf_counter()
+            if offset == 0:
+                facet_rows = [
+                    query_catalog_facets(
+                        cache,
+                        category=category,
+                        folder=folder,
+                        include_descendants=include_descendants,
+                        ext=ext,
+                        search=q_raw,
+                    )
+                    for cache in sql_caches
+                ]
+                facets = (
+                    facet_rows[0]
+                    if len(facet_rows) == 1
+                    else merge_catalog_facets(facet_rows)
+                )
+            else:
+                facets = {"genres": [], "themes": [], "backgrounds": [], "subfolders": []}
+            facets_ms = (time.perf_counter() - facet_started) * 1000.0
+            levels = []
+            if offset == 0 and facets["subfolders"]:
+                levels = [{
+                    "label": "子类",
+                    "prefix": folder or category,
+                    "all_id": "" if not folder else folder,
+                    "selected": "",
+                    "items": facets["subfolders"],
+                }]
+            serialize_started = time.perf_counter()
+            response = jsonify({
+                "videos": slim,
+                "count": total,
+                "raw_count": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(slim) < total,
+                "genres": facets["genres"],
+                "themes": facets["themes"],
+                "backgrounds": facets["backgrounds"],
+                "subfolders": facets["subfolders"],
+                "subfolder_levels": levels,
+                "view": "flat",
+                "lib": lib,
+                "facets_included": offset == 0,
+            })
+            serialize_ms = (time.perf_counter() - serialize_started) * 1000.0
+            diagnostic_perf(
+                "api_videos_sql",
+                (time.perf_counter() - api_started) * 1000.0,
+                force=True,
+                rows=len(slim),
+                total_rows=total,
+                offset=offset,
+                caches=len(sql_caches),
+                sql_ms=f"{sql_ms:.1f}",
+                facets_ms=f"{facets_ms:.1f}",
+                thumb_meta_ms=f"{thumb_meta_ms:.1f}",
+                serialize_ms=f"{serialize_ms:.1f}",
+                response_bytes=response.calculate_content_length(),
+                category=category or "all",
+                folder=folder,
+                sort=sort,
+            )
+            return response
+
+    if sql_skip_reason:
+        diagnostic_emit_rate_limited(
+            "WARN",
+            "api_videos_sql_fallback",
+            key=f"{sql_skip_reason}|{view}|{lib or 'all'}",
+            interval=30.0,
+            force=True,
+            reason=sql_skip_reason,
+            view=view,
+            lib=lib or "all",
+            roots=len(sql_roots),
+        )
+
     query_key = (
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
@@ -711,7 +1192,9 @@ def api_videos():
         sort,
     )
     cached_query = video_query_cache_get(query_key)
+    query_cache = "L1" if cached_query is not None else "miss"
     if cached_query is None:
+        query_started = time.perf_counter()
         cached_query = _prepare_video_query(
             lib,
             category,
@@ -726,6 +1209,7 @@ def api_videos():
             view,
             sort,
         )
+        query_ms = (time.perf_counter() - query_started) * 1000.0
         video_query_cache_put(query_key, cached_query)
     (
         videos,
@@ -738,23 +1222,18 @@ def api_videos():
     ) = cached_query
 
     total = len(videos)
-    try:
-        offset = max(0, int(request.args.get("offset", 0) or 0))
-    except ValueError:
-        offset = 0
-    try:
-        limit = int(request.args.get("limit", 60) or 60)
-    except ValueError:
-        limit = 60
-    limit = max(1, min(limit, 200))
-
+    page_started = time.perf_counter()
     page = videos[offset: offset + limit]
     slim = []
     for v in page:
         if v.get("kind") == "series":
             row = {k: v[k] for k in v if k not in ("_q", "_lib_root", "_lib_cache", "_folder_raw", "_thumb_id")}
             cover_id = v.get("cover_id") or ""
-            if cover_id:
+            if cover_id and not row.get("thumb_id"):
+                row["thumb_id"] = cover_id
+            # Collapse already copied cover thumb flags. Re-resolving each card
+            # during scan reloads the whole disk catalog and stalls the list.
+            if cover_id and not v.get("has_thumb"):
                 cover = find_video_by_id(
                     cover_id,
                     prefer_root=v.get("_lib_root") or v.get("root") or None,
@@ -786,7 +1265,8 @@ def api_videos():
             row["actors"] = list(v["actors"])
         slim.append(row)
 
-    return jsonify({
+    page_ms = (time.perf_counter() - page_started) * 1000.0
+    payload = {
         "videos": slim,
         "count": total,
         "raw_count": raw_count,
@@ -800,7 +1280,30 @@ def api_videos():
         "subfolder_levels": subfolder_levels,
         "view": view if view in ("series", "flat") else "flat",
         "lib": lib,
-    })
+    }
+    serialize_started = time.perf_counter()
+    response = jsonify(payload)
+    serialize_ms = (time.perf_counter() - serialize_started) * 1000.0
+    total_ms = (time.perf_counter() - api_started) * 1000.0
+    diagnostic_perf(
+        "api_videos",
+        total_ms,
+        force=True,
+        request_id=getattr(g, "_diag_request_id", ""),
+        query_ms=f"{query_ms:.1f}",
+        page_ms=f"{page_ms:.1f}",
+        serialize_ms=f"{serialize_ms:.1f}",
+        rows=len(slim),
+        total_rows=total,
+        offset=offset,
+        cache=query_cache,
+        response_bytes=response.calculate_content_length(),
+        category=category or "all",
+        folder=folder,
+        sort=sort,
+        view=view,
+    )
+    return response
 
 
 @app.route("/api/drives")
@@ -830,6 +1333,7 @@ def api_drives():
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
     """扫描所选盘；新盘自动加入片库，已加入的盘则更新其索引。"""
+    started = time.perf_counter()
     data = request.get_json(silent=True) or {}
     path = (data.get("path") or data.get("drive") or "").strip().strip('"')
     if not path:
@@ -846,23 +1350,37 @@ def api_scan():
     if not root.is_dir():
         return jsonify({"ok": False, "msg": f"目录不存在: {root}"}), 400
 
-    # 先同步加入挂载列表，随后扫描。扫描任何新盘都不会替换已经加入的盘。
-    ok, msg = add_mount(root, scan_if_needed=False)
-    if not ok:
-        return jsonify({"ok": False, "msg": msg}), 400
+    # start_scan's background worker mounts the root before loading/scanning it.
+    # Doing add_mount here first archived and republished the entire catalog on
+    # the request thread, making this supposedly asynchronous endpoint block
+    # for 5–6 seconds on a multi-disk library.
+    scan_started = time.perf_counter()
     ok, scan_msg = start_scan(
         root,
         do_thumbs=bool(do_thumbs),
         force=bool(force),
         replace_mounts=False,
     )
+    scan_start_ms = (time.perf_counter() - scan_started) * 1000.0
     if not ok:
         return jsonify({"ok": False, "msg": scan_msg, "roots": roots_summary()}), 409
+    roots_started = time.perf_counter()
+    roots = roots_summary()
+    roots_ms = (time.perf_counter() - roots_started) * 1000.0
+    diagnostic_perf(
+        "api_scan_start",
+        (time.perf_counter() - started) * 1000.0,
+        root=root,
+        force_scan=bool(force),
+        scan_start_ms=f"{scan_start_ms:.1f}",
+        roots_ms=f"{roots_ms:.1f}",
+        roots=len(roots),
+    )
     return jsonify({
         "ok": True,
         "msg": f"{root_label(root)} 已自动加入片库，{scan_msg}",
         "root": str(root),
-        "roots": roots_summary(),
+        "roots": roots,
     })
 
 
@@ -883,20 +1401,85 @@ def api_rescan():
     return jsonify({"ok": True, "msg": msg})
 
 
+def _cache_dir_from_root_hint(root_hint: str | None) -> Path | None:
+    """Resolve a scan-root hint to its thumb cache without catalog lookup.
+
+    Used by /thumb hot path so already-generated .vgt files do not wait on
+    find_video_by_id over multi-thousand catalogs (which starved waitress).
+    Skips ensure_cache_dir's legacy cleanup — that belongs on scan, not every
+    image request.
+    """
+    raw = (root_hint or "").strip()
+    if not raw:
+        return None
+    try:
+        from vg.disk_libs import _norm_root_str
+
+        key = _norm_root_str(raw)
+        lib = (STATE.get("disk_libs") or {}).get(key)
+        if isinstance(lib, dict):
+            cached = (lib.get("cache_dir") or "").strip()
+            if cached:
+                path = Path(cached)
+                if path.is_dir():
+                    return path
+    except OSError:
+        pass
+    try:
+        from vg.privacy import resolve_cache_dir_for_root
+
+        return resolve_cache_dir_for_root(Path(raw))
+    except OSError:
+        return None
+
+
+def _catalog_caches_for_roots(roots: list[str]) -> list[Path]:
+    """Resolve only roots that already have a catalog.sqlite."""
+    from vg.catalog_db import catalog_exists
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root_hint in roots:
+        cache = _cache_dir_from_root_hint(root_hint)
+        if cache is None or not catalog_exists(cache):
+            continue
+        try:
+            key = str(cache.resolve()).casefold()
+        except OSError:
+            key = str(cache).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(Path(cache))
+    return out
+
+
+def _serve_thumb_jpeg(cache: Path | None, file_id: str):
+    if not cache or not file_id:
+        return None
+    raw = read_thumb_jpeg(cache, file_id)
+    if not raw:
+        return None
+    return Response(
+        raw,
+        mimetype="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.route("/thumb/<vid>")
 def thumb(vid: str):
     if not re.fullmatch(r"[a-f0-9]{16}", vid):
+        diagnostic_emit(
+            "WARN",
+            "thumbnail_request_invalid_id",
+            force=True,
+            video_id=vid,
+            operation_id=getattr(g, "_diag_operation_id", ""),
+        )
         abort(404)
     prefer_root = (request.args.get("root") or "").strip() or None
-    item = find_video_by_id(vid, prefer_root=prefer_root)
-    # 也可能用 thumb_id（碰撞重映射后）直接请求
-    if not item:
-        for v in STATE.get("videos") or []:
-            if thumb_id_for_item(v) == vid or v.get("id") == vid:
-                item = v
-                break
-    cache = cache_dir_for_item(item) or STATE.get("cache_dir")
-    file_id = thumb_id_for_item(item) if item else vid
+    defer = request.args.get("defer", "").strip().lower() in ("1", "true", "yes")
     placeholder = '''<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270">
       <rect fill="#1a1d24" width="480" height="270"/>
       <polygon points="210,100 210,170 280,135" fill="#4a5568"/>
@@ -906,14 +1489,137 @@ def thumb(vid: str):
         "Pragma": "no-cache",
     }
 
-    if cache:
-        raw = read_thumb_jpeg(cache, file_id)
-        if raw:
-            return Response(
-                raw,
-                mimetype="image/jpeg",
-                headers={"Cache-Control": "public, max-age=86400"},
+    def _deferred_placeholder():
+        return Response(
+            placeholder,
+            status=503,
+            mimetype="image/svg+xml",
+            headers={**placeholder_headers, "Retry-After": "1"},
+        )
+
+    # Fast path: cards already pass owning root + thumb_id. Existing .vgt
+    # must be served without scanning the in-memory catalog.
+    hint_cache = _cache_dir_from_root_hint(prefer_root)
+    served = _serve_thumb_jpeg(hint_cache, vid)
+    if served is not None:
+        return served
+    if not prefer_root:
+        active = STATE.get("cache_dir")
+        served = _serve_thumb_jpeg(Path(active) if active else None, vid)
+        if served is not None:
+            return served
+        # Try every known disk cache before any catalog lookup.
+        for lib in (STATE.get("disk_libs") or {}).values():
+            if not isinstance(lib, dict):
+                continue
+            cache_s = (lib.get("cache_dir") or "").strip()
+            if not cache_s:
+                continue
+            served = _serve_thumb_jpeg(Path(cache_s), vid)
+            if served is not None:
+                return served
+
+    # Root hint was given but file is not ready yet: do not block on
+    # ensure_library / full-catalog search for deferred card loads.
+    if prefer_root and defer:
+        note_frontend_activity(0.8)
+        item = None
+        if STATE.get("scanning") or STATE.get("updating"):
+            # The scan owns the catalog/cache transition.  Loading the whole
+            # root here only delays the 503 placeholder and contends with the
+            # writer; the browser will retry after the scan publishes a new
+            # generation.
+            diagnostic_emit_rate_limited(
+                "INFO",
+                "thumbnail_deferred_lookup_skipped",
+                key=prefer_root,
+                interval=5.0,
+                force=True,
+                video_id=vid,
+                root=prefer_root,
+                reason="catalog_transition",
+                scanning=bool(STATE.get("scanning")),
+                updating=bool(STATE.get("updating")),
+                operation_id=getattr(g, "_diag_operation_id", ""),
             )
+            diagnostic_aggregate("thumbnail_placeholder")
+            return _deferred_placeholder()
+        else:
+            item = find_video_by_id(vid, prefer_root=prefer_root)
+        cache = cache_dir_for_item(item) or hint_cache or STATE.get("cache_dir")
+        if cache is not None:
+            cache = Path(cache)
+        file_id = thumb_id_for_item(item) if item else vid
+        ffmpeg = STATE.get("ffmpeg")
+        if item and ffmpeg and cache:
+            src = _video_file_for_thumb(item)
+            out = thumb_path(cache, file_id)
+            if src:
+                def generate_requested_thumb() -> bool:
+                    ok = make_thumbnail(ffmpeg, src, out, background=True)
+                    if not ok:
+                        return False
+                    thumb_cache_invalidate(file_id, cache)
+                    item["has_thumb"] = True
+                    item["thumb_v"] = thumb_version(cache, file_id)
+                    try:
+                        save_library_item(item)
+                    except Exception as e:
+                        log(f"[预览图] 单条索引保存失败: {e}")
+                    return True
+
+                submit_thumbnail_job(
+                    thumbnail_job_key(cache, file_id),
+                    generate_requested_thumb,
+                    priority=THUMB_PRIORITY_VISIBLE,
+                )
+                diagnostic_aggregate("thumbnail_generation_queued")
+            else:
+                diagnostic_emit(
+                    "WARN",
+                    "thumbnail_source_unresolved",
+                    force=True,
+                    video_id=vid,
+                    item_rel=item.get("rel"),
+                    root=prefer_root,
+                    operation_id=getattr(g, "_diag_operation_id", ""),
+                )
+        else:
+            diagnostic_emit(
+                "WARN",
+                "thumbnail_generation_unavailable",
+                force=True,
+                video_id=vid,
+                item_found=bool(item),
+                ffmpeg_found=bool(ffmpeg),
+                cache_found=bool(cache),
+                root=prefer_root,
+                operation_id=getattr(g, "_diag_operation_id", ""),
+            )
+        diagnostic_aggregate("thumbnail_placeholder")
+        return _deferred_placeholder()
+
+    item = find_video_by_id(vid, prefer_root=prefer_root)
+    # 也可能用 thumb_id（碰撞重映射后）直接请求
+    if not item:
+        item = (STATE.get("by_thumb_id") or {}).get(vid)
+    cache = cache_dir_for_item(item) or hint_cache or STATE.get("cache_dir")
+    if cache is not None:
+        cache = Path(cache)
+    file_id = thumb_id_for_item(item) if item else vid
+    if file_id != vid:
+        served = _serve_thumb_jpeg(cache, file_id)
+        if served is not None:
+            return served
+        served = _serve_thumb_jpeg(hint_cache, file_id)
+        if served is not None:
+            return served
+    else:
+        served = _serve_thumb_jpeg(cache, file_id)
+        if served is not None:
+            return served
+
+    if cache:
         # 损坏或不存在：进入共享队列。页面图片使用 defer=1，立即释放
         # waitress 请求线程；直接访问该地址则短暂等待以兼容原有行为。
         ffmpeg = STATE.get("ffmpeg")
@@ -943,55 +1649,127 @@ def thumb(vid: str):
                     generate_requested_thumb,
                     priority=THUMB_PRIORITY_VISIBLE,
                 )
-                if request.args.get("defer", "").strip().lower() in ("1", "true", "yes"):
-                    return Response(
-                        placeholder,
-                        status=503,
-                        mimetype="image/svg+xml",
-                        headers={**placeholder_headers, "Retry-After": "1"},
-                    )
+                if defer:
+                    diagnostic_aggregate("thumbnail_placeholder")
+                    return _deferred_placeholder()
                 try:
                     future.result(timeout=75)
-                except Exception:
-                    pass
-                raw = read_thumb_jpeg(cache, file_id)
-                if raw:
-                    return Response(
-                        raw,
-                        mimetype="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=86400"},
+                except Exception as exc:
+                    diagnostic_error(
+                        "thumbnail_generation_wait_failed",
+                        exc,
+                        video_id=vid,
+                        file_id=file_id,
+                        cache=cache,
+                        operation_id=getattr(g, "_diag_operation_id", ""),
                     )
+                served = _serve_thumb_jpeg(cache, file_id)
+                if served is not None:
+                    return served
             try:
                 if out.exists() and not read_thumb_jpeg(cache, file_id):
                     _clear_path_attrs_windows(out)
                     out.unlink(missing_ok=True)
                     thumb_cache_invalidate(file_id)
                     log(f"[预览图] 已删除损坏缓存: {file_id}")
-            except OSError:
-                pass
+            except OSError as exc:
+                diagnostic_error(
+                    "thumbnail_corrupt_delete_failed",
+                    exc,
+                    video_id=vid,
+                    file_id=file_id,
+                    output=out,
+                    operation_id=getattr(g, "_diag_operation_id", ""),
+                )
 
+    diagnostic_emit(
+        "WARN",
+        "thumbnail_placeholder_returned",
+        force=True,
+        video_id=vid,
+        file_id=file_id,
+        item_found=bool(item),
+        cache_found=bool(cache),
+        ffmpeg_found=bool(STATE.get("ffmpeg")),
+        root=prefer_root,
+        operation_id=getattr(g, "_diag_operation_id", ""),
+    )
     return Response(placeholder, mimetype="image/svg+xml", headers=placeholder_headers)
+
+
+def _playback_route_failure(
+    route: str,
+    reason: str,
+    vid: str,
+    *,
+    status: int = 404,
+    **fields,
+) -> None:
+    diagnostic_emit(
+        "WARN",
+        "playback_route_failed",
+        force=True,
+        route=route,
+        reason=reason,
+        video_id=vid,
+        status=status,
+        operation_id=getattr(g, "_diag_operation_id", ""),
+        request_id=getattr(g, "_diag_request_id", ""),
+        **fields,
+    )
 
 
 @app.route("/playlist/<vid>.m3u8")
 def playlist_m3u8(vid: str):
     """HLS：支持自建 TS 合集，或磁盘上的 .m3u8（改写分片地址）。"""
     prefer_root = (request.args.get("root") or "").strip() or None
+    diagnostic_call("playlist_m3u8", video_id=vid, root=prefer_root)
     item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
+        _playback_route_failure("playlist", "video_not_found", vid, root=prefer_root)
         abort(404)
     kind = item.get("kind") or ""
 
     if kind == "m3u8" or (item.get("ext") or "").lower() == ".m3u8":
         path = resolve_item_rel(item, item.get("rel") or "")
         if not path:
+            _playback_route_failure(
+                "playlist",
+                "playlist_path_unresolved",
+                vid,
+                root=prefer_root,
+                rel=item.get("rel"),
+            )
             abort(404)
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        except OSError as exc:
+            diagnostic_error(
+                "playlist_read_failed",
+                exc,
+                video_id=vid,
+                path=path,
+                operation_id=getattr(g, "_diag_operation_id", ""),
+            )
             abort(404)
         item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
-        body = rewrite_m3u8_for_proxy(text, item["rel"], vid, item_root or None)
+        body = rewrite_m3u8_for_proxy(
+            text,
+            item["rel"],
+            vid,
+            item_root or None,
+            getattr(g, "_diag_operation_id", "") or None,
+        )
+        diagnostic_emit(
+            "INFO",
+            "playlist_served",
+            force=True,
+            video_id=vid,
+            kind=kind,
+            path=path,
+            bytes=len(body.encode("utf-8")),
+            operation_id=getattr(g, "_diag_operation_id", ""),
+        )
         return Response(
             body,
             mimetype="application/vnd.apple.mpegurl",
@@ -999,9 +1777,22 @@ def playlist_m3u8(vid: str):
         )
 
     if kind != "ts_set":
+        _playback_route_failure(
+            "playlist",
+            "unsupported_kind",
+            vid,
+            kind=kind,
+            ext=item.get("ext"),
+        )
         abort(404)
     segments = item.get("segments") or []
     if len(segments) < 2:
+        _playback_route_failure(
+            "playlist",
+            "insufficient_segments",
+            vid,
+            segment_count=len(segments),
+        )
         abort(404)
     lines = [
         "#EXTM3U",
@@ -1011,11 +1802,26 @@ def playlist_m3u8(vid: str):
         "#EXT-X-PLAYLIST-TYPE:VOD",
     ]
     item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
-    root_q = f"?root={quote(item_root, safe='')}" if item_root else ""
+    query_parts = []
+    if item_root:
+        query_parts.append(f"root={quote(item_root, safe='')}")
+    operation_id = getattr(g, "_diag_operation_id", "")
+    if operation_id:
+        query_parts.append(f"op={quote(operation_id, safe='')}")
+    root_q = ("?" + "&".join(query_parts)) if query_parts else ""
     for i in range(len(segments)):
         lines.append("#EXTINF:10.0,")
         lines.append(f"/stream/{vid}/seg/{i}{root_q}")
     lines.append("#EXT-X-ENDLIST")
+    diagnostic_emit(
+        "INFO",
+        "playlist_served",
+        force=True,
+        video_id=vid,
+        kind=kind,
+        segment_count=len(segments),
+        operation_id=operation_id,
+    )
     return Response(
         "\n".join(lines) + "\n",
         mimetype="application/vnd.apple.mpegurl",
@@ -1029,9 +1835,11 @@ def hls_proxy_file(vid: str):
     prefer_root = (request.args.get("root") or "").strip() or None
     item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
+        _playback_route_failure("hls_proxy", "video_not_found", vid, root=prefer_root)
         abort(404)
     rel = (request.args.get("rel") or "").replace("\\", "/").strip("/")
     if not rel:
+        _playback_route_failure("hls_proxy", "empty_relative_path", vid)
         abort(404)
     # 限制：分片须在播放列表所在目录或其子目录下
     base = str(Path((item.get("rel") or "x")).parent).replace("\\", "/")
@@ -1041,17 +1849,44 @@ def hls_proxy_file(vid: str):
         # 也允许与 playlist 同级的相对解析结果
         pl_folder = (item.get("folder") or "").strip("/")
         if pl_folder and not (rel == pl_folder or rel.startswith(pl_folder + "/")):
+            _playback_route_failure(
+                "hls_proxy",
+                "relative_path_outside_playlist",
+                vid,
+                status=403,
+                rel=rel,
+                playlist_folder=pl_folder,
+            )
             abort(403)
     path = resolve_item_rel(item, rel)
     if not path:
+        _playback_route_failure(
+            "hls_proxy",
+            "segment_path_unresolved",
+            vid,
+            rel=rel,
+        )
         abort(404)
     if path.suffix.lower() == ".m3u8":
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        except OSError as exc:
+            diagnostic_error(
+                "hls_playlist_read_failed",
+                exc,
+                video_id=vid,
+                path=path,
+                operation_id=getattr(g, "_diag_operation_id", ""),
+            )
             abort(404)
         item_root = (item.get("_lib_root") or item.get("root") or prefer_root or "").strip()
-        body = rewrite_m3u8_for_proxy(text, rel, vid, item_root or None)
+        body = rewrite_m3u8_for_proxy(
+            text,
+            rel,
+            vid,
+            item_root or None,
+            getattr(g, "_diag_operation_id", "") or None,
+        )
         return Response(
             body,
             mimetype="application/vnd.apple.mpegurl",
@@ -1066,12 +1901,34 @@ def stream_seg(vid: str, idx: int):
     prefer_root = (request.args.get("root") or "").strip() or None
     item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item or item.get("kind") != "ts_set":
+        _playback_route_failure(
+            "stream_segment",
+            "video_not_found_or_wrong_kind",
+            vid,
+            root=prefer_root,
+            kind=item.get("kind") if item else "",
+            segment_index=idx,
+        )
         abort(404)
     segments = item.get("segments") or []
     if idx < 0 or idx >= len(segments):
+        _playback_route_failure(
+            "stream_segment",
+            "segment_index_out_of_range",
+            vid,
+            segment_index=idx,
+            segment_count=len(segments),
+        )
         abort(404)
     path = resolve_item_rel(item, segments[idx])
     if not path:
+        _playback_route_failure(
+            "stream_segment",
+            "segment_path_unresolved",
+            vid,
+            segment_index=idx,
+            rel=segments[idx],
+        )
         abort(404)
     return _stream_file(path, "video/mp2t")
 
@@ -1079,24 +1936,49 @@ def stream_seg(vid: str, idx: int):
 @app.route("/stream/<vid>")
 def stream(vid: str):
     prefer_root = (request.args.get("root") or "").strip() or None
+    diagnostic_call("stream", video_id=vid, root=prefer_root)
     item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
+        _playback_route_failure("stream", "video_not_found", vid, root=prefer_root)
         abort(404)
     # 分片集合：单文件直链播第一段（预览/兼容）；完整观看用 /playlist/
     path = resolve_item_rel(item, item.get("rel") or "")
     if not path:
+        _playback_route_failure(
+            "stream",
+            "video_path_unresolved",
+            vid,
+            root=prefer_root,
+            rel=item.get("rel"),
+            kind=item.get("kind"),
+        )
         abort(404)
     mime = mimetypes.guess_type(str(path))[0] or "video/mp4"
+    diagnostic_emit(
+        "INFO",
+        "stream_resolved",
+        force=True,
+        video_id=vid,
+        path=path,
+        mime=mime,
+        root=prefer_root,
+        kind=item.get("kind"),
+        ext=item.get("ext"),
+        operation_id=getattr(g, "_diag_operation_id", ""),
+    )
     return _stream_file(path, mime)
 
 
 @app.route("/api/info/<vid>")
 def api_info(vid: str):
+    started = time.perf_counter()
     prefer_root = (request.args.get("root") or "").strip() or None
+    diagnostic_call("api_info", video_id=vid, root=prefer_root)
     if prefer_root:
         ensure_library(prefer_root)
     item = find_video_by_id(vid, prefer_root=prefer_root)
     if not item:
+        _playback_route_failure("api_info", "video_not_found", vid, root=prefer_root)
         abort(404)
     # Only lazily probe metadata dimensions explicitly enabled in Settings.
     # Skip if duration/audio is already in the index from a previous session.
@@ -1134,12 +2016,27 @@ def api_info(vid: str):
                     item["probe_audio_done"] = True
                 item["bad"] = True
                 item["bad_reason"] = "文件不存在"
+                diagnostic_emit(
+                    "WARN",
+                    "video_marked_bad",
+                    force=True,
+                    video_id=vid,
+                    reason="文件不存在",
+                    rel=item.get("rel"),
+                    root=prefer_root,
+                    operation_id=getattr(g, "_diag_operation_id", ""),
+                )
                 metadata_changed = True
     if metadata_changed:
         try:
             save_library_item(item)
-        except Exception as e:
-            log(f"[元数据] 单条索引保存失败: {e}")
+        except Exception as exc:
+            diagnostic_error(
+                "video_metadata_save_failed",
+                exc,
+                video_id=vid,
+                operation_id=getattr(g, "_diag_operation_id", ""),
+            )
     payload = {k: v for k, v in item.items() if k not in ("_q", "segments", "_lib_root", "_lib_cache")}
     # 本地路径（供复制 / 系统播放器）
     local = _local_path_for_item(item)
@@ -1160,6 +2057,27 @@ def api_info(vid: str):
     if kind == "ts_set":
         payload["seg_count"] = item.get("seg_count") or len(item.get("segments") or [])
         payload["kind"] = "ts_set"
+    diagnostic_perf(
+        "api_video_info",
+        (time.perf_counter() - started) * 1000.0,
+        force=True,
+        video_id=vid,
+        root=prefer_root,
+        rel=item.get("rel"),
+        kind=kind,
+        ext=ext,
+        bad=bool(item.get("bad")),
+        bad_reason=item.get("bad_reason"),
+        has_thumb=bool(item.get("has_thumb")),
+        thumb_id=item.get("thumb_id") or thumb_id_for_item(item),
+        browser_ok=payload["browser_ok"],
+        browser_hard=payload["browser_hard"],
+        need_probe=need_probe,
+        metadata_changed=metadata_changed,
+        local_path=local,
+        local_exists=bool(local and local.is_file()),
+        operation_id=getattr(g, "_diag_operation_id", ""),
+    )
     return jsonify(payload)
 
 

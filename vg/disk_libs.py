@@ -16,6 +16,13 @@ from vg.util import log
 _MAX_DISK_LIBS = 12
 _libs_lock = threading.RLock()
 _scanned_caches = False
+_load_log_ts: dict[str, float] = {}
+
+
+def _libs_guard(operation: str):
+    from vg.diagnostics import timed_lock
+
+    return timed_lock(_libs_lock, operation)
 
 # Backward-compatible private alias; schema.py is the single source of truth.
 _RUNTIME_INDEX_FIELDS = RUNTIME_ONLY_FIELDS
@@ -461,7 +468,7 @@ def _store_lib(
     stamp_lib_meta(list(by_id.values()), root=root_s, cache=cache)
     if index_mtime is None and cache:
         index_mtime = catalog_mtime(cache)
-    with _libs_lock:
+    with _libs_guard("disk_lib_store"):
         libs = STATE.setdefault("disk_libs", {})
         libs[root_s] = {
             "root": root_s,
@@ -479,9 +486,23 @@ def load_library_from_index(root: Path | str) -> bool:
 
     try:
         root_p = Path(root).expanduser().resolve()
-    except OSError:
+    except OSError as exc:
+        from vg.diagnostics import error
+
+        error("disk_library_root_resolve_failed", exc, root=root)
         return False
     if not root_p.is_dir():
+        from vg.diagnostics import emit_rate_limited
+
+        emit_rate_limited(
+            "WARN",
+            "disk_library_load_skipped",
+            key=f"root_not_directory|{root_p}",
+            interval=30.0,
+            force=True,
+            reason="root_not_directory",
+            root=root_p,
+        )
         return False
     root_s = str(root_p)
     # already the active root
@@ -496,9 +517,21 @@ def load_library_from_index(root: Path | str) -> bool:
 
     cache = ensure_cache_dir(root_p)
     if not catalog_exists(cache):
+        from vg.diagnostics import emit_rate_limited
+
+        emit_rate_limited(
+            "WARN",
+            "disk_library_load_skipped",
+            key=f"catalog_missing|{root_s}",
+            interval=30.0,
+            force=True,
+            reason="catalog_missing",
+            root=root_s,
+            cache=cache,
+        )
         return False
     index_mtime = catalog_mtime(cache)
-    with _libs_lock:
+    with _libs_guard("disk_lib_load_state"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         if (
             existing
@@ -506,24 +539,83 @@ def load_library_from_index(root: Path | str) -> bool:
             and float(existing.get("index_mtime") or 0) == index_mtime
         ):
             return True
-    videos = load_catalog_videos(cache, root_s)
-    clean = []
-    for raw in videos:
-        if not isinstance(raw, dict) or not raw.get("id"):
-            continue
-        if not item_belongs_to_root(raw, root_s):
-            log(f"[跨盘] 忽略索引中的外盘条目: {raw.get('rel') or raw.get('id')}")
-            continue
-        clean.append(_disk_item(raw, root_s, cache))
-    by_id = {v["id"]: v for v in clean}
-    if not by_id:
-        return False
-    final_mtime = catalog_mtime(cache)
-    if final_mtime != index_mtime:
-        return False
-    _store_lib(root_s, cache, by_id, index_mtime=final_mtime)
-    log(f"[跨盘] 已加载历史盘索引: {root_s}（{len(by_id)} 部）")
-    return True
+        # Scan flushes catalog.sqlite often; reloading 778+ rows for every
+        # /thumb or history lookup stalls the UI. Keep RAM copy briefly.
+        if existing and existing.get("by_id"):
+            loaded_at = float(existing.get("updated") or 0)
+            if loaded_at and (time.time() - loaded_at) < 3.0:
+                return True
+        # Parallel /thumb lookups must not each deserialize the whole catalog.
+        if existing and existing.get("loading"):
+            from vg.diagnostics import emit
+
+            emit(
+                "INFO",
+                "disk_library_load_coalesced",
+                force=True,
+                root=root_s,
+                cache=cache,
+                serving_previous=bool(existing.get("by_id")),
+                previous_rows=len(existing.get("by_id") or {}),
+            )
+            return bool(existing.get("by_id"))
+        if existing is None:
+            STATE.setdefault("disk_libs", {})[root_s] = {
+                "root": root_s,
+                "cache_dir": str(cache),
+                "by_id": {},
+                "updated": time.time(),
+                "index_mtime": 0.0,
+                "live": False,
+                "loading": True,
+            }
+        else:
+            existing["loading"] = True
+            # Keep serving the previous generation while we refresh.
+            if existing.get("by_id"):
+                pass
+    try:
+        videos = load_catalog_videos(cache, root_s)
+        clean = []
+        for raw in videos:
+            if not isinstance(raw, dict) or not raw.get("id"):
+                continue
+            if not item_belongs_to_root(raw, root_s):
+                continue
+            clean.append(_disk_item(raw, root_s, cache))
+        by_id = {v["id"]: v for v in clean}
+        if not by_id:
+            from vg.diagnostics import emit
+
+            emit(
+                "WARN",
+                "disk_library_catalog_empty",
+                force=True,
+                root=root_s,
+                cache=cache,
+                source_rows=len(videos),
+                accepted_rows=len(clean),
+            )
+            with _libs_guard("disk_lib_empty_cleanup"):
+                lib = (STATE.get("disk_libs") or {}).get(root_s)
+                if lib is not None:
+                    lib.pop("loading", None)
+                    if not lib.get("by_id"):
+                        (STATE.get("disk_libs") or {}).pop(root_s, None)
+            return False
+        final_mtime = catalog_mtime(cache)
+        _store_lib(root_s, cache, by_id, index_mtime=final_mtime or index_mtime)
+        now = time.time()
+        last = float(_load_log_ts.get(root_s) or 0)
+        if now - last >= 5.0:
+            _load_log_ts[root_s] = now
+            log(f"[跨盘] 已加载历史盘索引: {root_s}（{len(by_id)} 部）")
+        return True
+    finally:
+        with _libs_guard("disk_lib_load_finalize"):
+            lib = (STATE.get("disk_libs") or {}).get(root_s)
+            if lib is not None:
+                lib.pop("loading", None)
 
 
 def ensure_cached_indexes_scanned() -> None:
@@ -531,7 +623,7 @@ def ensure_cached_indexes_scanned() -> None:
     global _scanned_caches
     if _scanned_caches:
         return
-    with _libs_lock:
+    with _libs_guard("disk_lib_cache_discovery"):
         if _scanned_caches:
             return
         _scanned_caches = True

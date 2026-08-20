@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from pathlib import Path
 
 from vg.cache import ensure_cache_dir
@@ -301,9 +302,12 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
 
     每盘频道独立统计，不依赖「合并后可能被冲坏」的 STATE.videos 归属。
     """
+    started = time.perf_counter()
     roots = get_mounted_roots()
     out = []
+    root_timings: list[str] = []
     for r in roots:
+        root_started = time.perf_counter()
         # 优先按盘取片：STATE 打标 / 刚扫完 / 盘上 index / disk_libs
         subset = _videos_from_root(r)
         if not subset and videos is not None:
@@ -318,6 +322,21 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
             "count": len(subset),
             "categories": build_category_facets(cat_counts),
         })
+        root_timings.append(
+            f"{r}:{(time.perf_counter() - root_started) * 1000.0:.1f}ms/{len(subset)}"
+        )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if elapsed_ms >= 200.0:
+        from vg.diagnostics import perf
+
+        perf(
+            "roots_summary_slow",
+            elapsed_ms,
+            force=True,
+            roots=len(roots),
+            scanning=bool(STATE.get("scanning")),
+            per_root="|".join(root_timings),
+        )
     return out
 
 

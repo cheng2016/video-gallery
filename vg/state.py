@@ -12,6 +12,7 @@ STATE: dict = {
     "videos": [],  # flat list
     "by_category": {},  # cat -> list[video]
     "by_id": {},
+    "by_thumb_id": {},
     "facets": None,  # 预计算的 types/genres/categories
     "scanning": False,
     "scan_progress": "",
@@ -40,12 +41,14 @@ _meta_lock = threading.Lock()
 _meta_running = False
 _thumb_jpeg_cache: OrderedDict[str, bytes] = OrderedDict()
 _thumb_jpeg_lock = threading.Lock()
+_thumb_jpeg_cache_bytes = 0
 
 # Filtered/faceted/sorted /api/videos results; offset/limit are deliberately
 # excluded from the key so infinite-scroll pages share one computed list.
 _video_query_cache: OrderedDict[tuple, tuple] = OrderedDict()
 _video_query_cache_lock = threading.RLock()
 VIDEO_QUERY_CACHE_MAX = 32
+VIDEO_QUERY_CACHE_MAX_ITEMS = 100_000
 
 
 def video_query_cache_get(key: tuple):
@@ -57,11 +60,22 @@ def video_query_cache_get(key: tuple):
 
 
 def video_query_cache_put(key: tuple, value: tuple) -> None:
+    try:
+        result_rows = value[0]
+        if len(result_rows) > VIDEO_QUERY_CACHE_MAX_ITEMS:
+            return
+    except (TypeError, IndexError):
+        pass
     with _video_query_cache_lock:
         _video_query_cache[key] = value
         _video_query_cache.move_to_end(key)
         while len(_video_query_cache) > VIDEO_QUERY_CACHE_MAX:
             _video_query_cache.popitem(last=False)
+
+
+def invalidate_query_caches() -> None:
+    with _video_query_cache_lock:
+        _video_query_cache.clear()
 
 # Expensive /api/videos query results are keyed by catalog generation.  Keep
 # the cache beside STATE so catalog writers can invalidate it without importing

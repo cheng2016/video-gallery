@@ -11,6 +11,8 @@ from vg.catalog_db import (
     CATALOG_DB_NAME,
     find_probe_donor,
     load_catalog_videos,
+    query_catalog_facets,
+    query_catalog_page,
     read_catalog_counts,
     save_catalog,
     upsert_catalog_videos,
@@ -93,6 +95,22 @@ class CatalogDbTests(unittest.TestCase):
         self.assertEqual(by_rel["a.mp4"]["duration"], 12.5)
         self.assertEqual(by_rel["b.mp4"]["id"], "bbbbbbbbbbbbbbbb")
 
+    def test_upsert_repairs_zero_byte_catalog_after_cached_schema_hint(self) -> None:
+        root = self.base / "lib"
+        cache = self.base / "cache"
+        root.mkdir()
+        cache.mkdir()
+        db_path = cache / CATALOG_DB_NAME
+        db_path.touch()
+        cache_key = str(db_path.resolve()).casefold()
+        with catalog_db._schema_ready_lock:
+            catalog_db._schema_ready.add(cache_key)
+
+        item = self._item(vid="cccccccccccccccc", rel="c.mp4")
+        self.assertEqual(upsert_catalog_videos(cache, root, [item], allow_insert=True), 1)
+        rows = load_catalog_videos(cache, root)
+        self.assertEqual([row["id"] for row in rows], [item["id"]])
+
     def test_find_probe_donor_matches_sig_and_skips_bad(self) -> None:
         root_a = self.base / "disk-a"
         root_b = self.base / "disk-b"
@@ -134,6 +152,45 @@ class CatalogDbTests(unittest.TestCase):
         self.assertIsNotNone(by_name)
         assert by_name is not None
         self.assertEqual(by_name.get("duration"), 100.0)
+
+    def test_sql_page_filters_sorts_and_returns_only_requested_rows(self) -> None:
+        root = self.base / "large-lib"
+        cache = self.base / "large-cache"
+        root.mkdir()
+        rows = []
+        for i in range(500):
+            row = self._item(
+                vid=f"{i:016x}",
+                rel=f"电影/动作/movie-{i:04d}.mp4",
+                size=5_000_000 + i,
+            )
+            row["mtime"] = float(i)
+            row["genres"] = ["动作"] if i % 2 == 0 else ["剧情"]
+            rows.append(row)
+        self.assertTrue(save_catalog(cache, root, rows))
+
+        page, total = query_catalog_page(
+            cache,
+            category="电影",
+            folder="电影/动作",
+            include_descendants=True,
+            genre="动作",
+            sort="mtime_desc",
+            offset=10,
+            limit=60,
+        )
+        self.assertEqual(total, 250)
+        self.assertEqual(len(page), 60)
+        self.assertGreater(page[0]["mtime"], page[-1]["mtime"])
+        facets = query_catalog_facets(
+            cache,
+            category="电影",
+            folder="电影/动作",
+        )
+        self.assertEqual(
+            {row["id"]: row["count"] for row in facets["genres"]},
+            {"动作": 250, "剧情": 250},
+        )
 
 
 if __name__ == "__main__":

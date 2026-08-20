@@ -22,11 +22,13 @@ def register(app) -> None:
         location = data.get("cache_location")
         probe_duration = data.get("probe_video_duration")
         probe_audio = data.get("probe_video_audio")
+        full_logging = data.get("full_logging")
         if (
             encrypt is None
             and location is None
             and probe_duration is None
             and probe_audio is None
+            and full_logging is None
         ):
             return jsonify({"ok": False, "msg": "未提供设置项"}), 400
         if (
@@ -46,6 +48,7 @@ def register(app) -> None:
                 bool(probe_duration) if probe_duration is not None else None
             ),
             probe_video_audio=bool(probe_audio) if probe_audio is not None else None,
+            full_logging=bool(full_logging) if full_logging is not None else None,
         )
         tips = []
         if encrypt is not None and bool(encrypt) != before["encrypt_thumbs"]:
@@ -78,6 +81,15 @@ def register(app) -> None:
                 "视频音频探测已开启；将在本次或下次扫描时补全。"
                 if after["probe_video_audio"]
                 else "视频音频探测已关闭。"
+            )
+        if (
+            full_logging is not None
+            and after["full_logging"] != before["full_logging"]
+        ):
+            tips.append(
+                "全量性能日志已开启；高频请求会逐条打印。"
+                if after["full_logging"]
+                else "全量性能日志已关闭；保留阶段汇总、慢操作和全部异常。"
             )
         return jsonify({
             "ok": True,

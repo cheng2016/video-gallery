@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import os
 import sys
+import atexit
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
 
 _LOG_PATH: Path | None = None
 _INIT = False
+_WRITE_LOCK = threading.RLock()
+_PENDING: list[str] = []
+_FLUSH_EVENT = threading.Event()
+_FLUSH_THREAD: threading.Thread | None = None
+_STOP = False
+_MAX_LOG_BYTES = 4 * 1024 * 1024
+_KEEP_LOG_BYTES = 2 * 1024 * 1024
 
 
 def log_path() -> Path:
@@ -37,47 +46,111 @@ def init(reset: bool = False) -> Path:
         else:
             # 体积过大时只保留尾部，避免无限涨
             try:
-                if path.stat().st_size > 512_000:
-                    tail = path.read_text(encoding="utf-8", errors="replace")[-200_000:]
+                if path.stat().st_size > _MAX_LOG_BYTES:
+                    tail = path.read_text(encoding="utf-8", errors="replace")[-_KEEP_LOG_BYTES:]
                     path.write_text("…(truncated)…\n" + tail, encoding="utf-8")
             except Exception:
                 pass
         _INIT = True
-        write("")
-        write("======== session ========")
-        write(f"time={datetime.now().isoformat(timespec='seconds')}")
-        write(f"frozen={bool(getattr(sys, 'frozen', False))}")
-        write(f"exe={sys.executable!r}")
-        write(f"argv={sys.argv!r}")
-        write(f"cwd={os.getcwd()!r}")
-        write(f"pid={os.getpid()}")
-        write(f"python={sys.version.split()[0]} platform={sys.platform}")
+        _ensure_flush_thread()
+        write("", urgent=True)
+        write("======== session ========", urgent=True)
+        write(f"time={datetime.now().isoformat(timespec='seconds')}", urgent=True)
+        write(f"frozen={bool(getattr(sys, 'frozen', False))}", urgent=True)
+        write(f"exe={sys.executable!r}", urgent=True)
+        write(f"argv={sys.argv!r}", urgent=True)
+        write(f"cwd={os.getcwd()!r}", urgent=True)
+        write(f"pid={os.getpid()}", urgent=True)
+        write(f"python={sys.version.split()[0]} platform={sys.platform}", urgent=True)
         if getattr(sys, "frozen", False):
             meipass = getattr(sys, "_MEIPASS", None)
-            write(f"_MEIPASS={meipass!r}")
+            write(f"_MEIPASS={meipass!r}", urgent=True)
             internal = Path(sys.executable).resolve().parent / "_internal"
-            write(f"_internal_exists={internal.is_dir()}")
+            write(f"_internal_exists={internal.is_dir()}", urgent=True)
     except Exception:
         pass
     return path
 
 
-def write(msg: str) -> None:
-    """追加一行并立即 flush（崩溃前尽量落盘）。"""
+def _append_lines(lines: list[str], *, sync: bool) -> None:
+    if not lines:
+        return
+    with _WRITE_LOCK:
+        with log_path().open("a", encoding="utf-8", errors="replace") as f:
+            f.write("".join(lines))
+            f.flush()
+            if sync:
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+
+
+def flush(*, sync: bool = False) -> None:
+    with _WRITE_LOCK:
+        if not _PENDING:
+            return
+        lines = list(_PENDING)
+        _PENDING.clear()
+    try:
+        _append_lines(lines, sync=sync)
+    except Exception:
+        pass
+
+
+def _flush_worker() -> None:
+    while not _STOP:
+        _FLUSH_EVENT.wait(0.5)
+        _FLUSH_EVENT.clear()
+        flush(sync=False)
+    flush(sync=True)
+
+
+def _ensure_flush_thread() -> None:
+    global _FLUSH_THREAD
+    if _FLUSH_THREAD and _FLUSH_THREAD.is_alive():
+        return
+    with _WRITE_LOCK:
+        if _FLUSH_THREAD and _FLUSH_THREAD.is_alive():
+            return
+        _FLUSH_THREAD = threading.Thread(
+            target=_flush_worker,
+            daemon=True,
+            name="runtime-log-writer",
+        )
+        _FLUSH_THREAD.start()
+
+
+def write(msg: str, *, urgent: bool = False) -> None:
+    """Queue normal lines; errors/startup markers are durably flushed now."""
     try:
         if not _INIT:
             init(reset=False)
         line = str(msg).rstrip("\n")
         ts = datetime.now().strftime("%H:%M:%S")
-        with log_path().open("a", encoding="utf-8", errors="replace") as f:
-            f.write(f"[{ts}] {line}\n")
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except Exception:
-                pass
+        formatted = f"[{ts}] {line}\n"
+        if urgent:
+            flush(sync=False)
+            _append_lines([formatted], sync=True)
+            return
+        with _WRITE_LOCK:
+            _PENDING.append(formatted)
+            should_flush = len(_PENDING) >= 64
+        _ensure_flush_thread()
+        if should_flush:
+            _FLUSH_EVENT.set()
     except Exception:
         pass
+
+
+def shutdown() -> None:
+    global _STOP
+    _STOP = True
+    _FLUSH_EVENT.set()
+    flush(sync=True)
+
+
+atexit.register(shutdown)
 
 
 def step(name: str, detail: str = "") -> None:
@@ -88,13 +161,13 @@ def step(name: str, detail: str = "") -> None:
 
 
 def fail(msg: str, detail: str = "") -> None:
-    write(f"FAIL: {msg}")
+    write(f"FAIL: {msg}", urgent=True)
     if detail:
         for line in str(detail).splitlines() or [detail]:
-            write(f"  {line}")
+            write(f"  {line}", urgent=True)
 
 
 def exception(prefix: str = "EXCEPTION") -> None:
-    write(f"{prefix}:")
+    write(f"{prefix}:", urgent=True)
     for line in traceback.format_exc().splitlines():
-        write(f"  {line}")
+        write(f"  {line}", urgent=True)

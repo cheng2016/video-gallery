@@ -27,12 +27,18 @@ class UiControlLayoutTests(unittest.TestCase):
         html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
         self.assertIn("function thumbLoadFailed(img)", html)
         self.assertIn("function requestThumbReload(img, url)", html)
+        self.assertIn("function resetThumbQueue(", html)
         self.assertIn("&defer=1", html)
         self.assertIn("THUMB_CONCURRENCY", html)
         self.assertIn("function watchThumbs(", html)
         self.assertIn("data-thumb-url", html)
         self.assertIn("refresh({ nav: false })", html)
+        self.assertIn("resetThumbQueue()", html)
+        self.assertIn("cancelListRequests()", html)
+        self.assertIn("MAX_LOADED_VIDEOS", html)
+        self.assertIn("AbortController", html)
         self.assertNotIn("dataset.retried", html)
+        self.assertNotIn("const probe = new Image()", html)
 
     def test_multi_disk_all_videos_badge_uses_catalog_total(self) -> None:
         html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
@@ -48,7 +54,7 @@ class UiControlLayoutTests(unittest.TestCase):
     def test_feedback_and_probe_preferences_live_in_settings(self) -> None:
         html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
         header = html.split('<div class="header-actions">', 1)[1].split("</header>", 1)[0]
-        settings = html.split('<div class="modal" id="privacyModal">', 1)[1].split(
+        settings = html.split('<div class="modal settings-modal" id="privacyModal">', 1)[1].split(
             '<div class="modal" id="cleanupModal">', 1
         )[0]
 
@@ -57,6 +63,28 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn('id="probeVideoDuration"', settings)
         self.assertIn('id="probeVideoAudio"', settings)
         self.assertIn("反馈问题", settings)
+        self.assertIn("overflow: auto", html.split(".settings-panel .modal-info", 1)[1].split("}", 1)[0])
+        self.assertIn("settings-panel", settings)
+        self.assertIn('id="privacySave"', settings.split('class="modal-actions"', 1)[1])
+
+    def test_channel_switch_abort_is_not_treated_as_page_failure(self) -> None:
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        abort_fn = html.split("function isAbortError(", 1)[1].split(
+            "function cancelListRequests(", 1
+        )[0]
+        self.assertIn("channel-switch", abort_fn)
+        self.assertIn("controller.signal.aborted", html)
+        self.assertIn("if (isAbortError(reason)) return;", html)
+
+    def test_user_actions_and_playback_failures_are_reported_with_operation_ids(self) -> None:
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('fetch("/api/client-log"', html)
+        self.assertIn('"X-VG-Operation-ID"', html)
+        self.assertIn('clientLog("ui_click"', html)
+        self.assertIn('clientLog("page_load_requested"', html)
+        self.assertIn('clientLog("player_error"', html)
+        self.assertIn('clientLog("hls_error"', html)
+        self.assertIn("function beginPlaybackOperation(", html)
 
 
 if __name__ == "__main__":

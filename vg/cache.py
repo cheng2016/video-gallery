@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from vg.config import (
@@ -14,8 +15,10 @@ from vg.config import (
     LEGACY_DISK_CACHE_NAMES,
     THUMB_EXT,
     THUMB_JPEG_CACHE_MAX,
+    THUMB_JPEG_CACHE_MAX_BYTES,
     VGDATA_DIR,
 )
+from vg import state as _state
 from vg.state import STATE, _thumb_jpeg_cache, _thumb_jpeg_lock
 from vg.util import _clear_path_attrs_windows, log
 
@@ -52,23 +55,38 @@ def thumb_cache_get(vid: str, cache: Path | None = None) -> bytes | None:
 def thumb_cache_put(vid: str, raw: bytes, cache: Path | None = None) -> None:
     key = _thumb_cache_key(vid, cache)
     with _thumb_jpeg_lock:
+        if not _thumb_jpeg_cache:
+            _state._thumb_jpeg_cache_bytes = 0
+        previous = _thumb_jpeg_cache.get(key)
+        if previous is not None:
+            _state._thumb_jpeg_cache_bytes -= len(previous)
         _thumb_jpeg_cache[key] = raw
+        _state._thumb_jpeg_cache_bytes += len(raw)
         _thumb_jpeg_cache.move_to_end(key)
-        while len(_thumb_jpeg_cache) > THUMB_JPEG_CACHE_MAX:
-            _thumb_jpeg_cache.popitem(last=False)
+        while (
+            len(_thumb_jpeg_cache) > THUMB_JPEG_CACHE_MAX
+            or _state._thumb_jpeg_cache_bytes > THUMB_JPEG_CACHE_MAX_BYTES
+        ):
+            _, removed = _thumb_jpeg_cache.popitem(last=False)
+            _state._thumb_jpeg_cache_bytes -= len(removed)
 
 
 def thumb_cache_invalidate(vid: str | None = None, cache: Path | None = None) -> None:
     with _thumb_jpeg_lock:
         if vid:
             if cache:
-                _thumb_jpeg_cache.pop(_thumb_cache_key(vid, cache), None)
+                removed = _thumb_jpeg_cache.pop(_thumb_cache_key(vid, cache), None)
+                if removed is not None:
+                    _state._thumb_jpeg_cache_bytes -= len(removed)
             else:
                 suffix = f"|{vid}"
                 for key in [k for k in _thumb_jpeg_cache if k == vid or k.endswith(suffix)]:
-                    _thumb_jpeg_cache.pop(key, None)
+                    removed = _thumb_jpeg_cache.pop(key, None)
+                    if removed is not None:
+                        _state._thumb_jpeg_cache_bytes -= len(removed)
         else:
             _thumb_jpeg_cache.clear()
+            _state._thumb_jpeg_cache_bytes = 0
 
 
 def _ensure_vault_key() -> bytes:
@@ -80,13 +98,22 @@ def _ensure_vault_key() -> bytes:
             if len(key) >= 32:
                 return key[:32]
         except OSError as e:
-            log(f"[预览图] 读取密钥失败: {e}，将重新生成（旧预览图会失效）")
+            from vg.diagnostics import error
+
+            error(
+                "thumb_key_read_failed",
+                e,
+                key_file=KEY_FILE,
+                impact="old_thumbnails_may_be_unreadable",
+            )
     key = os.urandom(32)
     try:
         _clear_path_attrs_windows(KEY_FILE)
         KEY_FILE.write_bytes(key)
     except OSError as e:
-        log(f"[预览图] 写入密钥失败: {e}")
+        from vg.diagnostics import error
+
+        error("thumb_key_write_failed", e, key_file=KEY_FILE)
         raise
     return key
 
@@ -162,20 +189,62 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
     """读取预览图（支持加密 VG1 与明文 JPEG）；带内存 LRU。"""
     from vg.privacy import unpack_thumb_bytes
 
+    started = time.perf_counter()
     cached = thumb_cache_get(vid, cache)
     if cached is not None:
+        from vg.diagnostics import aggregate
+
+        aggregate("thumb_l1_hit", (time.perf_counter() - started) * 1000.0)
         return cached
     p = thumb_path(cache, vid)
     try:
-        if not p.exists() or p.stat().st_size <= 24:
+        if not p.exists():
+            from vg.diagnostics import aggregate
+
+            aggregate("thumb_l2_not_found", (time.perf_counter() - started) * 1000.0)
+            return None
+        size = p.stat().st_size
+        if size <= 24:
+            from vg.diagnostics import emit
+
+            emit(
+                "WARN",
+                "thumb_cache_invalid",
+                force=True,
+                reason="file_too_small",
+                path=p,
+                size=size,
+                video_id=vid,
+            )
             return None
         _clear_path_attrs_windows(p)
-        raw = unpack_thumb_bytes(p.read_bytes())
+        blob = p.read_bytes()
+        raw = unpack_thumb_bytes(blob)
         if raw:
             thumb_cache_put(vid, raw, cache)
+            from vg.diagnostics import aggregate
+
+            aggregate("thumb_l2_hit", (time.perf_counter() - started) * 1000.0)
             return raw
+        from vg.diagnostics import emit
+
+        emit(
+            "WARN",
+            "thumb_cache_invalid",
+            force=True,
+            reason="decrypt_or_jpeg_validation_failed",
+            path=p,
+            size=len(blob),
+            prefix=blob[:4].hex(),
+            video_id=vid,
+        )
     except OSError as e:
-        log(f"[预览图] 读取失败 {vid}: {e}")
+        from vg.diagnostics import error
+
+        error("thumb_read_failed", e, video_id=vid, cache=cache)
+    from vg.diagnostics import aggregate
+
+    aggregate("thumb_cache_miss", (time.perf_counter() - started) * 1000.0)
     return None
 
 
@@ -228,14 +297,39 @@ def cleanup_legacy_disk_cache(root: Path) -> None:
         try:
             if not p.is_dir():
                 continue
-        except OSError:
+        except OSError as exc:
+            from vg.diagnostics import error
+
+            error("legacy_cache_stat_failed", exc, path=p)
             continue
         try:
+            before_bytes = 0
+            before_files = 0
+            try:
+                for child in p.iterdir():
+                    if child.is_file():
+                        before_files += 1
+                        before_bytes += child.stat().st_size
+            except OSError:
+                pass
             _clear_path_attrs_windows(p)
             shutil.rmtree(p)
-            log(f"[清理] 已删除旧版盘根缓存（现已改到程序目录 preview_cache）: {p}")
+            from vg.diagnostics import emit
+
+            emit(
+                "WARN",
+                "legacy_cache_deleted",
+                force=True,
+                path=p,
+                reason="cache_location_is_program",
+                files=before_files,
+                bytes=before_bytes,
+                exists_after=p.exists(),
+            )
         except OSError as e:
-            log(f"[清理] 删不掉旧缓存 {p}: {e}（可在文件管理器里手动删除）")
+            from vg.diagnostics import error
+
+            error("legacy_cache_delete_failed", e, path=p)
 
 
 def _normalize_folder_counts(raw: object) -> dict[str, int]:
@@ -269,9 +363,87 @@ def list_thumb_ids(cache: Path | None) -> set[str]:
         for path in cache.glob(f"*{THUMB_EXT}"):
             if path.is_file():
                 ids.add(path.stem)
-    except OSError:
-        pass
+    except OSError as exc:
+        from vg.diagnostics import error
+
+        error("thumb_cache_list_failed", exc, cache=cache)
     return ids
+
+
+def cleanup_thumb_files(
+    cache: Path | None,
+    keep_ids: set[str],
+    *,
+    max_bytes: int = 20 * 1024 * 1024 * 1024,
+) -> tuple[int, int]:
+    """Remove orphan thumbs, then oldest unprotected files above soft quota."""
+    if not cache:
+        return 0, 0
+    cache = Path(cache)
+    removed = 0
+    freed = 0
+    candidates: list[tuple[float, int, Path, str]] = []
+    try:
+        paths = list(cache.glob(f"*{THUMB_EXT}"))
+    except OSError as exc:
+        from vg.diagnostics import error
+
+        error("thumb_cache_list_failed", exc, cache=cache)
+        return 0, 0
+    for path in paths:
+        try:
+            stat = path.stat()
+            vid = path.stem
+            if vid not in keep_ids:
+                path.unlink(missing_ok=True)
+                thumb_cache_invalidate(vid, cache)
+                removed += 1
+                freed += stat.st_size
+            else:
+                candidates.append((stat.st_mtime, stat.st_size, path, vid))
+        except OSError as exc:
+            from vg.diagnostics import error
+
+            error("thumb_cache_cleanup_failed", exc, path=path)
+    total = sum(row[1] for row in candidates)
+    before_total = total + freed
+    orphan_removed = removed
+    quota_removed = 0
+    if total > max_bytes:
+        # Soft quota only removes oldest files; they can be regenerated later.
+        for _mtime, size, path, vid in sorted(candidates):
+            if total <= max_bytes:
+                break
+            try:
+                path.unlink(missing_ok=True)
+                thumb_cache_invalidate(vid, cache)
+                total -= size
+                removed += 1
+                quota_removed += 1
+                freed += size
+            except OSError as exc:
+                from vg.diagnostics import error
+
+                error("thumb_cache_quota_failed", exc, path=path)
+    from vg.diagnostics import emit
+
+    if removed:
+        emit(
+            "INFO",
+            "thumb_cache_cleanup",
+            force=True,
+            cache=cache,
+            files_before=len(paths),
+            keep_ids=len(keep_ids),
+            orphan_removed=orphan_removed,
+            quota_removed=quota_removed,
+            removed=removed,
+            bytes_before=before_total,
+            bytes_freed=freed,
+            bytes_after=max(0, before_total - freed),
+            quota=max_bytes,
+        )
+    return removed, freed
 
 
 def save_index(
@@ -285,7 +457,9 @@ def save_index(
     """Persist one root's catalog to SQLite (no whole-JSON rewrite)."""
     from vg.catalog_db import save_catalog
 
-    with _index_lock(cache):
+    from vg.diagnostics import timed_lock
+
+    with timed_lock(_index_lock(cache), "cache_index_write", cache=cache):
         try:
             cache.mkdir(parents=True, exist_ok=True)
             ok = save_catalog(
@@ -296,11 +470,14 @@ def save_index(
                 folder_counts=folder_counts,
             )
             if not ok:
-                print(f"提示: 保存索引失败: {cache}")
+                from vg.diagnostics import error
+
+                error("catalog_save_returned_false", cache=cache, root=root)
             return ok
         except (OSError, ValueError) as e:
-            print(f"提示: 保存索引失败: {e}")
-            print(f"       路径: {cache}")
+            from vg.diagnostics import error
+
+            error("catalog_save_failed", e, cache=cache, root=root)
             return False
 
 
@@ -320,6 +497,17 @@ def attach_thumb_meta(v: dict) -> dict:
         return v
 
     cache = cache_dir_for_item(v) or STATE.get("cache_dir")
+    # Prefer the stamped owner root so SQL-backed list rows still resolve .vgt
+    # without falling back to the active disk cache.
+    if cache is None:
+        root = (v.get("root") or v.get("_lib_root") or "").strip()
+        if root:
+            try:
+                from vg.privacy import resolve_cache_dir_for_root
+
+                cache = resolve_cache_dir_for_root(Path(root))
+            except OSError:
+                cache = None
     if cache and vid and (thumb_cache_get(vid, cache) is not None or thumb_file_ready(cache, vid)):
         v["has_thumb"] = True
         v["thumb_v"] = thumb_version(cache, vid) or 1

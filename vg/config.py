@@ -33,7 +33,8 @@ SEGMENT_FOLDER_GENERIC = {
 }
 STANDALONE_TS_MIN_BYTES = 50 * 1024 * 1024
 MIN_VIDEO_FILE_BYTES = 100 * 1024
-MIN_SEGMENT_FILE_BYTES = 1024
+# Standalone .ts under 256 KiB are almost never playable media (often TypeScript).
+MIN_SEGMENT_FILE_BYTES = 256 * 1024
 
 BROWSER_FRIENDLY_EXTS = {".mp4", ".webm", ".m4v", ".mov"}
 BROWSER_HARD_EXTS = {".mkv", ".avi", ".wmv", ".flv", ".rmvb", ".rm", ".ts", ".m2ts", ".mpg", ".mpeg"}
@@ -123,7 +124,10 @@ THUMB_WORKERS_MAX = 2
 # First-scan burst: one ffmpeg process per logical CPU (each already uses
 # -threads 1).  0 means "use os.cpu_count()".
 THUMB_WORKERS_BURST = 0
-THUMB_JPEG_CACHE_MAX = 256
+# Decrypted JPEG LRU for /thumb hot path. Larger helps channel switches on
+# multi-thousand libraries without re-decrypting the same visible cards.
+THUMB_JPEG_CACHE_MAX = 1536
+THUMB_JPEG_CACHE_MAX_BYTES = 192 * 1024 * 1024
 # 转码/修声音同时跑的任务数（1=最稳，不打满 CPU；可在 prefs 覆盖）
 CONVERT_MAX_PARALLEL = 1
 
@@ -135,6 +139,8 @@ SKIP_DIR_NAMES = {
     "appdata", "application data", "local settings",
     "android", ".android", "emulator", "intel", "nvidia", "amd",
     "node_modules", "__pycache__", ".venv", "venv",
+    "codexsandboxoffline", "codexsandboxonline",
+    "cookies", "ntuser.dat", "microsoft",
     THUMB_DIR_NAME, "video_gallery_cache", "preview_cache",
     "_video_gallery_static", ".git", ".svn",
 }
