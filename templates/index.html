@@ -2468,7 +2468,12 @@
         try {
           const r = await fetch("/api/status");
           const d = await r.json();
-          const busy = !!(d.scanning || d.updating);
+          // A directory is already browsable while thumbnails/metadata run,
+          // but polling must stay alive so a newly published disk generation
+          // is painted instead of leaving the sidebar on the previous disk.
+          const busy = !!(
+            d.scanning || d.updating || d.meta_running || (d.thumb_pending || 0) > 0
+          );
           const gen = d.lib_gen || 0;
           const found = d.scan_found || 0;
           const genChanged = gen !== lastLibGen;
@@ -3794,6 +3799,10 @@
       const options = opts || {};
       const token = ++refreshToken;
       const refreshOperationId = newOperationId("refresh");
+      // Give immediate feedback while the previous request is being aborted
+      // and the new filtered page is fetched.  The old cards remain visible
+      // intentionally, but the count must not look frozen during a slow scan.
+      if ($("countLabel")) $("countLabel").textContent = "筛选中…";
       clientLog("refresh_start", filterStateFields({
         elapsed_ms: 0,
         token,

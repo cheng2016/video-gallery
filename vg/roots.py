@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import time
 from pathlib import Path
@@ -22,6 +23,19 @@ from vg.state import STATE
 from vg.util import log
 
 _roots_lock = threading.RLock()
+
+
+def _root_compare_key(root: Path | str | None) -> str:
+    """Cheap comparison key for roots already stored as absolute paths.
+
+    Do not call ``Path.resolve()`` for every catalog row on a foreground
+    request: under ffmpeg/ffprobe disk load that turns an O(n) memory filter
+    into seconds of filesystem I/O.
+    """
+    raw = str(root or "").strip()
+    if not raw:
+        return ""
+    return os.path.normcase(os.path.normpath(raw))
 
 
 def root_label(root: Path | str) -> str:
@@ -212,23 +226,49 @@ def filter_videos_by_lib(videos: list[dict] | None, lib: str | None) -> list[dic
     lib = (lib or "").strip()
     if not lib:
         return videos
-    try:
-        key = _norm_root_str(lib)
-    except Exception:
-        key = lib
-    key_l = key.lower()
+    key_l = _root_compare_key(lib)
     out = []
     for v in videos:
         r = (v.get("_lib_root") or v.get("root") or "").strip()
         if not r:
             continue
-        try:
-            if _norm_root_str(r).lower() == key_l:
-                out.append(v)
-        except Exception:
-            if r.lower() == key_l:
-                out.append(v)
+        if _root_compare_key(r) == key_l:
+            out.append(v)
     return out
+
+
+def _snapshot_covers_archives(videos: list[dict], lib: str = "") -> bool:
+    """Return whether the published snapshot is at least as complete as RAM archives.
+
+    A stale ``meta_progress`` string can survive a test/restart while STATE is
+    intentionally partial.  Only trust the snapshot for metadata writes when
+    every known per-disk archive row is represented; otherwise the catalog
+    remains the source of truth.
+    """
+    libs = STATE.get("disk_libs") or {}
+    if not libs:
+        return False
+    roots = [lib] if lib else get_mounted_roots()
+    if not roots:
+        return False
+    snapshot_counts: dict[str, int] = {}
+    for video in videos:
+        owner = video.get("_lib_root") or video.get("root") or ""
+        owner_key = _root_compare_key(owner)
+        if owner_key:
+            snapshot_counts[owner_key] = snapshot_counts.get(owner_key, 0) + 1
+    archives_by_root = {
+        _root_compare_key(candidate): value or {}
+        for candidate, value in libs.items()
+        if _root_compare_key(candidate)
+    }
+    for root_s in roots:
+        key = _root_compare_key(root_s)
+        archive = archives_by_root.get(key) or {}
+        expected = len((archive or {}).get("by_id") or {})
+        if expected and snapshot_counts.get(key, 0) < expected:
+            return False
+    return True
 
 
 def videos_for_scope(lib: str | None = None) -> list[dict]:
@@ -240,6 +280,36 @@ def videos_for_scope(lib: str | None = None) -> list[dict]:
     - 未选盘 + 单盘：STATE.videos
     """
     lib = (lib or "").strip()
+    state_vids = list(STATE.get("videos") or [])
+
+    # During a scan/update the disk catalog may be temporarily unavailable or
+    # locked by the writer.  Foreground tag clicks should use the published
+    # in-memory snapshot instead of reopening every mounted catalog; the next
+    # generation invalidation will refresh it after the scan completes.
+    # Metadata enrichment writes SQLite in small batches.  Its mtime changes
+    # must not invalidate the runtime snapshot for every foreground request;
+    # the enriched dicts are updated in-place and a final index rebuild bumps
+    # the generation when the worker completes.
+    snapshot_busy = bool(
+        STATE.get("scanning")
+        or STATE.get("updating")
+        or (
+            STATE.get("meta_progress")
+            and _snapshot_covers_archives(state_vids, lib)
+        )
+    )
+    if state_vids and snapshot_busy:
+        if lib:
+            try:
+                key = _norm_root_str(lib)
+            except Exception:
+                key = lib
+            scoped = filter_videos_by_lib(state_vids, key)
+            if scoped:
+                return scoped
+        else:
+            return state_vids
+
     if lib:
         try:
             key = _norm_root_str(lib)
@@ -251,7 +321,6 @@ def videos_for_scope(lib: str | None = None) -> list[dict]:
         return filter_videos_by_lib(STATE.get("videos") or [], key)
 
     roots = get_mounted_roots()
-    state_vids = list(STATE.get("videos") or [])
     if len(roots) <= 1:
         return state_vids
 
@@ -304,13 +373,31 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
     """
     started = time.perf_counter()
     roots = get_mounted_roots()
+    # During scan/update, ``videos`` is the already published unified
+    # snapshot.  Reopening every per-disk SQLite catalog here contends with
+    # the scanner and makes a harmless tree refresh take seconds.  Keep root
+    # counts/facets consistent with the snapshot until the next publish.
+    snapshot = list(videos or [])
+    use_snapshot = bool(snapshot) and bool(
+        STATE.get("scanning")
+        or STATE.get("updating")
+        or (
+            STATE.get("meta_progress")
+            and _snapshot_covers_archives(snapshot)
+        )
+    )
     out = []
     root_timings: list[str] = []
     for r in roots:
         root_started = time.perf_counter()
-        # 优先按盘取片：STATE 打标 / 刚扫完 / 盘上 index / disk_libs
-        subset = _videos_from_root(r)
-        if not subset and videos is not None:
+        # 优先按盘取片；扫描/更新期间直接复用统一内存快照，避免和
+        # SQLite 写入竞争。扫描发布新 generation 后会走正常目录索引。
+        subset = (
+            filter_videos_by_lib(snapshot, r)
+            if use_snapshot
+            else _videos_from_root(r)
+        )
+        if not subset and videos is not None and not use_snapshot:
             subset = filter_videos_by_lib(videos, r)
         cat_counts: dict[str, int] = {}
         for v in subset:

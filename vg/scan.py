@@ -1154,6 +1154,10 @@ def scan_videos(
         from vg.roots import on_scan_finished
 
         on_scan_finished(root)
+        log(
+            f"[扫描] 目录索引已发布到网页：{root_s}，{len(found)} 个；"
+            "预览图和元数据后台处理不阻塞目录浏览"
+        )
     except Exception as e:
         log(f"[多根] 扫描收尾失败: {e}")
         if not multi:

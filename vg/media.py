@@ -569,7 +569,7 @@ def build_metadata_source_index(
     want_duration: bool,
     want_audio: bool,
 ) -> dict[str, dict]:
-    """Map file_sig / name+size -> probed fields from in-memory catalogs only."""
+    """Build one reusable probe index from memory and persisted catalogs."""
     from vg.thumbs import _iter_memory_videos, thumb_content_keys
 
     index: dict[str, dict] = {}
@@ -595,6 +595,29 @@ def build_metadata_source_index(
 
     for video in _iter_memory_videos():
         register(video)
+    persisted = 0
+    started = time.perf_counter()
+    try:
+        from vg.catalog_db import iter_catalog_cache_dirs, load_catalog_videos
+
+        for cache in iter_catalog_cache_dirs():
+            for video in load_catalog_videos(cache):
+                if not isinstance(video, dict):
+                    continue
+                snap = _metadata_reuse_snapshot(
+                    video,
+                    want_duration=want_duration,
+                    want_audio=want_audio,
+                )
+                if snap:
+                    persisted += 1
+                    register(video)
+    except Exception as exc:
+        log(f"[元数据] 读取 SQLite 持久化复用索引失败: {exc}")
+    log(
+        f"[元数据] 持久化复用索引完成：条目 {persisted}，键 {len(index)}，"
+        f"耗时 {(time.perf_counter() - started) * 1000.0:.1f}ms"
+    )
     return index
 
 

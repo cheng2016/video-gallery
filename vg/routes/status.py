@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from flask import jsonify
 
+from vg import state as runtime_state
 from vg.state import STATE
+from vg.thumb_jobs import pending_thumbnail_jobs
 
 
 def register(app) -> None:
@@ -13,6 +15,8 @@ def register(app) -> None:
         facets = STATE.get("facets") or {}
         live = STATE.get("scan_live")
         live_count = len(live) if isinstance(live, list) else 0
+        thumb_pending = pending_thumbnail_jobs()
+        meta_running = bool(runtime_state._meta_running)
         return jsonify({
             "app": "video-gallery",
             "scanning": bool(STATE.get("scanning")),
@@ -24,6 +28,9 @@ def register(app) -> None:
             "scan_progress": STATE.get("scan_progress") or "",
             "thumb_progress": STATE.get("thumb_progress") or "",
             "meta_progress": STATE.get("meta_progress") or "",
+            "meta_running": meta_running,
+            "thumb_pending": thumb_pending,
+            "background_busy": bool(meta_running or thumb_pending),
             "count": int(
                 facets.get("count")
                 or len(STATE.get("videos") or [])
