@@ -121,6 +121,7 @@ from vg.diagnostics import (
     emit as diagnostic_emit,
     emit_rate_limited as diagnostic_emit_rate_limited,
     error as diagnostic_error,
+    full_logging_enabled as diagnostic_full_logging_enabled,
     perf as diagnostic_perf,
     request_id as diagnostic_request_id,
     timed_lock as diagnostic_timed_lock,
@@ -462,14 +463,32 @@ def index():
 @app.route("/api/client-log", methods=["POST"])
 def api_client_log():
     """Receive ordered browser actions/errors so one operation can be traced end-to-end."""
+    ingest_started = time.perf_counter()
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
+        diagnostic_emit(
+            "WARN",
+            "client_log_rejected",
+            force=True,
+            reason="invalid_json_object",
+            elapsed_ms=f"{(time.perf_counter() - ingest_started) * 1000.0:.1f}",
+        )
         return jsonify({"ok": False, "msg": "日志格式错误"}), 400
     event = str(data.get("event") or "").strip()[:80]
     if not event or not re.fullmatch(r"[A-Za-z0-9_.:-]+", event):
+        diagnostic_emit(
+            "WARN",
+            "client_log_rejected",
+            force=True,
+            reason="invalid_event_name",
+            elapsed_ms=f"{(time.perf_counter() - ingest_started) * 1000.0:.1f}",
+            client_event=event,
+        )
         return jsonify({"ok": False, "msg": "事件名错误"}), 400
     raw_fields = data.get("fields")
     fields: dict[str, object] = {}
+    # 布局诊断需要保留多行控件的完整矩形数据；普通客户端日志仍保持较小上限。
+    field_value_limit = 4000 if event == "filter_layout" else 500
     if isinstance(raw_fields, dict):
         for key, value in list(raw_fields.items())[:24]:
             safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", str(key))[:40]
@@ -480,7 +499,7 @@ def api_client_log():
             elif isinstance(value, (int, float)):
                 fields[safe_key] = value
             else:
-                fields[safe_key] = str(value).replace("\r", " ").replace("\n", " ")[:500]
+                fields[safe_key] = str(value).replace("\r", " ").replace("\n", " ")[:field_value_limit]
     operation_id = str(data.get("operation_id") or _operation_id()).strip()[:64]
     level = str(data.get("level") or "INFO").upper()
     if level not in {"INFO", "WARN", "ERROR"}:
@@ -519,6 +538,14 @@ def api_client_log():
         client_ip=_client_ip(),
         page=str(data.get("page") or "")[:200],
         **fields,
+    )
+    diagnostic_perf(
+        "client_log_ingest",
+        (time.perf_counter() - ingest_started) * 1000.0,
+        client_event=event,
+        client_level=level,
+        field_count=len(fields),
+        full_logging=diagnostic_full_logging_enabled(),
     )
     return jsonify({"ok": True})
 
@@ -864,6 +891,27 @@ def _subfolder_levels(cat_videos: list[dict], category: str, folder: str) -> lis
     return levels
 
 
+def _extension_facets(videos: list[dict]) -> list[dict]:
+    """Count formats for the current scope, independent of selected ext."""
+    started = time.perf_counter()
+    counts: dict[str, int] = {}
+    for item in videos:
+        ext = str(item.get("ext") or "").strip().lower()
+        if ext:
+            counts[ext] = counts.get(ext, 0) + 1
+    result = [
+        {"id": ext, "ext": ext, "label": ext.lstrip("."), "name": ext.lstrip("."), "count": count}
+        for ext, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]
+    diagnostic_perf(
+        "extension_facets_built",
+        (time.perf_counter() - started) * 1000.0,
+        source_rows=len(videos),
+        type_facets=len(result),
+    )
+    return result
+
+
 def _prepare_video_query(
     lib: str,
     category: str,
@@ -879,8 +927,11 @@ def _prepare_video_query(
     sort: str,
 ) -> tuple:
     """Build one complete filtered/faceted/sorted result for /api/videos."""
+    query_started = time.perf_counter()
+    scope_started = time.perf_counter()
     videos = list(videos_for_scope(lib or None))
     videos = filter_videos_by_scope(videos, category=category)
+    scope_ms = (time.perf_counter() - scope_started) * 1000.0
 
     cat_videos = videos
     if ext or q_raw:
@@ -896,6 +947,7 @@ def _prepare_video_query(
 
     subfolder_levels = _subfolder_levels(cat_videos, category, folder)
 
+    folder_started = time.perf_counter()
     if folder:
         has_children = bool(_subfolder_facets(videos, "", folder))
         videos = filter_videos_by_scope(
@@ -903,23 +955,35 @@ def _prepare_video_query(
             folder=folder,
             include_descendants=not (has_children and not folder_all),
         )
+    folder_ms = (time.perf_counter() - folder_started) * 1000.0
+    type_videos = list(videos)
+    if q_raw:
+        type_videos = [
+            v for v in type_videos
+            if video_matches_query(v, parsed, _video_search_text)
+        ]
+    scoped_types = _extension_facets(type_videos)
     if ext:
         ext_n = ext if ext.startswith(".") else "." + ext
         videos = [v for v in videos if (v.get("ext") or "").lower() == ext_n]
     if q_raw:
         videos = [v for v in videos if video_matches_query(v, parsed, _video_search_text)]
 
+    taxonomy_started = time.perf_counter()
     scoped_genres = _genre_facets(videos)
     scoped_themes = taxonomy_facets(videos, "themes")
     scoped_backgrounds = taxonomy_facets(videos, "backgrounds")
     scoped_subs = _subfolder_facets(videos, category, folder)
+    taxonomy_ms = (time.perf_counter() - taxonomy_started) * 1000.0
 
+    selected_filter_started = time.perf_counter()
     if genre:
         videos = [v for v in videos if genre in ensure_video_genres(v)]
     if theme:
         videos = [v for v in videos if theme in ensure_video_taxonomy(v)[0]]
     if background:
         videos = [v for v in videos if background in ensure_video_taxonomy(v)[1]]
+    selected_filter_ms = (time.perf_counter() - selected_filter_started) * 1000.0
 
     raw_count = len(videos)
     if view == "series":
@@ -943,7 +1007,27 @@ def _prepare_video_query(
         key_fn = lambda v: v.get("duration") or 0
         reverse = False
 
+    sort_started = time.perf_counter()
     videos = sorted(videos, key=key_fn, reverse=reverse)
+    sort_ms = (time.perf_counter() - sort_started) * 1000.0
+    diagnostic_perf(
+        "python_video_query",
+        (time.perf_counter() - query_started) * 1000.0,
+        source_rows=len(videos),
+        raw_count=raw_count,
+        scope_ms=f"{scope_ms:.1f}",
+        folder_ms=f"{folder_ms:.1f}",
+        taxonomy_ms=f"{taxonomy_ms:.1f}",
+        selected_filter_ms=f"{selected_filter_ms:.1f}",
+        sort_ms=f"{sort_ms:.1f}",
+        category=category or "all",
+        folder=folder,
+        ext=ext,
+        genre=bool(genre),
+        theme=bool(theme),
+        background=bool(background),
+        view=view,
+    )
     return (
         videos,
         raw_count,
@@ -952,6 +1036,7 @@ def _prepare_video_query(
         scoped_backgrounds,
         scoped_subs,
         subfolder_levels,
+        scoped_types,
     )
 
 
@@ -1001,6 +1086,8 @@ def api_videos():
         lib=lib or "all",
         category=category or "all",
         folder=folder,
+        folder_all=folder_all,
+        ext=ext,
         view=view,
         sort=sort,
         offset=offset,
@@ -1097,7 +1184,11 @@ def api_videos():
                 slim.append(row)
             thumb_meta_ms = (time.perf_counter() - thumb_started) * 1000.0
             facet_started = time.perf_counter()
+            base_facet_ms = 0.0
+            type_facet_ms = 0.0
+            level_facet_started = time.perf_counter()
             if offset == 0:
+                base_facet_started = time.perf_counter()
                 facet_rows = [
                     query_catalog_facets(
                         cache,
@@ -1114,18 +1205,80 @@ def api_videos():
                     if len(facet_rows) == 1
                     else merge_catalog_facets(facet_rows)
                 )
+                base_facet_ms = (time.perf_counter() - base_facet_started) * 1000.0
+                # 格式选项必须按当前频道/子类统计，不能沿用整盘 types；
+                # 查询格式选项时刻意不带当前 ext，保证仍可切换到其它格式。
+                type_facet_started = time.perf_counter()
+                type_facet_rows = [
+                    query_catalog_facets(
+                        cache,
+                        category=category,
+                        folder=folder,
+                        include_descendants=include_descendants,
+                        ext="",
+                        search=q_raw,
+                    )
+                    for cache in sql_caches
+                ]
+                type_facets = (
+                    type_facet_rows[0]
+                    if len(type_facet_rows) == 1
+                    else merge_catalog_facets(type_facet_rows)
+                )
+                facets["types"] = type_facets.get("types") or []
+                type_facet_ms = (time.perf_counter() - type_facet_started) * 1000.0
             else:
-                facets = {"genres": [], "themes": [], "backgrounds": [], "subfolders": []}
+                facets = {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
             facets_ms = (time.perf_counter() - facet_started) * 1000.0
             levels = []
-            if offset == 0 and facets["subfolders"]:
-                levels = [{
-                    "label": "子类",
-                    "prefix": folder or category,
-                    "all_id": "" if not folder else folder,
-                    "selected": "",
-                    "items": facets["subfolders"],
-                }]
+            if offset == 0 and category and category != "__root__":
+                level_facet_started = time.perf_counter()
+                # SQL 路径也要返回完整的子类层级。此前只使用当前 folder 的
+                # facets：选到叶子目录后没有更深子目录，subfolders 为空，
+                # 前端就把整个子类区域清空了。
+                category_n = category.strip("/").replace("\\", "/")
+                folder_n = folder.strip("/").replace("\\", "/")
+                if folder_n == category_n:
+                    folder_n = ""
+                prefixes = [category_n]
+                if folder_n.startswith(category_n + "/"):
+                    acc = category_n
+                    for part in folder_n[len(category_n) + 1 :].split("/"):
+                        if part:
+                            acc = f"{acc}/{part}"
+                            prefixes.append(acc)
+                for level_index, prefix in enumerate(prefixes):
+                    level_facets = [
+                        query_catalog_facets(
+                            cache,
+                            category=category,
+                            folder=prefix,
+                            include_descendants=True,
+                            # 子类导航不随格式标签消失，始终按当前频道目录统计。
+                            ext="",
+                            search=q_raw,
+                        )
+                        for cache in sql_caches
+                    ]
+                    level_merged = (
+                        level_facets[0]
+                        if len(level_facets) == 1
+                        else merge_catalog_facets(level_facets)
+                    )
+                    items = level_merged.get("subfolders") or []
+                    if not items:
+                        break
+                    selected = ""
+                    if folder_n.startswith(prefix + "/"):
+                        selected = prefix + "/" + folder_n[len(prefix) + 1 :].split("/")[0]
+                    levels.append({
+                        "label": "子类" if level_index == 0 else prefix.rsplit("/", 1)[-1],
+                        "prefix": prefix,
+                        "all_id": "" if prefix == category_n else prefix,
+                        "selected": selected,
+                        "items": items,
+                    })
+            level_facet_ms = (time.perf_counter() - level_facet_started) * 1000.0 if offset == 0 else 0.0
             serialize_started = time.perf_counter()
             response = jsonify({
                 "videos": slim,
@@ -1138,6 +1291,7 @@ def api_videos():
                 "themes": facets["themes"],
                 "backgrounds": facets["backgrounds"],
                 "subfolders": facets["subfolders"],
+                "types": facets.get("types") or [],
                 "subfolder_levels": levels,
                 "view": "flat",
                 "lib": lib,
@@ -1154,11 +1308,18 @@ def api_videos():
                 caches=len(sql_caches),
                 sql_ms=f"{sql_ms:.1f}",
                 facets_ms=f"{facets_ms:.1f}",
+                base_facet_ms=f"{base_facet_ms:.1f}",
+                type_facet_ms=f"{type_facet_ms:.1f}",
+                level_facet_ms=f"{level_facet_ms:.1f}",
                 thumb_meta_ms=f"{thumb_meta_ms:.1f}",
                 serialize_ms=f"{serialize_ms:.1f}",
                 response_bytes=response.calculate_content_length(),
                 category=category or "all",
                 folder=folder,
+                ext=ext,
+                subfolder_facets=len(facets.get("subfolders") or []),
+                subfolder_levels=len(levels),
+                type_facets=len(facets.get("types") or []),
                 sort=sort,
             )
             return response
@@ -1219,6 +1380,7 @@ def api_videos():
         scoped_backgrounds,
         scoped_subs,
         subfolder_levels,
+        scoped_types,
     ) = cached_query
 
     total = len(videos)
@@ -1277,6 +1439,7 @@ def api_videos():
         "themes": scoped_themes,
         "backgrounds": scoped_backgrounds,
         "subfolders": scoped_subs,
+        "types": scoped_types,
         "subfolder_levels": subfolder_levels,
         "view": view if view in ("series", "flat") else "flat",
         "lib": lib,
@@ -1300,6 +1463,9 @@ def api_videos():
         response_bytes=response.calculate_content_length(),
         category=category or "all",
         folder=folder,
+        folder_all=folder_all,
+        ext=ext,
+        type_facets=len(scoped_types),
         sort=sort,
         view=view,
     )
@@ -1554,7 +1720,24 @@ def thumb(vid: str):
         if item and ffmpeg and cache:
             src = _video_file_for_thumb(item)
             out = thumb_path(cache, file_id)
-            if src:
+            # Metadata probing marks audio-only/corrupt containers as ``bad``.
+            # They cannot produce a video frame, so queueing ffmpeg here only
+            # repeats a 300-500ms failure for every thumbnail retry (and floods
+            # the log with ``thumbnail_source_no_video_stream`` warnings).
+            bad_reason = str(item.get("bad_reason") or "").casefold()
+            if item.get("bad") and ("无视频流" in bad_reason or "no video" in bad_reason):
+                diagnostic_aggregate("thumbnail_generation_skipped_no_video_stream")
+                diagnostic_emit_rate_limited(
+                    "INFO",
+                    "thumbnail_generation_skipped_no_video_stream",
+                    key=f"{prefer_root}|{vid}",
+                    interval=30.0,
+                    force=True,
+                    video_id=vid,
+                    root=prefer_root,
+                    reason=item.get("bad_reason") or "no_video_stream",
+                )
+            elif src:
                 def generate_requested_thumb() -> bool:
                     ok = make_thumbnail(ffmpeg, src, out, background=True)
                     if not ok:
@@ -1626,6 +1809,10 @@ def thumb(vid: str):
         if item and ffmpeg:
             src = _video_file_for_thumb(item)
             out = thumb_path(cache, file_id)
+            bad_reason = str(item.get("bad_reason") or "").casefold()
+            if item.get("bad") and ("无视频流" in bad_reason or "no video" in bad_reason):
+                diagnostic_aggregate("thumbnail_generation_skipped_no_video_stream")
+                src = None
             if src:
                 def generate_requested_thumb() -> bool:
                     ok = make_thumbnail(ffmpeg, src, out, background=True)

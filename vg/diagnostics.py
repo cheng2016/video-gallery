@@ -130,11 +130,11 @@ def emit_rate_limited(
 
 
 def perf(event: str, elapsed_ms: float, *, force: bool = False, **fields) -> None:
-    """Print slow stages by default; force=True for key pipeline summaries."""
+    """Print slow stages by default; full logging prints every instrumented span."""
     emit(
         "PERF",
         event,
-        force=force or elapsed_ms >= _slow_ms,
+        force=force or _full_logging or elapsed_ms >= _slow_ms,
         elapsed_ms=f"{elapsed_ms:.1f}",
         **fields,
     )
@@ -183,6 +183,10 @@ def timed_lock(
             **fields,
         )
     waited_ms = (time.perf_counter() - started) * 1000.0
+    # Successful uncontended locks are hot-path noise.  Even with full
+    # logging enabled, only report an acquisition when the caller actually
+    # waited; otherwise large metadata loops can emit thousands of lines and
+    # distort the timings they are meant to diagnose.
     if warned:
         emit(
             "PERF",

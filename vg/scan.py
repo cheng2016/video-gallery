@@ -424,9 +424,22 @@ def generate_thumbs_parallel(
     burst: bool = False,
 ) -> tuple[int, int]:
     """通过共享队列生成预览图。返回 (成功数, 失败数)。"""
+    started = time.perf_counter()
     ffmpeg = STATE.get("ffmpeg")
     cache = STATE.get("cache_dir")
     if not missing or not ffmpeg or not cache:
+        from vg.diagnostics import perf as diagnostic_perf
+
+        diagnostic_perf(
+            "generate_thumbs_parallel",
+            (time.perf_counter() - started) * 1000.0,
+            total=len(missing or []),
+            cached=cached_n,
+            workers=0,
+            burst=burst,
+            skipped=True,
+            reason="no_missing_or_ffmpeg_or_cache",
+        )
         return 0, 0
     total = len(missing)
     workers = thumb_worker_count(total, burst=burst)
@@ -453,6 +466,12 @@ def generate_thumbs_parallel(
     last_log_i = 0
     def one(item: dict) -> bool:
         try:
+            # ffprobe already proved that audio-only/corrupt containers cannot
+            # yield a frame.  Do not enqueue another ffmpeg attempt during the
+            # bulk scan; otherwise each retry burns time and pollutes the log.
+            bad_reason = str(item.get("bad_reason") or "").casefold()
+            if item.get("bad") and ("无视频流" in bad_reason or "no video" in bad_reason):
+                return False
             out = thumb_path(cache, item["id"])
             src = _video_file_for_thumb(item)
             ok = bool(src and make_thumbnail(ffmpeg, src, out, background=True, burst=burst))
@@ -504,6 +523,18 @@ def generate_thumbs_parallel(
             except Exception as exc:
                 fail_n += 1
                 log(f"[预览图] 更新状态失败 {name}: {exc}")
+    from vg.diagnostics import perf as diagnostic_perf
+
+    diagnostic_perf(
+        "generate_thumbs_parallel",
+        (time.perf_counter() - started) * 1000.0,
+        total=total,
+        cached=cached_n,
+        workers=workers,
+        burst=burst,
+        ok=ok_n,
+        failed=fail_n,
+    )
     return ok_n, fail_n
 
 
@@ -517,14 +548,47 @@ def fill_thumbs_for_videos(
     folder_counts: dict[str, int] | None = None,
 ) -> tuple[int, int]:
     """Fill missing .vgt files only: reuse other caches, then ffmpeg the rest."""
+    started = time.perf_counter()
     ffmpeg = STATE.get("ffmpeg")
     if not videos or not cache:
+        from vg.diagnostics import perf as diagnostic_perf
+
+        diagnostic_perf(
+            "fill_thumbs_for_videos",
+            (time.perf_counter() - started) * 1000.0,
+            videos=len(videos or []),
+            skipped=True,
+            reason="no_videos_or_cache",
+        )
         return 0, 0
     if not ffmpeg:
         STATE["thumb_progress"] = "未找到 ffmpeg，已跳过预览图（安装后重启可生成）"
         log("[预览图] 未找到 ffmpeg，已跳过")
+        from vg.diagnostics import perf as diagnostic_perf
+
+        diagnostic_perf(
+            "fill_thumbs_for_videos",
+            (time.perf_counter() - started) * 1000.0,
+            videos=len(videos),
+            skipped=True,
+            reason="no_ffmpeg",
+        )
         return 0, 0
     missing = missing_thumb_items(videos, cache)
+    # Never schedule known audio-only/corrupt files.  They are valid catalog
+    # entries, but a thumbnail is impossible and ffmpeg would just fail.
+    skipped_no_video = [
+        item for item in missing
+        if item.get("bad") and (
+            "无视频流" in str(item.get("bad_reason") or "").casefold()
+            or "no video" in str(item.get("bad_reason") or "").casefold()
+        )
+    ]
+    for item in skipped_no_video:
+        item["has_thumb"] = False
+        item["thumb_v"] = 0
+    if skipped_no_video:
+        missing = [item for item in missing if item not in skipped_no_video]
     missing_before_reuse = len(missing)
     local_hits = len(videos) - missing_before_reuse
     missing_sample_ids = "|".join(
@@ -554,8 +618,52 @@ def fill_thumbs_for_videos(
             cache_vgt_files=cache_vgt_files,
             sample_ids=missing_sample_ids,
         )
-    cached_n = len(videos) - len(missing)
+    cached_n = len(videos) - len(missing) - len(skipped_no_video)
     ok_n = fail_n = 0
+    if burst and len(missing) >= 200:
+        # Publish the catalog first; large ffmpeg batches must not hold the
+        # scan thread (and therefore the UI) for tens of seconds.
+        deferred_items = list(missing)
+        STATE["thumb_progress"] = (
+            f"预览图已转后台生成（待生成 {len(deferred_items)}，已有缓存 {cached_n}）"
+        )
+        log(
+            f"[预览图] 批量任务过多，扫描已先发布索引，转后台生成："
+            f"待生成 {len(deferred_items)}，已有缓存 {cached_n}"
+        )
+
+        def run_deferred() -> None:
+            started = time.perf_counter()
+            log(f"[预览图] 后台批量生成开始：{len(deferred_items)} 个，扫描线程已释放")
+            try:
+                deferred_ok, deferred_failed = generate_thumbs_parallel(
+                    deferred_items,
+                    cached_n=cached_n,
+                    label="后台补全",
+                    burst=False,
+                )
+                STATE["thumb_progress"] = (
+                    f"预览图后台完成（缓存 {cached_n} + 新建 {deferred_ok}，失败 {deferred_failed}）"
+                )
+                if root is not None:
+                    save_index(cache, root, videos, file_count=file_count, folder_counts=folder_counts)
+                    try:
+                        from vg.disk_libs import sync_disk_lib_memory
+                        sync_disk_lib_memory(str(Path(root).resolve()), videos)
+                    except Exception:
+                        pass
+                elapsed = (time.perf_counter() - started) * 1000.0
+                log(f"[预览图] 后台批量生成完成：成功 {deferred_ok}，失败 {deferred_failed}，耗时 {elapsed:.1f}ms")
+                from vg.diagnostics import perf
+                perf("thumbnail_bulk_background", elapsed, force=True, videos=len(deferred_items), cached=cached_n, ok=deferred_ok, failed=deferred_failed)
+            except Exception as exc:
+                STATE["thumb_progress"] = f"预览图后台生成失败: {exc}"
+                log(f"[预览图] 后台批量生成失败: {exc}")
+
+        threading.Thread(target=run_deferred, daemon=True, name="thumb-bulk-background").start()
+        from vg.diagnostics import perf
+        perf("thumbnail_bulk_background_started", 0.0, force=True, videos=len(videos), missing=len(deferred_items), cached=cached_n, burst=burst)
+        return 0, 0
     if missing:
         label = "新建" if burst else "补全"
         ok_n, fail_n = generate_thumbs_parallel(
@@ -578,6 +686,21 @@ def fill_thumbs_for_videos(
             sync_disk_lib_memory(root_s, videos)
         except Exception:
             pass
+    from vg.diagnostics import perf as diagnostic_perf
+
+    diagnostic_perf(
+        "fill_thumbs_for_videos",
+        (time.perf_counter() - started) * 1000.0,
+        videos=len(videos),
+        missing_before_reuse=missing_before_reuse,
+        skipped_no_video=len(skipped_no_video),
+        reused=reused,
+        remaining=len(missing),
+        cached=cached_n,
+        ok=ok_n,
+        failed=fail_n,
+        burst=burst,
+    )
     return ok_n, fail_n
 
 

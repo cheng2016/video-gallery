@@ -72,6 +72,7 @@ def set_privacy(
     full_logging: bool | None = None,
 ) -> dict:
     """Persist settings. cache_location change needs remount/rescan to take full effect."""
+    before_full_logging = full_logging_enabled()
     kwargs = {}
     if encrypt_thumbs is not None:
         kwargs["encrypt_thumbs"] = bool(encrypt_thumbs)
@@ -86,8 +87,20 @@ def set_privacy(
         kwargs["full_logging"] = bool(full_logging)
     if kwargs:
         save_prefs(**kwargs)
-    refresh_logging_runtime()
-    return privacy_snapshot()
+    enabled = refresh_logging_runtime()
+    after = privacy_snapshot()
+    if full_logging is not None:
+        from vg.diagnostics import emit
+
+        emit(
+            "INFO",
+            "full_logging_changed",
+            force=True,
+            before=before_full_logging,
+            after=enabled,
+            changed=before_full_logging != enabled,
+        )
+    return after
 
 
 def pack_thumb_bytes(jpeg: bytes) -> bytes:

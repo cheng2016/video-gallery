@@ -456,10 +456,15 @@
       min-width: 0;
     }
     #subFolderRows {
+      height: auto;
+      max-height: none;
+      overflow: visible;
+      margin-bottom: 2px;
+    }
+    #subFolderRows.is-scrollable {
       max-height: min(36vh, 280px);
       overflow-x: hidden;
       overflow-y: auto;
-      margin-bottom: 2px;
     }
     #subFolderRows:empty { display: none; margin: 0; }
     .tag {
@@ -567,11 +572,19 @@
       align-items: center;
       column-gap: 10px;
       min-height: 48px;
-      padding: 8px 20px;
-      border-bottom: 1px solid var(--border);
-      background: rgba(14, 17, 22, 0.96);
-      backdrop-filter: blur(8px);
+      padding: 7px 20px;
+      border-bottom: 1px solid rgba(126, 146, 173, 0.18);
+      background: linear-gradient(180deg, rgba(20, 26, 35, 0.98), rgba(14, 18, 25, 0.96));
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+      backdrop-filter: blur(10px);
       flex-shrink: 0;
+    }
+    .scope-sticky.is-stuck.has-filter-row {
+      height: 48px;
+      min-height: 48px;
+      padding-top: 7px;
+      padding-bottom: 7px;
+      box-sizing: border-box;
     }
     .scope-sticky .crumb,
     .sticky-filter-row {
@@ -596,6 +609,9 @@
       gap: 10px;
       visibility: hidden;
       pointer-events: none;
+      min-height: 30px;
+      max-height: 32px;
+      overflow: hidden;
     }
     .scope-sticky.is-stuck.has-filter-row .crumb {
       visibility: hidden;
@@ -607,9 +623,13 @@
     }
     .sticky-filter-row .filter-label {
       flex-shrink: 0;
-      min-width: 42px;
+      min-width: auto;
       max-width: 72px;
-      font-size: 0.82rem;
+      padding: 4px 8px;
+      border: 1px solid rgba(126, 146, 173, 0.22);
+      border-radius: 7px;
+      background: rgba(126, 146, 173, 0.08);
+      font-size: 0.76rem;
       color: var(--muted);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -622,7 +642,15 @@
       flex: 1;
       min-width: 0;
       overflow-x: auto;
-      padding-bottom: 2px;
+      max-height: 32px;
+      padding: 0 0 1px;
+      scrollbar-width: none;
+    }
+    .sticky-filter-row .filter-tags::-webkit-scrollbar { display: none; }
+    .sticky-filter-row .tag {
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      line-height: 1.2;
     }
     .scope-actions {
       grid-column: 2;
@@ -712,16 +740,22 @@
       border-bottom: 1px solid transparent;
     }
     .continue-bar {
-      padding: 8px 20px 12px;
+      padding: 8px 20px 10px;
       display: flex;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 8px;
       align-items: center;
       flex-shrink: 0;
       position: relative;
       z-index: 1;
       background: var(--bg);
+      min-height: 64px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: none;
+      scroll-snap-type: x proximity;
     }
+    .continue-bar::-webkit-scrollbar { display: none; }
     .continue-bar .cont-label {
       font-size: 0.8rem;
       color: var(--muted);
@@ -729,23 +763,52 @@
       flex-shrink: 0;
     }
     .continue-chip {
+      flex: 0 0 220px;
+      width: 220px;
+      height: 46px;
+      min-height: 46px;
+      box-sizing: border-box;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
       border: 1px solid var(--border);
-      background: var(--bg2);
+      background: linear-gradient(135deg, rgba(31, 39, 52, 0.95), rgba(24, 30, 40, 0.95));
       color: var(--text);
       border-radius: 8px;
-      padding: 6px 10px;
+      padding: 5px 9px;
       cursor: pointer;
       font-size: 0.82rem;
-      max-width: 220px;
+      max-width: 220px !important;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      scroll-snap-align: start;
     }
     .continue-chip:hover { border-color: var(--accent); color: var(--accent); }
     .continue-chip .pct {
       opacity: 0.7;
       font-size: 0.75em;
       margin-left: 6px;
+    }
+    .continue-chip .media-row-thumb {
+      flex: 0 0 52px;
+      width: 52px !important;
+      min-width: 52px !important;
+      height: 32px !important;
+      border-radius: 5px !important;
+    }
+    .continue-chip > span:last-child {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    @media (max-width: 900px) {
+      .continue-chip {
+        flex-basis: 190px;
+        width: 190px;
+        max-width: 190px !important;
+      }
     }
     .media-row {
       display: flex;
@@ -1306,10 +1369,19 @@
     </aside>
     <section class="content" id="contentScroll">
       <div class="filters" id="filters">
+        <div class="filter-row" id="categoryRow" style="display:none">
+          <div class="filter-label">频道</div>
+          <div class="filter-tags" id="categoryTags"></div>
+        </div>
+        <div class="filter-row">
+          <div class="filter-label">格式</div>
+          <div class="filter-tags" id="extTags"></div>
+        </div>
         <div class="filter-row" id="genreRow" style="display:none">
-          <div class="filter-label">类型</div>
+          <div class="filter-label">主题类型</div>
           <div class="filter-tags" id="genreTags"></div>
         </div>
+        <!-- 主题/类型合并为一套去重标签；背景保留独立节点，有数据时才显示。 -->
         <div class="filter-row" id="themeRow" style="display:none">
           <div class="filter-label">主题</div>
           <div class="filter-tags" id="themeTags"></div>
@@ -1317,10 +1389,6 @@
         <div class="filter-row" id="backgroundRow" style="display:none">
           <div class="filter-label">背景</div>
           <div class="filter-tags" id="backgroundTags"></div>
-        </div>
-        <div class="filter-row">
-          <div class="filter-label">格式</div>
-          <div class="filter-tags" id="extTags"></div>
         </div>
         <div id="subFolderRows"></div>
       </div>
@@ -1616,6 +1684,7 @@
     let lastUiOperationAt = 0;
     const CLIENT_SESSION_ID =
       (Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+    let lastClientLogFailureAt = 0;
 
     function newOperationId(prefix) {
       return `${prefix || "op"}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1641,8 +1710,160 @@
           },
           body: JSON.stringify(payload),
           keepalive: true,
-        }).catch(() => {});
-      } catch (_) {}
+        }).then((response) => {
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+        }).catch((error) => {
+          const now = Date.now();
+          // 日志接口异常不能递归再打日志；浏览器控制台保留一条可见错误，5 秒限流。
+          if (now - lastClientLogFailureAt >= 5000) {
+            lastClientLogFailureAt = now;
+            console.error("[video-gallery] client log upload failed", {
+              event: payload.event,
+              error: String(error && (error.stack || error) || "unknown"),
+            });
+          }
+        });
+      } catch (error) {
+        console.error("[video-gallery] client log setup failed", {
+          event: payload.event,
+          error: String(error && (error.stack || error) || "unknown"),
+        });
+      }
+    }
+
+    function clientNow() {
+      return (window.performance && performance.now) ? performance.now() : Date.now();
+    }
+
+    function clientElapsedMs(started) {
+      return Math.max(0, clientNow() - Number(started || 0));
+    }
+
+    // 筛选区布局诊断：记录真实盒模型尺寸，尤其关注子类容器的
+    // clientHeight/scrollHeight 以及最后一行到容器底部的空白。
+    let filterLayoutLogTimer = 0;
+    function filterLayoutSnapshot(reason) {
+      const started = clientNow();
+      const root = $("filters");
+      if (!root || !root.getBoundingClientRect) return;
+      const rect = (el) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        return {
+          id: el.id || "",
+          class_name: String(el.className || "").slice(0, 80),
+          x: Math.round(r.x), y: Math.round(r.y),
+          width: Math.round(r.width), height: Math.round(r.height),
+          top: Math.round(r.top), bottom: Math.round(r.bottom),
+          client_height: el.clientHeight, scroll_height: el.scrollHeight,
+          display: cs.display, box_sizing: cs.boxSizing,
+          margin_bottom: cs.marginBottom, padding: cs.padding,
+        };
+      };
+      const rows = Array.from(root.querySelectorAll(".filter-row")).map((row, index) => ({
+        index,
+        level: row.getAttribute("data-sub-level") || "",
+        row: rect(row),
+        tags: rect(row.querySelector(".filter-tags")),
+        tag_count: row.querySelectorAll(".tag").length,
+      }));
+      const sub = $("subFolderRows");
+      const visibleRows = rows.filter((item) => item.row && item.row.display !== "none" && item.row.height > 0);
+      const last = visibleRows.length ? visibleRows[visibleRows.length - 1].row : null;
+      const rootRect = root.getBoundingClientRect();
+      const sticky = $("scopeSticky");
+      const stickyRow = $("stickyFilterRow");
+      const content = $("contentScroll");
+      clientLog("filter_layout", {
+        reason: String(reason || "unknown"),
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        root: JSON.stringify(rect(root)),
+        rows: JSON.stringify(rows).slice(0, 3600),
+        visible_row_count: visibleRows.length,
+        subfolder: JSON.stringify(rect(sub)),
+        last_row_bottom: last ? last.bottom : null,
+        bottom_gap: last ? Math.round(rootRect.bottom - last.bottom) : null,
+        sticky: JSON.stringify(rect(sticky)),
+        sticky_row: JSON.stringify(rect(stickyRow)),
+        sticky_state: sticky ? {
+          is_stuck: sticky.classList.contains("is-stuck"),
+          has_filter_row: sticky.classList.contains("has-filter-row"),
+          visibility: getComputedStyle(stickyRow || sticky).visibility,
+          grid_rows: getComputedStyle(sticky).gridTemplateRows,
+        } : null,
+        content_scroll_top: content ? Math.round(content.scrollTop) : null,
+        viewport_width: window.innerWidth,
+        viewport_height: window.innerHeight,
+      });
+    }
+    function scheduleFilterLayoutLog(reason) {
+      clearTimeout(filterLayoutLogTimer);
+      filterLayoutLogTimer = setTimeout(() => filterLayoutSnapshot(reason), 120);
+    }
+    function syncSubfolderOverflow(reason) {
+      const started = clientNow();
+      const box = $("subFolderRows");
+      if (!box || !box.children.length) {
+        if (box) box.classList.remove("is-scrollable");
+        clientLog("subfolder_overflow", {
+          reason: String(reason || "unknown"),
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          content_height: 0,
+          max_height: Math.round(Math.min(window.innerHeight * 0.36, 280)),
+          client_height: box ? box.clientHeight : 0,
+          scroll_height: box ? box.scrollHeight : 0,
+          scrollable: false,
+          row_count: 0,
+        });
+        return;
+      }
+      // 先以完整内容测量，再决定是否启用 max-height，避免空白高度被预留。
+      box.classList.remove("is-scrollable");
+      const maxHeight = Math.min(window.innerHeight * 0.36, 280);
+      const contentHeight = box.scrollHeight;
+      const scrollable = contentHeight > maxHeight + 1;
+      box.classList.toggle("is-scrollable", scrollable);
+      clientLog("subfolder_overflow", {
+        reason: String(reason || "unknown"),
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        content_height: contentHeight,
+        max_height: Math.round(maxHeight),
+        client_height: box.clientHeight,
+        scroll_height: box.scrollHeight,
+        scrollable,
+        row_count: box.querySelectorAll(".filter-row").length,
+      });
+    }
+    window.addEventListener("resize", () => {
+      syncSubfolderOverflow("resize");
+      scheduleFilterLayoutLog("resize");
+    });
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => scheduleFilterLayoutLog("resize_observer"));
+      const root = $("filters");
+      if (root) ro.observe(root);
+    }
+    if (window.MutationObserver) {
+      const mo = new MutationObserver(() => scheduleFilterLayoutLog("mutation"));
+      const root = $("filters");
+      if (root) mo.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class"] });
+    }
+
+    function filterStateFields(extra) {
+      return {
+        category: state.category || "",
+        folder: state.folder || "",
+        folder_all: !!state.folderAll,
+        lib: state.lib || "",
+        ext: state.ext || "",
+        genre: state.genre || "",
+        theme: state.theme || "",
+        background: state.background || "",
+        ...(extra || {}),
+      };
     }
 
     const nativeFetch = window.fetch.bind(window);
@@ -1928,12 +2149,20 @@
     }
 
     function renderContinueBar() {
+      const started = clientNow();
       const bar = $("continueBar");
       if (!bar) return;
       const rows = historyEntries("resume").slice(0, 8);
       if (!rows.length) {
         bar.style.display = "none";
         bar.innerHTML = "";
+        clientLog("continue_layout", {
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          item_count: 0,
+          client_height: bar.clientHeight,
+          child_rows: 0,
+          single_row: true,
+        });
         return;
       }
       bar.style.display = "flex";
@@ -1942,14 +2171,23 @@
         const dur = Number(r.duration) || 0;
         const pct = dur > 0 ? Math.min(99, Math.round((r.t / dur) * 100)) : 0;
         const label = escapeHtml(r.name || r.id);
-        return `<button type="button" class="continue-chip" data-play-id="${escapeAttr(r.id)}" title="${escapeAttr(r.folder || r.root || "")}" style="display:inline-flex;align-items:center;gap:8px;max-width:260px">
-          <span class="media-row-thumb" style="width:48px;min-width:48px;height:28px;border-radius:4px">
+        return `<button type="button" class="continue-chip" data-play-id="${escapeAttr(r.id)}" title="${escapeAttr(r.folder || r.root || "")}">
+          <span class="media-row-thumb">
             <img ${lazyThumbMarkup(r.id, 1, r.root || "")} />
           </span>
           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}${pct ? `<span class="pct">${pct}%</span>` : ""}</span>
         </button>`;
       }).join("");
       watchThumbs(bar);
+      clientLog("continue_layout", {
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        item_count: rows.length,
+        client_width: bar.clientWidth,
+        scroll_width: bar.scrollWidth,
+        client_height: bar.clientHeight,
+        child_rows: bar.children.length,
+        single_row: Array.from(bar.children).every((el) => el.getBoundingClientRect().height <= 50),
+      });
     }
 
     loadUiPrefs();
@@ -1960,22 +2198,46 @@
     }
 
     function setSidebarHidden(hidden) {
+      const before = document.body.classList.contains("sidebar-hidden");
       document.body.classList.toggle("sidebar-hidden", !!hidden);
       if (isMobile()) {
         $("sidebar").classList.toggle("open", !hidden);
       }
-      try { localStorage.setItem("vg_sidebar_hidden", hidden ? "1" : "0"); } catch (_) {}
+      try {
+        localStorage.setItem("vg_sidebar_hidden", hidden ? "1" : "0");
+      } catch (error) {
+        clientLog("sidebar_preference_save_failed", filterStateFields({
+          hidden: !!hidden,
+          error: String(error && (error.stack || error) || "unknown"),
+        }), "ERROR");
+      }
+      renderCategoryTags(state.categories || []);
+      clientLog("sidebar_visibility_changed", filterStateFields({
+        hidden_before: before,
+        hidden_after: document.body.classList.contains("sidebar-hidden"),
+        is_mobile: isMobile(),
+        category_row_visible: $("categoryRow") ? getComputedStyle($("categoryRow")).display !== "none" : false,
+        category_tag_count: $("categoryTags") ? $("categoryTags").querySelectorAll("[data-category]").length : 0,
+      }));
+      scheduleFilterLayoutLog("sidebar_visibility_changed");
     }
 
     function toggleSidebar() {
       if (isMobile()) {
+        const before = $("sidebar").classList.contains("open");
         $("sidebar").classList.toggle("open");
+        clientLog("sidebar_mobile_overlay_changed", filterStateFields({
+          open_before: before,
+          open_after: $("sidebar").classList.contains("open"),
+          explicit_hidden: document.body.classList.contains("sidebar-hidden"),
+        }));
         return;
       }
       setSidebarHidden(!document.body.classList.contains("sidebar-hidden"));
     }
 
     async function fetchTree() {
+      const started = clientNow();
       const operationId = newOperationId("tree");
       const params = new URLSearchParams();
       if (state.lib) params.set("lib", state.lib);
@@ -1990,6 +2252,7 @@
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         clientLog("tree_load_failed", {
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
           status: r.status,
           request_id: r.headers.get("X-VG-Request-ID") || "",
           reason: err.msg || "",
@@ -1998,6 +2261,7 @@
       }
       const data = await r.json();
       clientLog("tree_load_completed", {
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
         request_id: r.headers.get("X-VG-Request-ID") || "",
         count: data.count || 0,
         roots: Array.isArray(data.roots) ? data.roots.length : 0,
@@ -2027,6 +2291,7 @@
     }
 
     async function fetchVideos(offset) {
+      const started = clientNow();
       const operationId = newOperationId("page");
       const params = new URLSearchParams();
       if (state.category) params.set("category", state.category);
@@ -2049,6 +2314,7 @@
         lib: state.lib || "all",
         category: state.category || "",
         folder: state.folder || "",
+        ext: state.ext || "",
         view: state.view || "",
         sort: state.sort || "",
         query_length: (state.query || "").length,
@@ -2067,22 +2333,26 @@
         }
         const data = await r.json();
         clientLog("page_load_completed", {
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
           request_id: r.headers.get("X-VG-Request-ID") || "",
           offset: data.offset || 0,
           rows: Array.isArray(data.videos) ? data.videos.length : 0,
           total: data.count || 0,
           has_more: !!data.has_more,
+          ext: state.ext || "",
         }, "INFO", operationId);
         return data;
       } catch (e) {
         // 切换频道/筛选时主动取消旧请求，不算失败
         if (controller.signal.aborted || isAbortError(e)) {
           clientLog("page_load_aborted", {
+            elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
             reason: controller.signal.aborted ? "channel-switch" : String(e),
           }, "INFO", operationId);
           return null;
         }
         clientLog("page_load_failed", {
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
           reason: String(e),
         }, "ERROR", operationId);
         throw e;
@@ -2539,7 +2809,8 @@
     }
 
     function highlightNav() {
-      document.querySelectorAll("#channelList .channel-item[data-cat]").forEach((el) => {
+      const channelItems = document.querySelectorAll("#channelList .channel-item[data-cat]");
+      channelItems.forEach((el) => {
         const lib = el.getAttribute("data-lib") || "";
         const cat = el.getAttribute("data-cat") || "";
         el.classList.toggle("active", sameLibPath(lib, state.lib || "") && cat === (state.category || ""));
@@ -2562,9 +2833,23 @@
       document.querySelectorAll("#extTags .tag[data-ext]").forEach((el) => {
         el.classList.toggle("active", (el.getAttribute("data-ext") || "") === (state.ext || ""));
       });
+      const activeChannels = Array.from(channelItems)
+        .filter((el) => el.classList.contains("active"))
+        .map((el) => String(el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80));
+      const activeFolders = Array.from(document.querySelectorAll("#tree .tree-item.active"))
+        .map((el) => el.getAttribute("data-path") || "")
+        .slice(0, 8);
+      clientLog("nav_highlight", filterStateFields({
+        channel_count: channelItems.length,
+        active_channels: activeChannels.join(" | "),
+        active_channel_count: activeChannels.length,
+        active_tree_paths: activeFolders.join(" | "),
+        tree_active_count: activeFolders.length,
+      }));
     }
 
     function syncNavFromCache() {
+      const started = clientNow();
       const cached = treeFromCache(state.lib);
       const painted = libCacheKey(state.paintedTreeLib);
       const want = libCacheKey(state.lib);
@@ -2574,10 +2859,17 @@
         state.paintedTreeLib = state.lib || "";
       }
       highlightNav();
+      renderCategoryTags(state.categories || []);
       renderSortTags();
+      clientLog("nav_cache_synced", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        cache_hit: !!cached,
+        painted_lib: state.paintedTreeLib || "",
+      }));
     }
 
     async function applyNavChrome(treeData) {
+      const started = clientNow();
       lastScanning = !!treeData.scanning;
       state.tree = treeData.tree;
       state.root = treeData.root || state.root;
@@ -2586,9 +2878,16 @@
       updateAsideTitles();
       renderChannels(treeData.categories || [], catalogTotal(treeData.count || 0));
       renderSortTags();
-      renderExtTags(treeData.types || []);
+      renderExtTags(treeData.types || [], "tree_nav");
       if ($("tree")) $("tree").innerHTML = treeData.tree ? renderTree(treeData.tree) : "";
       state.paintedTreeLib = treeData.lib || "";
+      clientLog("nav_chrome_rendered", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        tree_lib: treeData.lib || "",
+        category_count: (treeData.categories || []).length,
+        root_count: (treeData.roots || []).length,
+        type_count: (treeData.types || []).length,
+      }));
     }
 
     function normalizeMountRoots(roots) {
@@ -2607,6 +2906,7 @@
     }
 
     async function renderMountChips(rootsFromApi) {
+      const started = clientNow();
       // 多根切换已并入频道列表，这里只同步数据
       let roots = rootsFromApi;
       if (!roots) {
@@ -2634,6 +2934,13 @@
         box.innerHTML = "";
       }
       updateAsideTitles();
+      clientLog("mounts_rendered", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        root_count: state.mountedRoots.length,
+        multi: state.multi,
+        selected_lib: state.lib || "",
+        category_counts: state.mountedRoots.map((root) => `${root.path}:${(root.categories || []).length}`).join("|").slice(0, 500),
+      }));
     }
 
     function selectLib(libPath) {
@@ -2653,7 +2960,19 @@
     }
 
     function renderChannels(categories, total) {
+      const started = clientNow();
+      const finish = (mode) => clientLog("channel_rendered", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        mode,
+        category_count: state.categories.length,
+        mounted_root_count: (state.mountedRoots || []).length,
+        rendered_items: $("channelList") ? $("channelList").querySelectorAll(".channel-item").length : 0,
+        sidebar_hidden: document.body.classList.contains("sidebar-hidden"),
+      }));
       state.categories = categories || [];
+      // 频道行只在「已选盘、未选盘下频道」时出现；单盘/全部目录时由左侧频道承载，
+      // 避免右侧再重复一行并把筛选栏撑高。
+      renderCategoryTags(state.categories);
       if (!state.multi) {
         const allActive = !state.category;
         let html = `<div class="channel-item ${allActive ? "active" : ""}" data-cat="" data-lib="">
@@ -2672,6 +2991,7 @@
           </div>`;
         }
         $("channelList").innerHTML = html;
+        finish("single");
         return;
       }
 
@@ -2733,6 +3053,100 @@
         html += `</div>`;
       }
       $("channelList").innerHTML = html;
+      finish("multi");
+    }
+
+    function renderCategoryTags(categories) {
+      const started = clientNow();
+      const row = $("categoryRow");
+      const box = $("categoryTags");
+      if (!row || !box) return;
+      const sidebarHidden = document.body.classList.contains("sidebar-hidden");
+      // 正常展开左侧时，仅「选中整盘」显示盘内频道；左侧被用户完全隐藏后，
+      // 右侧频道行接管导航，即使已选中盘下频道也继续显示全部可切换项。
+      const visible = sidebarHidden || (!!state.lib && !state.category);
+      const mount = state.lib
+        ? (state.mountedRoots || []).find((item) => sameLibPath(item.path, state.lib))
+        : null;
+      const navScopedToLib = !!(
+        state.lib && state.navCache && sameLibPath(state.navCache.lib || "", state.lib)
+      );
+      let sourceScope = "none";
+      let source = [];
+      if (visible && state.lib && mount && Array.isArray(mount.categories)) {
+        source = mount.categories;
+        sourceScope = "selected_mount";
+      } else if (visible && state.lib && navScopedToLib) {
+        source = categories || [];
+        sourceScope = "scoped_tree";
+      } else if (visible && !state.lib && sidebarHidden) {
+        // 当前是「全部盘」时不能直接复用最后一次树的 categories，它可能仍是上一个盘的缓存。
+        // 按 mountedRoots 合并，保证左侧隐藏后右侧确实展示全部盘的频道。
+        const combined = new Map();
+        for (const root of state.mountedRoots || []) {
+          for (const item of root.categories || []) {
+            const key = item && (item.id === "" ? "__root__" : String(item.id || item.name || ""));
+            if (!key) continue;
+            const current = combined.get(key) || {
+              id: item.id === "" ? "" : (item.id || item.name || ""),
+              name: item.name || item.id || "未分类",
+              count: 0,
+            };
+            current.count += Number(item.count) || 0;
+            combined.set(key, current);
+          }
+        }
+        source = combined.size ? Array.from(combined.values()) : (categories || []);
+        sourceScope = combined.size ? "all_mounted_roots" : "all_tree_fallback";
+      }
+      const seen = new Set();
+      const values = source.filter((item) => {
+        if (!item) return false;
+        const id = item.id === "" ? "__root__" : String(item.id || item.name || "");
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      const scopeWarning = (
+        visible && state.lib && !mount && !navScopedToLib
+      ) || (
+        visible && !state.lib && state.multi && sourceScope === "all_tree_fallback"
+      );
+      if (!visible || !values.length) {
+        row.style.display = "none";
+        box.innerHTML = "";
+        clientLog("category_tags_rendered", filterStateFields({
+          visible: false,
+          reason: !visible
+            ? (!state.lib ? "sidebar_visible_without_disk" : "category_selected")
+            : (state.lib && !mount && !navScopedToLib ? "selected_mount_missing" : "no_categories"),
+          sidebar_hidden: sidebarHidden,
+          source_scope: sourceScope,
+          source_count: source.length,
+          tag_count: 0,
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        }), scopeWarning ? "WARN" : "INFO");
+        return;
+      }
+      row.style.display = "flex";
+      let html = `<button type="button" class="tag ${!state.category ? "active" : ""}" data-category="">全部</button>`;
+      for (const item of values) {
+        const id = item.id === "" ? "__root__" : String(item.id || item.name || "");
+        const label = item.name || item.id || "未分类";
+        html += `<button type="button" class="tag ${state.category === id ? "active" : ""}" data-category="${escapeAttr(id)}">${escapeHtml(label)}<span class="tag-n">${item.count || 0}</span></button>`;
+      }
+      box.innerHTML = html;
+      clientLog("category_tags_rendered", filterStateFields({
+        visible: true,
+        lib: state.lib || "",
+        category: state.category || "",
+        sidebar_hidden: sidebarHidden,
+        source_scope: sourceScope,
+        source_count: source.length,
+        tag_count: values.length + 1,
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        categories: values.map((item) => `${item.id || item.name || ""}:${item.count || 0}`).join(",").slice(0, 500),
+      }), scopeWarning ? "WARN" : "INFO");
     }
 
     function renderSortTags() {
@@ -2755,37 +3169,110 @@
       if (summary) summary.textContent = `${currentSort.label} · ${currentView.label}`;
     }
 
-    function renderExtTags(types) {
+    function renderExtTags(types, source) {
+      const started = clientNow();
       state.types = types || [];
       let html = `<button type="button" class="tag ${!state.ext ? "active" : ""}" data-ext="">全部</button>`;
       for (const t of state.types) {
         html += `<button type="button" class="tag ${state.ext === t.ext ? "active" : ""}" data-ext="${escapeAttr(t.ext)}">${escapeHtml(t.label)}<span class="tag-n">${t.count}</span></button>`;
       }
       $("extTags").innerHTML = html;
+      clientLog("format_tags_rendered", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        source: source || "unknown",
+        type_count: state.types.length,
+        types: state.types.map((item) => `${item.ext || item.id || ""}:${item.count || 0}`).join(",").slice(0, 500),
+        selected_ext: state.ext || "",
+      }));
+    }
+
+    function renderMergedTaxonomyTags() {
+      const started = clientNow();
+      const genres = state.genres || [];
+      const themes = state.themes || [];
+      const row = $("genreRow");
+      const box = $("genreTags");
+      if (!row || !box) return;
+      if (state.genre && !genres.some((item) => item.name === state.genre)) state.genre = "";
+      if (state.theme && !themes.some((item) => item.name === state.theme)) state.theme = "";
+      if (!genres.length && !themes.length) {
+        row.style.display = "none";
+        box.innerHTML = "";
+        clientLog("taxonomy_tags_rendered", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          genre_count: 0,
+          theme_count: 0,
+          tag_count: 0,
+          visible: false,
+        }));
+        return;
+      }
+      row.style.display = "flex";
+      // 主题与类型合并为一套标签，不再把两套标签只是横向塞进同一行。
+      // 同名项只显示一次；标签仍按容器宽度自然换行。
+      const merged = new Map();
+      const addItems = (items, source) => {
+        for (const item of items) {
+          const name = String(item && (item.name || item.id) || "").trim();
+          if (!name) continue;
+          let current = merged.get(name);
+          if (!current) {
+            current = { name, genreCount: 0, themeCount: 0, hasGenre: false, hasTheme: false };
+            merged.set(name, current);
+          }
+          const count = Number(item.count) || 0;
+          if (source === "genre") {
+            current.hasGenre = true;
+            current.genreCount = count;
+          } else {
+            current.hasTheme = true;
+            current.themeCount = count;
+          }
+        }
+      };
+      addItems(genres, "genre");
+      addItems(themes, "theme");
+      const items = Array.from(merged.values()).sort((a, b) => {
+        const aCount = Math.max(a.genreCount, a.themeCount);
+        const bCount = Math.max(b.genreCount, b.themeCount);
+        return bCount - aCount || a.name.localeCompare(b.name, "zh-CN");
+      });
+      const mismatches = items.filter((item) =>
+        item.hasGenre && item.hasTheme && item.genreCount !== item.themeCount
+      );
+      let html = `<button type="button" class="tag ${!state.genre && !state.theme ? "active" : ""}" data-taxonomy-reset="1">全部</button>`;
+      for (const item of items) {
+        const source = item.hasGenre && item.hasTheme
+          ? (state.theme === item.name && state.genre !== item.name ? "theme" : "genre")
+          : (item.hasGenre ? "genre" : "theme");
+        const active = state.genre === item.name || state.theme === item.name;
+        const count = Math.max(item.genreCount, item.themeCount);
+        const sourceLabel = item.hasGenre && item.hasTheme ? "类型+主题" : (item.hasGenre ? "类型" : "主题");
+        html += `<button type="button" class="tag ${active ? "active" : ""}" data-taxonomy-name="${escapeAttr(item.name)}" data-taxonomy-source="${source}" data-taxonomy-has-genre="${item.hasGenre ? "1" : "0"}" data-taxonomy-has-theme="${item.hasTheme ? "1" : "0"}" title="${sourceLabel}：${escapeAttr(item.name)}">${escapeHtml(item.name)}<span class="tag-n">${count}</span></button>`;
+      }
+      box.innerHTML = html;
+      clientLog("taxonomy_tags_rendered", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        genre_count: genres.length,
+        theme_count: themes.length,
+        merged_count: items.length,
+        duplicate_count: genres.length + themes.length - items.length,
+        count_mismatch_count: mismatches.length,
+        count_mismatches: mismatches.map((item) => `${item.name}:${item.genreCount}/${item.themeCount}`).join(",").slice(0, 500),
+        tag_count: box.querySelectorAll(".tag").length,
+        selected_genre: state.genre || "",
+        selected_theme: state.theme || "",
+        visible: true,
+      }), mismatches.length ? "WARN" : "INFO");
     }
 
     function renderGenreTags(genres) {
       state.genres = genres || [];
-      const row = $("genreRow");
-      if (!state.genres.length) {
-        row.style.display = "none";
-        $("genreTags").innerHTML = "";
-        // 当前范围没有该类型时清掉筛选
-        if (state.genre) state.genre = "";
-        return;
-      }
-      if (state.genre && !state.genres.some((g) => g.name === state.genre)) {
-        state.genre = "";
-      }
-      row.style.display = "flex";
-      let html = `<button type="button" class="tag ${!state.genre ? "active" : ""}" data-genre="">全部</button>`;
-      for (const g of state.genres) {
-        html += `<button type="button" class="tag ${state.genre === g.name ? "active" : ""}" data-genre="${escapeAttr(g.name)}">${escapeHtml(g.name)}<span class="tag-n">${g.count}</span></button>`;
-      }
-      $("genreTags").innerHTML = html;
+      renderMergedTaxonomyTags();
     }
 
     function renderTaxonomyTags(values, kind) {
+      const started = clientNow();
       const isBackground = kind === "background";
       const stateList = isBackground ? "backgrounds" : "themes";
       const stateValue = isBackground ? "background" : "theme";
@@ -2796,6 +3283,11 @@
         row.style.display = "none";
         box.innerHTML = "";
         if (state[stateValue]) state[stateValue] = "";
+        clientLog("background_tags_rendered", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          visible: false,
+          tag_count: 0,
+        }));
         return;
       }
       if (state[stateValue] && !state[stateList].some((item) => item.name === state[stateValue])) {
@@ -2808,10 +3300,17 @@
         html += `<button type="button" class="tag ${state[stateValue] === item.name ? "active" : ""}" data-${attr}="${escapeAttr(item.name)}">${escapeHtml(item.name)}<span class="tag-n">${item.count}</span></button>`;
       }
       box.innerHTML = html;
+      clientLog("background_tags_rendered", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        visible: true,
+        tag_count: box.querySelectorAll(".tag").length,
+        selected_background: state.background || "",
+      }));
     }
 
     function renderThemeTags(values) {
-      renderTaxonomyTags(values, "theme");
+      state.themes = values || [];
+      renderMergedTaxonomyTags();
     }
 
     function renderBackgroundTags(values) {
@@ -2819,11 +3318,36 @@
     }
 
     function renderSubTags(levels) {
+      const started = clientNow();
       const box = $("subFolderRows");
       const rows = levels || [];
+      const beforeDom = box ? {
+        rows: box.querySelectorAll(".filter-row").length,
+        tags: box.querySelectorAll("[data-folder]").length,
+      } : { rows: 0, tags: 0 };
+      clientLog("subfolder_render_before", {
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        level_count: rows.length,
+        level_items: rows.map((lv) => (lv.items || []).length).join(","),
+        category: state.category || "",
+        folder: state.folder || "",
+        folder_all: !!state.folderAll,
+        dom_rows: beforeDom.rows,
+        dom_tags: beforeDom.tags,
+      });
       if (!state.category || state.category === "__root__" || !rows.length) {
         box.innerHTML = "";
+        syncSubfolderOverflow("render_cleared");
         renderStickyFilterRow();
+        clientLog("subfolder_render_cleared", {
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          reason: !state.category || state.category === "__root__" ? "category_empty" : "api_levels_empty",
+          level_count: rows.length,
+          category: state.category || "",
+          folder: state.folder || "",
+          dom_rows_after: box.querySelectorAll(".filter-row").length,
+          dom_tags_after: box.querySelectorAll("[data-folder]").length,
+        }, rows.length ? "WARN" : "INFO");
         return;
       }
       box.innerHTML = rows.map((lv, idx) => {
@@ -2843,10 +3367,21 @@
           <div class="filter-tags">${tags}</div>
         </div>`;
       }).join("");
+      syncSubfolderOverflow("rendered");
       renderStickyFilterRow();
+      clientLog("subfolder_render_after", {
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        level_count: rows.length,
+        dom_rows_after: box.querySelectorAll(".filter-row").length,
+        dom_tags_after: box.querySelectorAll("[data-folder]").length,
+        category: state.category || "",
+        folder: state.folder || "",
+        folder_all: !!state.folderAll,
+      });
     }
 
     function renderStickyFilterRow() {
+      const started = clientNow();
       const box = $("stickyFilterRow");
       const sticky = $("scopeSticky");
       if (!box) return;
@@ -2859,15 +3394,37 @@
       if (!src) {
         box.innerHTML = "";
         if (sticky) sticky.classList.remove("has-filter-row");
+        clientLog("sticky_filter_rendered", {
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          source: "none",
+          tag_count: 0,
+        });
         return;
       }
       box.innerHTML = src.innerHTML;
       if (sticky) sticky.classList.add("has-filter-row");
+      clientLog("sticky_filter_rendered", {
+        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        source: subRows.length ? "subfolder" : "format",
+        tag_count: box.querySelectorAll(".tag").length,
+      });
     }
 
     function applyFolderButton(btn) {
       let folder = btn.getAttribute("data-folder");
       if (folder == null) return;
+      const logOperationId = currentOperationId || lastUiOperationId || newOperationId("folder");
+      clientLog("subfolder_click", {
+        folder_raw: String(folder),
+        level: btn.getAttribute("data-level") || "",
+        is_all: btn.getAttribute("data-all") === "1",
+        label: String(btn.textContent || "").trim().slice(0, 160),
+        category_before: state.category || "",
+        folder_before: state.folder || "",
+        folder_all_before: !!state.folderAll,
+        dom_rows_before: $("subFolderRows")?.querySelectorAll(".filter-row").length || 0,
+        dom_tags_before: $("subFolderRows")?.querySelectorAll("[data-folder]").length || 0,
+      }, "INFO", logOperationId);
       folder = String(folder).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
       if (folder && folder === state.category) folder = "";
       const isAll = btn.getAttribute("data-all") === "1";
@@ -2900,6 +3457,11 @@
         state.folder = "";
         state.folderAll = false;
       }
+      clientLog("subfolder_state_changed", {
+        folder_after: state.folder || "",
+        folder_all_after: !!state.folderAll,
+        category: state.category || "",
+      }, "INFO", logOperationId);
       saveUiPrefs();
       refresh({ nav: false });
     }
@@ -2994,16 +3556,50 @@
       if (!root || !filters || !sticky || !btn) return;
       if (sticky.dataset.bound === "1") return;
       sticky.dataset.bound = "1";
+      let stickyLogTimer = 0;
+      const logStickyLayout = (reason) => {
+        const read = (el) => {
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          return {
+            top: Math.round(r.top), bottom: Math.round(r.bottom),
+            width: Math.round(r.width), height: Math.round(r.height),
+            client_height: el.clientHeight, scroll_height: el.scrollHeight,
+            min_height: cs.minHeight, max_height: cs.maxHeight,
+            display: cs.display, visibility: cs.visibility,
+          };
+        };
+        const row = $("stickyFilterRow");
+        const tags = row ? row.querySelector(".filter-tags") : null;
+        clientLog("sticky_layout", {
+          reason: String(reason || "unknown"),
+          scroll_top: Math.round(root.scrollTop),
+          sticky: JSON.stringify(read(sticky)),
+          sticky_row: JSON.stringify(read(row)),
+          sticky_tags: JSON.stringify(read(tags)),
+          is_stuck: sticky.classList.contains("is-stuck"),
+          has_filter_row: sticky.classList.contains("has-filter-row"),
+          tag_count: row ? row.querySelectorAll(".tag").length : 0,
+        });
+      };
+      const scheduleStickyLog = (reason) => {
+        clearTimeout(stickyLogTimer);
+        stickyLogTimer = setTimeout(() => logStickyLayout(reason), 80);
+      };
       if ("IntersectionObserver" in window) {
         const io = new IntersectionObserver(
           (entries) => {
             const visible = entries.some((e) => e.isIntersecting);
             sticky.classList.toggle("is-stuck", !visible);
+            scheduleStickyLog("intersection");
           },
           { root, threshold: 0 }
         );
         io.observe(filters);
       }
+      root.addEventListener("scroll", () => scheduleStickyLog("scroll"), { passive: true });
+      scheduleStickyLog("setup");
       btn.addEventListener("click", () => {
         filters.scrollIntoView({ behavior: "smooth", block: "start" });
       });
@@ -3194,8 +3790,17 @@
     let refreshToken = 0;
 
     async function refresh(opts) {
+      const refreshStarted = clientNow();
       const options = opts || {};
       const token = ++refreshToken;
+      const refreshOperationId = newOperationId("refresh");
+      clientLog("refresh_start", filterStateFields({
+        elapsed_ms: 0,
+        token,
+        nav_requested: options.nav !== false,
+        dom_sub_rows: $("subFolderRows")?.querySelectorAll(".filter-row").length || 0,
+        dom_sub_tags: $("subFolderRows")?.querySelectorAll("[data-folder]").length || 0,
+      }), "INFO", refreshOperationId);
       state.offset = 0;
       loadingMore = false;
       cancelListRequests();
@@ -3208,20 +3813,42 @@
         try {
           treeData = await fetchTree();
         } catch (e) {
+          clientLog("refresh_failed", filterStateFields({
+            elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+            stage: "fetch_tree",
+            error: String(e && (e.stack || e) || "unknown"),
+          }), "ERROR", refreshOperationId);
           $("countLabel").textContent = "加载失败";
           alert(String(e.message || e));
           return;
         }
-        if (token !== refreshToken) return;
+        if (token !== refreshToken) {
+          clientLog("refresh_superseded", filterStateFields({
+            elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+            stage: "after_tree",
+            token,
+            current_token: refreshToken,
+          }), "WARN", refreshOperationId);
+          return;
+        }
         rememberNav(treeData);
         await applyNavChrome(treeData);
-        if (token !== refreshToken) return;
+        if (token !== refreshToken) {
+          clientLog("refresh_superseded", filterStateFields({
+            elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+            stage: "after_nav_render",
+            token,
+            current_token: refreshToken,
+          }), "WARN", refreshOperationId);
+          return;
+        }
       } else {
         syncNavFromCache();
         treeData = state.navCache || treeData || {};
         lastScanning = !!treeData.scanning;
       }
       if (state.folder && state.folder === state.category) {
+        clientLog("refresh_state_normalized", filterStateFields({ reason: "folder_equals_category" }), "WARN", refreshOperationId);
         state.folder = "";
         state.folderAll = false;
       }
@@ -3232,24 +3859,49 @@
         state.folder !== state.category &&
         !state.folder.startsWith(state.category + "/")
       ) {
+        clientLog("refresh_state_normalized", filterStateFields({ reason: "folder_outside_category", folder_before: state.folder }), "WARN", refreshOperationId);
         state.folder = state.category + "/" + state.folder;
       }
       let data;
       try {
         data = await fetchVideos(0);
       } catch (e) {
-        if (isAbortError(e) || token !== refreshToken) return;
+        if (isAbortError(e) || token !== refreshToken) {
+          clientLog("refresh_aborted", filterStateFields({
+            elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+            stage: "fetch_videos",
+            reason: String(e && (e.stack || e) || "unknown"),
+            token,
+            current_token: refreshToken,
+          }), "INFO", refreshOperationId);
+          return;
+        }
+        clientLog("refresh_failed", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+          stage: "fetch_videos",
+          error: String(e && (e.stack || e) || "unknown"),
+        }), "ERROR", refreshOperationId);
         $("countLabel").textContent = "列表加载失败";
         alert(String(e.message || e));
         return;
       }
-      if (!data || token !== refreshToken) return;
+      if (!data || token !== refreshToken) {
+        clientLog("refresh_superseded", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+          stage: "video_data_empty_or_stale",
+          token,
+          current_token: refreshToken,
+          has_data: !!data,
+        }), "WARN", refreshOperationId);
+        return;
+      }
       const genreBefore = state.genre;
       const themeBefore = state.theme;
       const backgroundBefore = state.background;
       renderGenreTags(data.genres || []);
       renderThemeTags(data.themes || []);
       renderBackgroundTags(data.backgrounds || []);
+      if (Array.isArray(data.types)) renderExtTags(data.types, "video_facets");
       if (
         (genreBefore && !state.genre) ||
         (themeBefore && !state.theme) ||
@@ -3260,6 +3912,7 @@
         renderGenreTags(data.genres || []);
         renderThemeTags(data.themes || []);
         renderBackgroundTags(data.backgrounds || []);
+        if (Array.isArray(data.types)) renderExtTags(data.types, "video_facets_retry");
       }
       state.totalCount = data.count || 0;
       state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
@@ -3268,17 +3921,54 @@
       // 记忆的频道/子类若在当前盘无效，导致空列表时自动清空
       // 注意：取消「全部」后根目录可能无片，或落在叶子目录，路径仍可能有效
       const levels = data.subfolder_levels || [];
-      const folderAlive = !!(state.folder && levels.some((lv) =>
+      const folderAliveByLevels = !!(state.folder && levels.some((lv) =>
         lv.all_id === state.folder ||
         lv.prefix === state.folder ||
         (lv.items || []).some((it) => it.id === state.folder)
       ));
+      const folderAliveByTree = !!(state.folder && (function hasFolder(node) {
+        if (!node) return false;
+        const nodePath = String(node.path || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        const nodeLib = node.lib || "";
+        if (nodePath === state.folder && (!state.lib || !nodeLib || sameLibPath(nodeLib, state.lib))) return true;
+        return (node.children || []).some(hasFolder);
+      })(treeData.tree));
+      const folderAlive = folderAliveByLevels || folderAliveByTree;
+      const categoryAlive = !state.category || state.category === "__root__" ||
+        (treeData.categories || []).some((item) => {
+          const id = item && (item.id || "");
+          const name = item && (item.name || "");
+          return id === state.category || name === state.category;
+        });
+      // 格式/类型筛选无命中不代表频道失效；只有目录或频道本身失效才重置导航。
+      const scopeInvalid = state.folder ? !folderAlive : !categoryAlive;
+      clientLog("refresh_data_state", filterStateFields({
+        token,
+        total: data.count || 0,
+        rows: Array.isArray(data.videos) ? data.videos.length : 0,
+        level_count: levels.length,
+        level_items: levels.map((lv) => (lv.items || []).length).join(","),
+        folder_alive_by_levels: folderAliveByLevels,
+        folder_alive_by_tree: folderAliveByTree,
+        category_alive: categoryAlive,
+        scope_invalid: scopeInvalid,
+        tree_count: treeData.count || 0,
+      }), "INFO", refreshOperationId);
       if (
         state.totalCount === 0 &&
-        !folderAlive &&
+        scopeInvalid &&
         (state.category || state.folder || state.ext || state.genre || state.theme || state.background) &&
         (treeData.count || 0) > 0
       ) {
+        clientLog("refresh_filters_reset", filterStateFields({
+          reason: "empty_result_folder_not_alive",
+          total: state.totalCount,
+          level_count: levels.length,
+          folder_alive_by_levels: folderAliveByLevels,
+          folder_alive_by_tree: folderAliveByTree,
+          category_alive: categoryAlive,
+          scope_invalid: scopeInvalid,
+        }), "WARN", refreshOperationId);
         state.category = "";
         state.folder = "";
         state.folderAll = false;
@@ -3296,12 +3986,26 @@
         renderGenreTags(data.genres || []);
         renderThemeTags(data.themes || []);
         renderBackgroundTags(data.backgrounds || []);
+        if (Array.isArray(data.types)) renderExtTags(data.types, "video_facets_reset");
         highlightNav();
+        clientLog("refresh_filters_reset_done", filterStateFields({
+          reason: "empty_result_folder_not_alive",
+          total: state.totalCount,
+          returned_levels: (data.subfolder_levels || []).length,
+        }), "WARN", refreshOperationId);
       }
       // 选中某盘但内容为空，而侧栏该盘有数量：清残留筛选后再取一次
-      if (state.totalCount === 0 && state.lib) {
+      if (state.totalCount === 0 && state.lib && scopeInvalid) {
         const mount = (state.mountedRoots || []).find((r) => sameLibPath(r.path, state.lib));
         if (mount && (mount.count || 0) > 0 && (state.ext || state.genre || state.theme || state.background || state.category || state.folder)) {
+          clientLog("refresh_mount_filter_reset", filterStateFields({
+            reason: "empty_result_mount_filter_not_alive",
+            total: state.totalCount,
+            folder_alive_by_levels: folderAliveByLevels,
+            folder_alive_by_tree: folderAliveByTree,
+            category_alive: categoryAlive,
+            mount_count: mount.count || 0,
+          }), "WARN", refreshOperationId);
           state.category = "";
           state.folder = "";
           state.folderAll = false;
@@ -3319,10 +4023,22 @@
           renderGenreTags(data.genres || []);
           renderThemeTags(data.themes || []);
           renderBackgroundTags(data.backgrounds || []);
+          if (Array.isArray(data.types)) renderExtTags(data.types, "video_facets_mount_reset");
           highlightNav();
+          clientLog("refresh_mount_filter_reset_done", filterStateFields({
+            reason: "empty_result_mount_filter_not_alive",
+            total: state.totalCount,
+          }), "WARN", refreshOperationId);
         }
       }
       renderSubTags(data.subfolder_levels || []);
+      clientLog("refresh_end", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+        token,
+        total: state.totalCount,
+        rendered_sub_rows: $("subFolderRows")?.querySelectorAll(".filter-row").length || 0,
+        rendered_sub_tags: $("subFolderRows")?.querySelectorAll("[data-folder]").length || 0,
+      }), "INFO", refreshOperationId);
       renderCrumb();
       renderGrid(data.videos || [], lastScanning, false);
       const libTip = state.lib
@@ -3971,6 +4687,12 @@
       if (!item || !item.hasAttribute("data-cat")) return;
       const nextLib = item.getAttribute("data-lib");
       const prevLib = state.lib || "";
+      clientLog("channel_click_state", filterStateFields({
+        target_category: item.dataset.cat || "",
+        target_lib: nextLib || "",
+        target_label: String(item.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120),
+        active_before: item.classList.contains("active"),
+      }));
       state.lib = nextLib == null ? (state.lib || "") : (nextLib || "");
       state.category = item.dataset.cat || "";
       state.folder = "";
@@ -3987,8 +4709,34 @@
         state.libExpanded.add(state.lib);
       }
       saveUiPrefs();
+      clientLog("channel_click_state_changed", filterStateFields({
+        target_category: state.category || "",
+        target_lib: state.lib || "",
+      }));
       refresh({ nav: false });
       if (isMobile()) $("sidebar").classList.remove("open");
+    });
+
+    $("categoryTags").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-category]");
+      if (!btn) return;
+      const nextCategory = btn.dataset.category || "";
+      clientLog("category_filter_click", filterStateFields({
+        target_category: nextCategory,
+        target_label: String(btn.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120),
+        active_before: btn.classList.contains("active"),
+        lib: state.lib || "",
+      }));
+      state.category = nextCategory;
+      state.folder = "";
+      state.folderAll = false;
+      saveUiPrefs();
+      renderCategoryTags(state.categories || []);
+      clientLog("category_filter_state_changed", filterStateFields({
+        target_category: state.category || "",
+        lib: state.lib || "",
+      }));
+      refresh({ nav: false });
     });
 
     $("sortTags").addEventListener("click", (e) => {
@@ -4012,19 +4760,54 @@
     $("extTags").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-ext]");
       if (!btn) return;
+      clientLog("format_filter_click", filterStateFields({
+        target_ext: btn.dataset.ext || "",
+        target_label: String(btn.textContent || "").trim().slice(0, 100),
+        active_before: btn.classList.contains("active"),
+        available_count: $("extTags").querySelectorAll("[data-ext]").length,
+      }));
       state.ext = btn.dataset.ext || "";
+      clientLog("format_filter_state_changed", filterStateFields({
+        selected_ext: state.ext || "",
+      }));
       saveUiPrefs();
       refresh({ nav: false });
     });
 
     $("genreTags").addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-genre]");
+      const reset = e.target.closest("[data-taxonomy-reset]");
+      if (reset) {
+        clientLog("taxonomy_filter_click", filterStateFields({
+          target_kind: "all",
+          target_value: "",
+          active_before: reset.classList.contains("active"),
+        }));
+        state.genre = "";
+        state.theme = "";
+        saveUiPrefs();
+        refresh({ nav: false });
+        return;
+      }
+      const btn = e.target.closest("[data-taxonomy-name]");
       if (!btn) return;
-      state.genre = btn.dataset.genre || "";
+      const name = btn.dataset.taxonomyName || "";
+      const source = btn.dataset.taxonomySource === "theme" ? "theme" : "genre";
+      // 合并后的标签仍映射到原后端筛选轴；同名标签优先使用类型轴，
+      // 若当前就是主题筛选则保持主题轴，避免刷新后筛选含义跳变。
+      state.genre = source === "genre" ? name : "";
+      state.theme = source === "theme" ? name : "";
+      clientLog("taxonomy_filter_click", filterStateFields({
+        target_kind: source,
+        target_value: name,
+        has_genre: btn.dataset.taxonomyHasGenre === "1",
+        has_theme: btn.dataset.taxonomyHasTheme === "1",
+        active_before: btn.classList.contains("active"),
+      }));
       saveUiPrefs();
       refresh({ nav: false });
     });
 
+    // 兼容旧节点：主题/背景目前不再在独立行展示，但保留点击入口以便旧缓存页面不报错。
     $("themeTags").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-theme]");
       if (!btn) return;
@@ -4116,6 +4899,12 @@
       const lib = item.getAttribute("data-lib") || "";
       const path = item.getAttribute("data-path") || "";
       const prevLib = state.lib || "";
+      clientLog("tree_click_state", filterStateFields({
+        target_path: path,
+        target_lib: lib,
+        target_label: String(item.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120),
+        active_before: item.classList.contains("active"),
+      }));
       if (lib) {
         state.lib = lib;
         if (!(state.libExpanded instanceof Set)) state.libExpanded = new Set();
@@ -4146,6 +4935,9 @@
         }
       }
       saveUiPrefs();
+      clientLog("tree_click_state_changed", filterStateFields({
+        target_path: path,
+      }));
       refresh({ nav: false });
       if (isMobile()) $("sidebar").classList.remove("open");
     });

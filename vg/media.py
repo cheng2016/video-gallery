@@ -691,9 +691,11 @@ def adopt_metadata_from_catalog(
         want_duration=want_duration,
         want_audio=want_audio,
     )
+    started = time.perf_counter()
+    total = len(need)
     leftover: list[dict] = []
     reused: list[dict] = []
-    for item in need:
+    for index, item in enumerate(need, 1):
         if reuse_existing_metadata(
             item,
             sources,
@@ -703,6 +705,12 @@ def adopt_metadata_from_catalog(
             reused.append(item)
         else:
             leftover.append(item)
+        if index == total or index % 40 == 0:
+            log(
+                f"[元数据] 跨盘复用检查 {index}/{total}"
+                f"（已复用 {len(reused)}，待探测 {len(leftover)}，"
+                f"耗时 {(time.perf_counter() - started) * 1000.0:.0f}ms）"
+            )
     if reused:
         _persist_probed_items(reused)
         scope = _probe_scope_label(want_duration=want_duration, want_audio=want_audio)

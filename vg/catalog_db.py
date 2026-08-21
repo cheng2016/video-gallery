@@ -640,7 +640,8 @@ def query_catalogs_page(
 
 
 def merge_catalog_facets(facets: list[dict]) -> dict:
-    out = {"genres": [], "themes": [], "backgrounds": [], "subfolders": []}
+    started = time.perf_counter()
+    out = {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
     for key in out:
         counts: dict[str, dict] = {}
         for payload in facets:
@@ -660,6 +661,18 @@ def merge_catalog_facets(facets: list[dict]) -> dict:
             counts.values(),
             key=lambda row: (-int(row.get("count") or 0), str(row.get("name") or "")),
         )
+    from vg.diagnostics import perf
+
+    perf(
+        "catalog_facets_merged",
+        (time.perf_counter() - started) * 1000.0,
+        payload_count=len(facets),
+        genres=len(out["genres"]),
+        themes=len(out["themes"]),
+        backgrounds=len(out["backgrounds"]),
+        subfolders=len(out["subfolders"]),
+        types=len(out["types"]),
+    )
     return out
 
 
@@ -674,7 +687,7 @@ def query_catalog_facets(
 ) -> dict:
     """Read narrow indexed columns for first-page facets, never full JSON blobs."""
     if not catalog_exists(cache):
-        return {"genres": [], "themes": [], "backgrounds": [], "subfolders": []}
+        return {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
     clauses: list[str] = []
     params: list[object] = []
     category_n = _norm_rel(category)
@@ -712,6 +725,7 @@ def query_catalog_facets(
         ]
 
     started = time.perf_counter()
+    query_started = time.perf_counter()
     from vg.diagnostics import timed_lock
 
     with timed_lock(_lock_for(cache), "sqlite_query_facets", cache=cache):
@@ -719,7 +733,7 @@ def query_catalog_facets(
             conn = _connect(cache)
             try:
                 rows = conn.execute(
-                    f"SELECT folder, genres_text, themes_text, backgrounds_text "
+                    f"SELECT folder, ext, genres_text, themes_text, backgrounds_text "
                     f"FROM videos{where}",
                     params,
                 ).fetchall()
@@ -729,7 +743,9 @@ def query_catalog_facets(
             from vg.diagnostics import error
 
             error("sqlite_facets_failed", exc, cache=cache)
-            return {"genres": [], "themes": [], "backgrounds": [], "subfolders": []}
+            return {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
+    query_ms = (time.perf_counter() - query_started) * 1000.0
+    build_started = time.perf_counter()
     prefix = folder_n or category_n
     sub_counts: dict[str, int] = {}
     for row in rows:
@@ -748,11 +764,21 @@ def query_catalog_facets(
         {"id": path, "name": path.rsplit("/", 1)[-1], "count": count}
         for path, count in sorted(sub_counts.items(), key=lambda pair: (-pair[1], pair[0]))
     ]
+    type_counts: dict[str, int] = {}
+    for row in rows:
+        ext_value = str(row["ext"] or "").strip().lower()
+        if ext_value:
+            type_counts[ext_value] = type_counts.get(ext_value, 0) + 1
+    types = [
+        {"id": ext_value, "ext": ext_value, "label": ext_value.lstrip("."), "name": ext_value.lstrip("."), "count": count}
+        for ext_value, count in sorted(type_counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]
     payload = {
         "genres": count_tokens(rows, "genres_text"),
         "themes": count_tokens(rows, "themes_text"),
         "backgrounds": count_tokens(rows, "backgrounds_text"),
         "subfolders": subfolders,
+        "types": types,
     }
     from vg.diagnostics import perf
 
@@ -765,9 +791,12 @@ def query_catalog_facets(
         themes=len(payload["themes"]),
         backgrounds=len(payload["backgrounds"]),
         subfolders=len(payload["subfolders"]),
+        types=len(payload["types"]),
         category=category_n or "all",
         folder=folder_n,
         search=bool(search),
+        query_ms=f"{query_ms:.1f}",
+        build_ms=f"{(time.perf_counter() - build_started) * 1000.0:.1f}",
     )
     return payload
 

@@ -47,6 +47,16 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("[CALL] api_videos", text)
         self.assertIn("folder=电影", text)
 
+    def test_full_logging_emits_instrumented_perf_spans(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch("vg.bootlog.write"):
+            diagnostics.set_full_logging(True)
+            diagnostics.perf("format_facets", 1.25, source_rows=12)
+        text = output.getvalue()
+        self.assertIn("[PERF] format_facets", text)
+        self.assertIn("elapsed_ms=1.2", text)
+        self.assertIn("source_rows=12", text)
+
     def test_bootlog_batches_normal_lines_and_syncs_urgent_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old_path = bootlog._LOG_PATH
