@@ -41,6 +41,7 @@ from vg.disk_libs import (
 from vg.drives import save_prefs
 from vg.genres import detect_genres, ensure_video_genres
 from vg.segments import collapse_segment_sets
+from vg import state as runtime_state
 from vg.state import STATE, _scan_lock
 from vg.taxonomy import ensure_video_taxonomy
 from vg.thumb_jobs import (
@@ -124,6 +125,24 @@ def start_scan(
     replace_mounts=True：片库只保留这一根；False：保留已挂载目录（用于「加入片库」）。
     """
     requested_at = time.perf_counter()
+    root = root.expanduser()
+    if (
+        runtime_state.thumb_bulk_running(root)
+        or runtime_state.metadata_running_for(root)
+    ):
+        from vg.diagnostics import emit
+
+        emit(
+            "WARN",
+            "scan_start_rejected",
+            force=True,
+            reason="same_root_background_media_busy",
+            requested_root=root,
+            meta_running=runtime_state.metadata_running_for(root),
+            thumb_bulk_running=runtime_state.thumb_bulk_running(root),
+            thread=threading.current_thread().name,
+        )
+        return False, "该盘缩略图/元数据后台处理中，请稍后再重新扫描"
     if STATE["scanning"]:
         from vg.diagnostics import emit
 
@@ -151,7 +170,7 @@ def start_scan(
         )
         return False, "正在扫描中，请稍候"
 
-    root = root.expanduser().resolve()
+    root = root.resolve()
     if not root.is_dir():
         _scan_lock.release()
         from vg.diagnostics import emit
@@ -632,6 +651,10 @@ def fill_thumbs_for_videos(
             f"待生成 {len(deferred_items)}，已有缓存 {cached_n}"
         )
 
+        if root is not None and not runtime_state.register_thumb_bulk(root):
+            log(f"[预览图] 跳过重复后台批量：{root} 已有任务运行")
+            return 0, 0
+
         def run_deferred() -> None:
             started = time.perf_counter()
             log(f"[预览图] 后台批量生成开始：{len(deferred_items)} 个，扫描线程已释放")
@@ -659,6 +682,9 @@ def fill_thumbs_for_videos(
             except Exception as exc:
                 STATE["thumb_progress"] = f"预览图后台生成失败: {exc}"
                 log(f"[预览图] 后台批量生成失败: {exc}")
+            finally:
+                if root is not None:
+                    runtime_state.unregister_thumb_bulk(root)
 
         threading.Thread(target=run_deferred, daemon=True, name="thumb-bulk-background").start()
         from vg.diagnostics import perf

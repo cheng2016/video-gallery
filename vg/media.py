@@ -628,7 +628,12 @@ def _lookup_probe_snapshot(
     want_duration: bool,
     want_audio: bool,
 ) -> dict | None:
-    """Memory hit first, then indexed SQLite cross-cache donor lookup."""
+    """Look up a probe snapshot in the already-built batch index.
+
+    Batch enrichment builds the complete SQLite index once.  Falling back to
+    ``find_probe_donor`` here would issue one SQLite query for every miss and
+    turn a large scan into an accidental N+1 query loop.
+    """
     from vg.thumbs import thumb_content_keys
 
     for key in thumb_content_keys(item):
@@ -636,26 +641,7 @@ def _lookup_probe_snapshot(
         if found is not None:
             return found
 
-    from vg.catalog_db import find_probe_donor
-    from vg.duplicates import duplicate_name_key
-
-    try:
-        size = int(item.get("size") or 0)
-    except (TypeError, ValueError):
-        size = 0
-    donor = find_probe_donor(
-        file_sig=str(item.get("file_sig") or "").strip(),
-        name_key=duplicate_name_key(item),
-        size=size,
-        skip_bad=True,
-    )
-    if not donor:
-        return None
-    return _metadata_reuse_snapshot(
-        donor,
-        want_duration=want_duration,
-        want_audio=want_audio,
-    )
+    return None
 
 
 def reuse_existing_metadata(
@@ -855,6 +841,7 @@ def start_metadata_enrichment() -> None:
         _meta_lock.release()
         return
     _state._meta_running = True
+    _state._meta_root = str(STATE.get("root") or "")
     _meta_lock.release()
     threading.Thread(target=_bg_enrich_metadata, daemon=True, name="meta-enrich").start()
 
@@ -928,4 +915,5 @@ def _bg_enrich_metadata() -> None:
         log_error("metadata_enrichment_failed", e)
     finally:
         _state._meta_running = False
+        _state._meta_root = ""
         threading.Timer(4.0, lambda: STATE.update(meta_progress="")).start()

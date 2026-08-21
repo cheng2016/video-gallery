@@ -62,11 +62,16 @@ def note_frontend_activity(hold_seconds: float = 0.6) -> None:
 
 
 def batch_thumbnail_slots() -> int:
-    """How many batch ffmpeg jobs may run while the UI is active."""
-    # Visible page traffic keeps most workers free for /thumb disk reads.
-    with _jobs_lock:
-        busy = _foreground_until > time.monotonic()
-    return 1 if busy else max(1, _worker_n)
+    """How many batch ffmpeg jobs may run while the UI is active.
+
+    Visible requests already have the higher queue priority and therefore run
+    before waiting batch jobs.  Reducing a large batch to one worker whenever
+    the browser polls thumbnails caused a self-sustaining backlog: every page
+    refresh extended the foreground window while hundreds of ffmpeg jobs
+    waited.  Keep all configured workers available and let priority provide
+    the fairness instead of throttling the whole batch.
+    """
+    return max(1, _worker_n)
 
 
 def _wait_for_frontend_idle() -> None:

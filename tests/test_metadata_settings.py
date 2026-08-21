@@ -369,6 +369,33 @@ class MetadataSettingsTests(unittest.TestCase):
         self.assertTrue(need[0]["probe_duration_done"])
         persist.assert_called_once()
 
+    def test_adopt_metadata_does_not_query_sqlite_for_each_unmatched_item(self) -> None:
+        need = [
+            {
+                "id": "unmatched",
+                "name": "unmatched",
+                "filename": "unmatched.mp4",
+                "size": 8_000_000,
+                "file_sig": "b2:8000000:missing",
+                "duration": None,
+            }
+        ]
+        with (
+            mock.patch.object(media, "build_metadata_source_index", return_value={}),
+            mock.patch(
+                "vg.catalog_db.find_probe_donor",
+                side_effect=AssertionError("batch lookup must not issue N+1 queries"),
+            ) as donor,
+        ):
+            leftover, reused_n = media.adopt_metadata_from_catalog(
+                need,
+                want_duration=True,
+                want_audio=False,
+            )
+        self.assertEqual(reused_n, 0)
+        self.assertEqual(leftover, need)
+        donor.assert_not_called()
+
     def test_background_enrichment_skips_ffprobe_when_all_reused(self) -> None:
         old_ffmpeg = STATE.get("ffmpeg")
         old_videos = STATE.get("videos")

@@ -1892,9 +1892,13 @@
       const operationId = currentOperationId || newOperationId("ui");
       lastUiOperationId = operationId;
       lastUiOperationAt = Date.now();
+      const isButton = target.matches("button,[role='button']");
       clientLog("ui_click", {
         target_id: target.id || "",
         tag: target.tagName || "",
+        control_type: isButton ? "button" : "ui_control",
+        type: target.getAttribute("type") || "",
+        disabled: !!target.disabled,
         action: target.dataset ? (target.dataset.action || "") : "",
         item_id: target.dataset ? (target.dataset.id || target.dataset.epid || "") : "",
         kind: target.dataset ? (target.dataset.kind || "") : "",
@@ -2493,9 +2497,10 @@
             $("status").textContent = head + " · " + detail;
             $("status").title = $("status").textContent;
           }
-          $("rescanBtn").disabled = !!d.scanning;
-          $("scanDriveBtn").disabled = !!d.scanning;
-          $("driveSelect").disabled = !!d.scanning;
+          const scanBusy = !!d.scanning || !!d.background_busy;
+          $("rescanBtn").disabled = scanBusy;
+          $("scanDriveBtn").disabled = scanBusy;
+          $("driveSelect").disabled = scanBusy;
 
           if (busy) {
             wasBusy = true;
@@ -2751,7 +2756,12 @@
         const r = await fetch("/api/scan", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path, thumbs: true, force: !!force }),
+          body: JSON.stringify({
+            path,
+            thumbs: true,
+            force: !!force,
+            trigger: force ? "rescan_button" : "scan_button",
+          }),
         });
         const data = await r.json();
         if (!r.ok || !data.ok) {

@@ -39,6 +39,9 @@ _scan_lock = threading.Lock()
 _convert_lock = threading.Lock()
 _meta_lock = threading.Lock()
 _meta_running = False
+_meta_root = ""
+_thumb_bulk_lock = threading.RLock()
+_thumb_bulk_roots: set[str] = set()
 _thumb_jpeg_cache: OrderedDict[str, bytes] = OrderedDict()
 _thumb_jpeg_lock = threading.Lock()
 _thumb_jpeg_cache_bytes = 0
@@ -49,6 +52,49 @@ _video_query_cache: OrderedDict[tuple, tuple] = OrderedDict()
 _video_query_cache_lock = threading.RLock()
 VIDEO_QUERY_CACHE_MAX = 32
 VIDEO_QUERY_CACHE_MAX_ITEMS = 100_000
+
+
+def _runtime_root_key(root) -> str:
+    """Normalize a scan root for lightweight cross-thread state checks."""
+    if root is None:
+        return ""
+    return str(root).replace("/", "\\").rstrip("\\").casefold()
+
+
+def register_thumb_bulk(root) -> bool:
+    """Reserve one deferred thumbnail batch per root."""
+    key = _runtime_root_key(root)
+    if not key:
+        return True
+    with _thumb_bulk_lock:
+        if key in _thumb_bulk_roots:
+            return False
+        _thumb_bulk_roots.add(key)
+        return True
+
+
+def unregister_thumb_bulk(root) -> None:
+    key = _runtime_root_key(root)
+    if not key:
+        return
+    with _thumb_bulk_lock:
+        _thumb_bulk_roots.discard(key)
+
+
+def thumb_bulk_running(root=None) -> bool:
+    with _thumb_bulk_lock:
+        if root is None:
+            return bool(_thumb_bulk_roots)
+        return _runtime_root_key(root) in _thumb_bulk_roots
+
+
+def thumb_bulk_roots() -> list[str]:
+    with _thumb_bulk_lock:
+        return sorted(_thumb_bulk_roots)
+
+
+def metadata_running_for(root) -> bool:
+    return bool(_meta_running and _runtime_root_key(root) == _runtime_root_key(_meta_root))
 
 
 def video_query_cache_get(key: tuple):

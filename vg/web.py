@@ -1509,12 +1509,20 @@ def api_scan():
         path = path + "\\"
     do_thumbs = data.get("thumbs", True)
     force = data.get("force", False)
+    trigger = str(data.get("trigger") or ("rescan_button" if force else "scan_button"))
     try:
         root = Path(path).expanduser().resolve()
     except OSError as e:
         return jsonify({"ok": False, "msg": f"路径无效: {e}"}), 400
     if not root.is_dir():
         return jsonify({"ok": False, "msg": f"目录不存在: {root}"}), 400
+
+    diagnostic_call(
+        "scan_button_click",
+        trigger=trigger,
+        root=root,
+        force_scan=bool(force),
+    )
 
     # start_scan's background worker mounts the root before loading/scanning it.
     # Doing add_mount here first archived and republished the entire catalog on
@@ -1556,6 +1564,7 @@ def api_rescan():
         return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
     data = request.get_json(silent=True) or {}
     do_thumbs = data.get("thumbs", True)
+    diagnostic_call("rescan_button_click", root=STATE["root"], force_scan=True)
     ok, msg = start_scan(
         STATE["root"],
         do_thumbs=bool(do_thumbs),

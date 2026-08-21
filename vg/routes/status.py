@@ -16,6 +16,7 @@ def register(app) -> None:
         live = STATE.get("scan_live")
         live_count = len(live) if isinstance(live, list) else 0
         thumb_pending = pending_thumbnail_jobs()
+        thumb_bulk_roots = runtime_state.thumb_bulk_roots()
         meta_running = bool(runtime_state._meta_running)
         return jsonify({
             "app": "video-gallery",
@@ -30,7 +31,10 @@ def register(app) -> None:
             "meta_progress": STATE.get("meta_progress") or "",
             "meta_running": meta_running,
             "thumb_pending": thumb_pending,
-            "background_busy": bool(meta_running or thumb_pending),
+            "thumb_bulk_running": bool(thumb_bulk_roots),
+            "thumb_bulk_roots": thumb_bulk_roots,
+            "meta_root": runtime_state._meta_root or "",
+            "background_busy": bool(meta_running or thumb_pending or thumb_bulk_roots),
             "count": int(
                 facets.get("count")
                 or len(STATE.get("videos") or [])
