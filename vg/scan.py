@@ -435,6 +435,88 @@ def _load_old_video_map(cache: Path, root: Path) -> dict[str, dict]:
         return {}
 
 
+_PROBE_FIELDS_PRESERVED_BY_THUMB_SAVE = (
+    "duration",
+    "duration_h",
+    "has_audio",
+    "audio_codec",
+    "audio_channels",
+    "sample_rate",
+    "audio_hard",
+    "probe_ver",
+    "probe_duration_done",
+    "probe_audio_done",
+    "bad",
+    "bad_reason",
+)
+
+
+def _preserve_catalog_probe_fields_for_thumb_save(
+    videos: list[dict],
+    *,
+    cache: Path,
+    root: Path,
+) -> int:
+    """Keep metadata already written by ffprobe when thumbnails save the catalog."""
+    if not videos or not cache or not root:
+        return 0
+    try:
+        from vg.catalog_db import load_catalog_videos
+
+        persisted = load_catalog_videos(cache, root)
+    except Exception as exc:
+        log(f"[预览图] 保存前读取目录库元数据失败: {exc}")
+        return 0
+    by_id = {
+        str(row.get("id") or "").strip(): row
+        for row in persisted
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+    by_rel = {
+        str(row.get("rel") or "").replace("\\", "/").strip("/").casefold(): row
+        for row in persisted
+        if isinstance(row, dict) and str(row.get("rel") or "").strip()
+    }
+    merged_rows = 0
+    for item in videos:
+        if not isinstance(item, dict):
+            continue
+        old = by_id.get(str(item.get("id") or "").strip())
+        if old is None:
+            rel = str(item.get("rel") or "").replace("\\", "/").strip("/").casefold()
+            old = by_rel.get(rel)
+        if old is None:
+            continue
+        old_sig = str(old.get("file_sig") or "").strip()
+        item_sig = str(item.get("file_sig") or "").strip()
+        same_file = bool(old_sig and item_sig and old_sig == item_sig)
+        if not same_file:
+            try:
+                same_file = (
+                    int(old.get("size") or -1) == int(item.get("size") or -2)
+                    and abs(float(old.get("mtime") or 0) - float(item.get("mtime") or 0)) < 1.0
+                )
+            except (TypeError, ValueError):
+                same_file = False
+        if not same_file:
+            continue
+        copied = False
+        for key in _PROBE_FIELDS_PRESERVED_BY_THUMB_SAVE:
+            if key not in old:
+                continue
+            if key not in item or item.get(key) in (None, "", []):
+                item[key] = old.get(key)
+                copied = True
+        if copied:
+            merged_rows += 1
+    if merged_rows:
+        log(
+            f"[预览图] 整库保存前合并已持久化元数据：{merged_rows}/{len(videos)} 条，"
+            "避免缩略图收尾覆盖 duration/audio"
+        )
+    return merged_rows
+
+
 def generate_thumbs_parallel(
     missing: list[dict],
     cached_n: int = 0,
@@ -461,9 +543,14 @@ def generate_thumbs_parallel(
         )
         return 0, 0
     total = len(missing)
-    workers = thumb_worker_count(total, burst=burst)
+    # Large deferred batches are already off the scan thread. Use the same
+    # CPU-aware burst pool as first-scan work (reserve two logical CPUs for
+    # waitress/UI) instead of leaving hundreds of jobs behind a 2-worker
+    # queue. Visible thumbnail requests retain higher queue priority.
+    worker_burst = bool(burst or total >= 200)
+    workers = thumb_worker_count(total, burst=worker_burst)
     ensure_thumbnail_workers(workers)
-    mode = "满核" if burst else "后台"
+    mode = "满核" if worker_burst else "后台"
     STATE["thumb_progress"] = (
         f"预览图缓存 {cached_n} 个，需{label} {total} 个"
         f"（{mode} {workers} 路）…"
@@ -476,7 +563,7 @@ def generate_thumbs_parallel(
         total=total,
         cached=cached_n,
         workers=workers,
-        burst=burst,
+        burst=worker_burst,
         label=label,
     )
     ok_n = 0
@@ -550,7 +637,7 @@ def generate_thumbs_parallel(
         total=total,
         cached=cached_n,
         workers=workers,
-        burst=burst,
+        burst=worker_burst,
         ok=ok_n,
         failed=fail_n,
     )
@@ -669,6 +756,11 @@ def fill_thumbs_for_videos(
                     f"预览图后台完成（缓存 {cached_n} + 新建 {deferred_ok}，失败 {deferred_failed}）"
                 )
                 if root is not None:
+                    _preserve_catalog_probe_fields_for_thumb_save(
+                        videos,
+                        cache=cache,
+                        root=Path(root),
+                    )
                     save_index(cache, root, videos, file_count=file_count, folder_counts=folder_counts)
                     try:
                         from vg.disk_libs import sync_disk_lib_memory
@@ -703,6 +795,11 @@ def fill_thumbs_for_videos(
         STATE["thumb_progress"] = f"预览图全部来自缓存（{cached_n} 个），无需重建"
         log(f"[预览图] 全部命中缓存（{cached_n}），无需重建")
     if root is not None and (missing or reused):
+        _preserve_catalog_probe_fields_for_thumb_save(
+            videos,
+            cache=cache,
+            root=Path(root),
+        )
         save_index(cache, root, videos, file_count=file_count, folder_counts=folder_counts)
         try:
             root_s = str(Path(root).resolve())
@@ -1281,7 +1378,7 @@ def scan_videos(
         skipped_dirs=len(errors),
         root=root_s,
     )
-    start_metadata_enrichment()
+    _start_metadata_after_scan(root)
 
 
 def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: bool = True) -> bool:
@@ -1358,6 +1455,29 @@ def _fill_missing_thumbs(missing: list[dict]) -> None:
     cache = STATE.get("cache_dir")
     root = STATE.get("root")
     fill_thumbs_for_videos(missing, burst=False, cache=cache, root=root)
+
+
+def _start_metadata_after_scan(root: Path) -> None:
+    """Avoid disk contention: defer ffprobe while a large thumb batch runs."""
+    if not runtime_state.thumb_bulk_running(root):
+        start_metadata_enrichment()
+        return
+
+    log(f"[元数据] 已延后：{root} 正在后台批量生成缩略图，避免 ffprobe 与 ffmpeg 抢盘")
+
+    def wait_then_start() -> None:
+        started = time.perf_counter()
+        while runtime_state.thumb_bulk_running(root):
+            time.sleep(0.5)
+        waited_ms = (time.perf_counter() - started) * 1000.0
+        log(f"[元数据] 缩略图批量完成，开始后台探测（等待 {waited_ms:.1f}ms）")
+        start_metadata_enrichment()
+
+    threading.Thread(
+        target=wait_then_start,
+        daemon=True,
+        name="meta-after-thumb-bulk",
+    ).start()
 
 
 def find_video_by_id(vid: str, prefer_root: str | None = None) -> dict | None:

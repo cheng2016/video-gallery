@@ -16,7 +16,7 @@ from vg.util import thumb_worker_count
 class ThumbnailSchedulingTests(unittest.TestCase):
     def test_worker_count_keeps_cpu_headroom_and_caps_background_work(self) -> None:
         with mock.patch("vg.util.os.cpu_count", return_value=64):
-            self.assertEqual(thumb_worker_count(500), 2)
+            self.assertEqual(thumb_worker_count(500), 4)
             # Burst leaves 2 cores free for waitress / UI thumb reads.
             self.assertEqual(thumb_worker_count(500, burst=True), 62)
         with mock.patch("vg.util.os.cpu_count", return_value=1):
@@ -267,6 +267,43 @@ class ThumbnailSchedulingTests(unittest.TestCase):
             self.assertEqual(bulk.kwargs["missing_after_reuse"], 0)
         finally:
             STATE["ffmpeg"] = old_ffmpeg
+
+    def test_thumbnail_catalog_save_preserves_metadata_written_after_scan(self) -> None:
+        from vg.cache import save_index
+        from vg.scan import _preserve_catalog_probe_fields_for_thumb_save
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            cache = root / "cache"
+            item = {
+                "id": "same-id",
+                "rel": "movie.mp4",
+                "size": 200_000,
+                "mtime": 100.0,
+                "file_sig": "sig-1",
+                "duration": 12.5,
+                "duration_h": "00:00:12",
+                "audio_codec": "aac",
+                "probe_ver": 2,
+                "probe_duration_done": True,
+                "probe_audio_done": True,
+            }
+            self.assertTrue(save_index(cache, root, [item], file_count=1, folder_counts={"": 1}))
+            stale = dict(item)
+            for key in (
+                "duration", "duration_h", "audio_codec", "probe_ver",
+                "probe_duration_done", "probe_audio_done",
+            ):
+                stale.pop(key, None)
+            self.assertEqual(
+                _preserve_catalog_probe_fields_for_thumb_save(
+                    [stale], cache=cache, root=root
+                ),
+                1,
+            )
+            self.assertEqual(stale["duration"], 12.5)
+            self.assertEqual(stale["audio_codec"], "aac")
+            self.assertTrue(stale["probe_duration_done"])
 
 
 if __name__ == "__main__":

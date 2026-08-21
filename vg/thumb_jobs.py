@@ -106,16 +106,24 @@ def _worker() -> None:
                     continue
                 # Batch jobs yield harder when the page is actively loading thumbs.
                 if job.priority >= THUMB_PRIORITY_BATCH:
-                    started_batch = sum(
-                        1
-                        for other in _jobs.values()
-                        if other.started and other.priority >= THUMB_PRIORITY_BATCH
-                    )
-                    if started_batch >= batch_thumbnail_slots():
+                    # Do not claim a batch slot while the foreground hold is
+                    # active.  Otherwise every worker can enter
+                    # _wait_for_frontend_idle after claiming a batch item and
+                    # visible requests wait behind the scan batch.
+                    if _foreground_until > time.monotonic():
                         _queue.put((job.priority, next(_sequence), job))
                         requeued = True
                     else:
-                        job.started = True
+                        started_batch = sum(
+                            1
+                            for other in _jobs.values()
+                            if other.started and other.priority >= THUMB_PRIORITY_BATCH
+                        )
+                        if started_batch >= batch_thumbnail_slots():
+                            _queue.put((job.priority, next(_sequence), job))
+                            requeued = True
+                        else:
+                            job.started = True
                 else:
                     job.started = True
             if requeued:

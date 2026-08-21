@@ -120,7 +120,7 @@ THUMB_EXT = ".vgt"
 # Background thumbnail extraction is I/O heavy and each ffmpeg process may
 # otherwise fan out to several decoder threads.  Keep enough parallelism to
 # make progress without starving the web UI or video playback.
-THUMB_WORKERS_MAX = 2
+THUMB_WORKERS_MAX = 4
 # First-scan burst: one ffmpeg process per logical CPU (each already uses
 # -threads 1).  0 means "use os.cpu_count()".
 THUMB_WORKERS_BURST = 0

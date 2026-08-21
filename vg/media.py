@@ -601,7 +601,9 @@ def build_metadata_source_index(
         from vg.catalog_db import iter_catalog_cache_dirs, load_catalog_videos
 
         for cache in iter_catalog_cache_dirs():
-            for video in load_catalog_videos(cache):
+            cache_rows = load_catalog_videos(cache)
+            cache_snapshots = 0
+            for video in cache_rows:
                 if not isinstance(video, dict):
                     continue
                 snap = _metadata_reuse_snapshot(
@@ -611,7 +613,12 @@ def build_metadata_source_index(
                 )
                 if snap:
                     persisted += 1
+                    cache_snapshots += 1
                     register(video)
+            log(
+                f"[元数据] 复用源诊断 cache={cache} rows={len(cache_rows)} "
+                f"完整探测条目={cache_snapshots}"
+            )
     except Exception as exc:
         log(f"[元数据] 读取 SQLite 持久化复用索引失败: {exc}")
     log(
@@ -863,6 +870,25 @@ def _bg_enrich_metadata() -> None:
                 want_audio=want_audio,
             )
         ]
+        from collections import Counter
+
+        root_counts = Counter(
+            str(v.get("_lib_root") or v.get("root") or "?")
+            for v in videos
+            if isinstance(v, dict)
+        )
+        need_root_counts = Counter(
+            str(v.get("_lib_root") or v.get("root") or "?")
+            for v in need
+            if isinstance(v, dict)
+        )
+        known_duration = sum(1 for v in videos if _duration_already_known(v))
+        known_audio = sum(1 for v in videos if _audio_already_known(v))
+        log(
+            f"[元数据] 入队诊断 root={_state._meta_root or STATE.get('root') or '?'} "
+            f"videos={len(videos)} need={len(need)} 已知时长={known_duration} "
+            f"已知声音={known_audio} roots={dict(root_counts)} need_roots={dict(need_root_counts)}"
+        )
         need, reused_n = adopt_metadata_from_catalog(
             need,
             want_duration=want_duration,
