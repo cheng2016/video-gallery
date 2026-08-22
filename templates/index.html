@@ -1606,6 +1606,42 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script>
+  <!-- Early error catcher: runs in its own script block so it registers
+       even if the main <script> below has a syntax error. -->
+  <script>
+  (function(){
+    function _sendLog(ev, fields, lvl) {
+      try {
+        var blob = new Blob(
+          [JSON.stringify({event:ev, level:lvl||"INFO", fields:fields||{}})],
+          {type:"application/json"}
+        );
+        navigator.sendBeacon("/api/client-log", blob);
+      } catch(_){}
+    }
+    window.addEventListener("error", function(e){
+      _sendLog("early_js_error", {
+        message: (e.message||"") + " @ " + (e.filename||"") + ":" + (e.lineno||0) + ":" + (e.colno||0),
+        stack: e.error ? String(e.error.stack||e.error).slice(0,500) : ""
+      }, "ERROR");
+    });
+    document.addEventListener("DOMContentLoaded", function(){
+      _sendLog("page_dom_loaded", {elapsed_ms: Math.round(performance.now())});
+      // Verify main script execution by testing a known function
+      setTimeout(function(){
+        if (typeof state === "undefined") {
+          _sendLog("main_script_missing", {reason: "state object not found"}, "ERROR");
+        } else {
+          _sendLog("main_script_ok", {
+            loaded_videos: (state.loadedVideos||[]).length,
+            total: state.totalCount||0,
+            has_more: !!state.hasMore
+          });
+        }
+      }, 2000);
+    });
+  })();
+  </script>
   <script>
     const state = {
       tree: null,
@@ -1630,7 +1666,7 @@
       hasFfmpeg: false,
       drives: [],
       offset: 0,
-      pageSize: 60,
+      pageSize: 20,
       hasMore: false,
       totalCount: 0,
       rawCount: 0,
@@ -2462,7 +2498,11 @@
       let lastLibGen = state._libGen || 0;
       let lastScanFound = -1;
       let thumbRefreshTimer = 0;
-      let lastFullRefresh = 0;
+      // lastFullRefresh now lives on state._lastFullRefresh so every caller
+      // (polling, click handlers, filter changes) shares the same throttle
+      // clock instead of letting clicks trigger a full rebuild and the next
+      // polling tick fire a second one <1s later (visual jitter).
+      if (typeof state._lastFullRefresh !== "number") state._lastFullRefresh = 0;
       let driveTick = 0;
       let pollInFlight = false;
 
@@ -2481,7 +2521,11 @@
           const gen = d.lib_gen || 0;
           const found = d.scan_found || 0;
           const genChanged = gen !== lastLibGen;
-          const foundJump = found > 0 && (lastScanFound < 0 || found - lastScanFound >= 100);
+          // Bumped from 100 → 500 so large scans do not trigger a full page
+          // rebuild every couple of seconds.  The count label is still updated
+          // in realtime via the status banner, users can see progress without
+          // their grid jumping back to the top.
+          const foundJump = found > 0 && (lastScanFound < 0 || found - lastScanFound >= 500);
           const now = Date.now();
 
           const bits = [];
@@ -2504,21 +2548,27 @@
 
           if (busy) {
             wasBusy = true;
-            const canFull = now - lastFullRefresh > 3000;
+            // Throttle against all refresh callers, not only polling.
+            const canFull = now - state._lastFullRefresh >= 3000;
+            // soft=true = polling-triggered refresh: preserve user scroll
+            // position so browsing during a scan does not keep bouncing the
+            // grid back to offset 0.
             if (canFull && (genChanged || foundJump)) {
-              lastFullRefresh = now;
+              state._lastFullRefresh = now;
               lastLibGen = gen;
               lastScanFound = found;
               state._libGen = gen;
-              await refresh();
+              await refresh({ soft: true, nav: false });
             } else if (
               canFull &&
               d.scan_progress &&
               d.scan_progress !== lastScanProgress &&
               String(d.scan_progress).includes("扫描完成")
             ) {
-              lastFullRefresh = now;
-              await refresh();
+              state._lastFullRefresh = now;
+              lastLibGen = gen;
+              state._libGen = gen;
+              await refresh({ soft: true, nav: false });
             } else if (d.thumb_progress && d.thumb_progress !== lastThumbProgress) {
               lastThumbProgress = d.thumb_progress;
               if (now - thumbRefreshTimer > 3000) {
@@ -2530,7 +2580,7 @@
             wasBusy = false;
             lastLibGen = gen;
             state._libGen = gen;
-            await refresh();
+            await refresh({ soft: true, nav: false });
             refreshVisibleThumbs();
             clearInterval(state._poll);
             state._poll = null;
@@ -3700,11 +3750,20 @@
       if (!grid || !root) return;
       const cols = getVirtualCols();
       const loadedBase = Number(state.loadedBaseOffset) || 0;
-      const total = Math.max(state.totalCount || 0, loadedBase + state.loadedVideos.length);
+      let total = Math.max(state.totalCount || 0, loadedBase + state.loadedVideos.length);
+      // During a scan totalCount changes on every _publish_live() call which
+      // makes the spacer heights jump and visibly pushes the scroll position.
+      // Rounding up to the nearest batch-size multiple keeps the spacer stable
+      // until a whole row of new items arrives.
+      if (lastScanning && total > 0) {
+        const batch = Math.max(state.pageSize || 20, 20);
+        total = Math.ceil(total / batch) * batch;
+      }
       const totalRows = Math.ceil(total / cols) || 1;
       const rowStride = VIRTUAL_ROW_H + VIRTUAL_GAP;
       const scrollTop = root.scrollTop;
       const viewH = root.clientHeight;
+      const scrollHeight = root.scrollHeight;
       const firstRow = Math.max(0, Math.floor(scrollTop / rowStride) - 3);
       const lastRow = Math.min(totalRows - 1, Math.ceil((scrollTop + viewH) / rowStride) + 3);
       const globalStart = firstRow * cols;
@@ -3713,14 +3772,98 @@
       const end = Math.max(start, Math.min(state.loadedVideos.length, globalEnd - loadedBase));
       const renderStartRow = Math.max(firstRow, Math.floor(loadedBase / cols));
       const padTop = renderStartRow * rowStride;
-      const padBot = Math.max(0, (totalRows - lastRow - 1) * rowStride);
+      // Cap padBot so scrollHeight doesn't inflate to ~170 000 px when only
+      // a fraction of videos is loaded.  Keeps the scrollbar thumb usable
+      // (≥ ~33 % of track) while still allowing the user to scroll to the
+      // bottom where the sentinel triggers the next batch.
+      const loadedRows = Math.ceil(state.loadedVideos.length / Math.max(cols, 1));
+      const loadedContentH = loadedRows * rowStride;
+      const rawPadBot = Math.max(0, (totalRows - lastRow - 1) * rowStride);
+      const maxScrollH = padTop + loadedContentH + viewH;
+      const padBot = Math.min(rawPadBot, Math.max(0, maxScrollH - padTop - loadedContentH));
+      const beforePadTop = state._lastVPadTop ?? -1;
+      const beforePadBot = state._lastVPadBot ?? -1;
+      state._lastVPadTop = padTop;
+      state._lastVPadBot = padBot;
+      // Diagnostic: log spacer state to track scrollbar / list issues
+      if (padBot !== rawPadBot || state.loadedVideos.length <= 40) {
+        clientLog("virtual_spacer_state", {
+          elapsed_ms: 0,
+          loaded: state.loadedVideos.length,
+          total,
+          cols,
+          pad_top: padTop,
+          pad_bot: padBot,
+          raw_pad_bot: rawPadBot,
+          loaded_content_h: loadedContentH,
+          max_scroll_h: maxScrollH,
+          view_h: viewH,
+          scroll_height: root.scrollHeight,
+          capped: padBot < rawPadBot,
+        }, padBot < rawPadBot ? "INFO" : "WARN");
+      }
       grid.innerHTML =
         `<div class="v-spacer" style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
         state.loadedVideos.slice(start, end).map(cardHtml).join("") +
         `<div class="v-spacer" style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
+      // Detect spacer jumps that would visibly "push" the scroll position.
+      // A padTop/padBot change > one row without a corresponding user scroll
+      // usually means totalCount or loadedBase shifted underneath them
+      // (e.g. soft refresh offset mismatch, or MAX_LOADED_VIDEOS trimming)
+      // and is the most common source of "the page jumped on its own".
+      const padTopJump = beforePadTop >= 0 ? padTop - beforePadTop : 0;
+      const padBotJump = beforePadBot >= 0 ? padBot - beforePadBot : 0;
+      if (Math.abs(padTopJump) >= rowStride * 2 || Math.abs(padBotJump) >= rowStride * 4) {
+        clientLog("virtual_grid_spacer_jump", {
+          elapsed_ms: 0,
+          pad_top_before: beforePadTop,
+          pad_top_after: padTop,
+          pad_top_delta: padTopJump,
+          pad_bot_before: beforePadBot,
+          pad_bot_after: padBot,
+          pad_bot_delta: padBotJump,
+          loaded_base: loadedBase,
+          loaded_videos: state.loadedVideos.length,
+          total_count: total,
+          first_row: firstRow,
+          last_row: lastRow,
+          scroll_top: Math.round(scrollTop),
+          scroll_height: scrollHeight,
+          client_height: viewH,
+        }, "WARN");
+      }
       updateGridHint();
       watchThumbs(grid);
-      if (state.hasMore && globalEnd >= loadedBase + state.loadedVideos.length - cols * 2 && !loadingMore) loadMore();
+      // Auto-load when the visible window reaches the tail of currently
+      // loaded videos.  The previous `loadedFillsViewport` gate
+      // (loadedContentH > viewH * 2) prevented the very first page from
+      // ever triggering loadMore when it returned fewer videos than
+      // ~2 viewports worth — which, combined with the sentinel observer
+      // not being bound in virtual mode (fixed above), left the user
+      // stranded at the bottom with no more pages loading.  The
+      // IntersectionObserver sentinel is now always bound as a fallback,
+      // and this nearTail check proactively fetches the next batch as
+      // soon as the rendered window touches the last couple of rows of
+      // the loaded buffer.
+      const nearTail = state.hasMore && globalEnd >= loadedBase + state.loadedVideos.length - cols * 2;
+      if (nearTail && !loadingMore) {
+        clientLog("auto_load_more_triggered", {
+          elapsed_ms: 0,
+          trigger: "virtual_grid_tail",
+          loaded_base: loadedBase,
+          loaded: state.loadedVideos.length,
+          global_end: globalEnd,
+          total,
+          cols,
+          loaded_content_h: loadedContentH,
+          view_h: viewH,
+          tail_margin_videos: loadedBase + state.loadedVideos.length - globalEnd,
+          offset: state.offset || 0,
+          scroll_top: Math.round(scrollTop),
+          scroll_height: scrollHeight,
+        }, "INFO");
+        loadMore("virtual_grid_tail");
+      }
     }
 
     let virtualScrollBound = false;
@@ -3730,10 +3873,76 @@
       if (!root) return;
       virtualScrollBound = true;
       let raf = 0;
+      let mergedScrollTicks = 0;
+      let lastScrollTop = 0;
+      let lastScrollLogAt = 0;
+      let lastScrollDirection = "";
+      let jumpCount = 0;
       root.addEventListener("scroll", () => {
         if (!state.virtualEnabled) return;
-        if (raf) cancelAnimationFrame(raf);
-        raf = requestAnimationFrame(() => { raf = 0; renderVirtualGrid(); });
+        if (raf) {
+          mergedScrollTicks += 1;
+          cancelAnimationFrame(raf);
+        }
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          const before = performance.now();
+          const nowTs = Date.now();
+          const sTop = root.scrollTop;
+          const sHeight = root.scrollHeight;
+          const cHeight = root.clientHeight;
+          const direction = sTop > lastScrollTop ? "down" : (sTop < lastScrollTop ? "up" : lastScrollDirection || "none");
+          const deltaPx = sTop - lastScrollTop;
+          // A scroll delta bigger than ~2 viewports between two rAF frames
+          // cannot be produced by a normal swipe / wheel; it means the DOM
+          // height changed underneath or code programmatically scrolled.
+          // This is the #1 signal for "the page jumped on its own".
+          if (Math.abs(deltaPx) > Math.max(400, cHeight * 1.5) && lastScrollTop > 0) {
+            jumpCount += 1;
+            clientLog("scroll_position_jump", {
+              elapsed_ms: 0,
+              before_top: Math.round(lastScrollTop),
+              after_top: Math.round(sTop),
+              delta_px: Math.round(deltaPx),
+              direction,
+              scroll_height: sHeight,
+              client_height: cHeight,
+              viewport_ratio: Number((Math.abs(deltaPx) / Math.max(1, cHeight)).toFixed(2)),
+              jump_count_this_session: jumpCount,
+            }, "WARN");
+          }
+          lastScrollDirection = direction;
+          lastScrollTop = sTop;
+          renderVirtualGrid();
+          const renderMs = Number((performance.now() - before).toFixed(1));
+          // Log scroll telemetry at most twice per second so browsing does
+          // not spam startup.log, plus always on large jumps / tail approach.
+          const shouldRateLog = nowTs - lastScrollLogAt >= 500;
+          const distanceFromBottom = Math.max(0, sHeight - sTop - cHeight);
+          const nearBottom = state.hasMore && distanceFromBottom < Math.max(400, cHeight * 1.2);
+          if (shouldRateLog || nearBottom || jumpCount > 0) {
+            lastScrollLogAt = nowTs;
+            clientLog("scroll_tick", filterStateFields({
+              elapsed_ms: renderMs,
+              scroll_top: Math.round(sTop),
+              scroll_height: sHeight,
+              client_height: cHeight,
+              direction,
+              delta_px: Math.round(deltaPx),
+              merged_ticks: mergedScrollTicks,
+              distance_from_bottom_px: Math.round(distanceFromBottom),
+              near_bottom: nearBottom,
+              loaded: state.loadedVideos.length,
+              loaded_base: Number(state.loadedBaseOffset) || 0,
+              total: state.totalCount || 0,
+              offset: state.offset || 0,
+              has_more: !!state.hasMore,
+              virtual_enabled: !!state.virtualEnabled,
+              jump_count: jumpCount,
+            }), (renderMs > 50 || nearBottom || jumpCount > 0) ? "WARN" : "INFO");
+          }
+          mergedScrollTicks = 0;
+        });
       }, { passive: true });
       window.addEventListener("resize", () => {
         if (state.virtualEnabled) renderVirtualGrid();
@@ -3741,20 +3950,33 @@
     }
 
     function renderGrid(videos, scanning, append) {
+      const renderStarted = performance.now();
       const grid = $("grid");
       const empty = $("empty");
       const wrap = $("loadMoreWrap");
+      const root = $("contentScroll");
+      const beforeVideosInput = (videos && videos.length) || 0;
+      const beforeLoaded = state.loadedVideos ? state.loadedVideos.length : 0;
+      const beforeBase = Number(state.loadedBaseOffset) || 0;
+      const beforeScrollTop = root ? root.scrollTop : 0;
+      const beforeScrollHeight = root ? root.scrollHeight : 0;
+      const beforeClientHeight = root ? root.clientHeight : 0;
+      let dropped = 0;
+      let droppedBaseDelta = 0;
       if (!append) {
         state.loadedVideos = (videos || []).slice();
         state.loadedBaseOffset = 0;
       } else if (videos && videos.length) {
         state.loadedVideos = state.loadedVideos.concat(videos);
         if (state.loadedVideos.length > MAX_LOADED_VIDEOS) {
-          const drop = state.loadedVideos.length - MAX_LOADED_VIDEOS;
-          state.loadedVideos.splice(0, drop);
-          state.loadedBaseOffset = (Number(state.loadedBaseOffset) || 0) + drop;
+          dropped = state.loadedVideos.length - MAX_LOADED_VIDEOS;
+          state.loadedVideos.splice(0, dropped);
+          droppedBaseDelta = dropped;
+          state.loadedBaseOffset = (Number(state.loadedBaseOffset) || 0) + dropped;
         }
       }
+      const afterLoaded = state.loadedVideos.length;
+      const afterBase = Number(state.loadedBaseOffset) || 0;
       state.virtualEnabled = state.totalCount >= VIRTUAL_MIN;
       bindVirtualScroll();
 
@@ -3765,23 +3987,116 @@
           ? "正在扫描硬盘，请稍候…（页面会自动刷新）"
           : "没有找到视频";
         if (wrap) wrap.style.display = "none";
+        clientLog("render_grid", {
+          elapsed_ms: Number((performance.now() - renderStarted).toFixed(1)),
+          append: !!append,
+          mode: "empty",
+          input_videos: beforeVideosInput,
+          before_loaded: beforeLoaded,
+          after_loaded: afterLoaded,
+          before_base: beforeBase,
+          after_base: afterBase,
+          dropped_head: dropped,
+          virtual_enabled: !!state.virtualEnabled,
+          scanning: !!scanning,
+          before_scroll_top: Math.round(beforeScrollTop),
+          before_scroll_height: beforeScrollHeight,
+          before_client_height: beforeClientHeight,
+        }, "INFO");
         return;
       }
       empty.style.display = "none";
 
       if (state.virtualEnabled) {
         renderVirtualGrid();
-        if (!state.hasMore) ensureScrollObserver();
-        return;
+        // Always bind the sentinel observer, even when has_more=true.
+        // Previously the guard `if (!state.hasMore)` meant that in virtual
+        // scroll mode the ONLY trigger for loading more was the nearTail
+        // check inside renderVirtualGrid.  When loadedContentH was small
+        // (few videos loaded relative to viewport) the nearTail check was
+        // gated by loadedFillsViewport=false and never fired, so scrolling
+        // to the bottom silently did nothing.  The sentinel observer is a
+        // cheap, reliable fallback: when the user actually reaches the
+        // bottom sentinel element, IntersectionObserver fires loadMore.
+        ensureScrollObserver();
+      } else {
+        if (!append) grid.innerHTML = "";
+        if (videos && videos.length) {
+          grid.insertAdjacentHTML("beforeend", videos.map(cardHtml).join(""));
+        }
+        updateGridHint();
+        watchThumbs(grid);
+        ensureScrollObserver();
       }
-
-      if (!append) grid.innerHTML = "";
-      if (videos && videos.length) {
-        grid.insertAdjacentHTML("beforeend", videos.map(cardHtml).join(""));
+      const afterScrollTop = root ? root.scrollTop : 0;
+      const afterScrollHeight = root ? root.scrollHeight : 0;
+      const renderMs = Number((performance.now() - renderStarted).toFixed(1));
+      // MAX_LOADED_VIDEOS head-trim is a very common "silent jump": the
+      // virtual grid's loadedBase advances, which moves padTop and makes the
+      // page feel like it "snapped up" a few rows even though the user did
+      // not scroll.  Always log this event explicitly.
+      if (dropped > 0) {
+        clientLog("render_grid_head_trimmed", {
+          elapsed_ms: renderMs,
+          append: !!append,
+          dropped,
+          before_base: beforeBase,
+          after_base: afterBase,
+          before_loaded: beforeLoaded,
+          after_loaded: afterLoaded,
+          before_scroll_top: Math.round(beforeScrollTop),
+          after_scroll_top: Math.round(afterScrollTop),
+          scroll_delta_px: Math.round(afterScrollTop - beforeScrollTop),
+          before_scroll_height: beforeScrollHeight,
+          after_scroll_height: afterScrollHeight,
+          input_videos: beforeVideosInput,
+          total: state.totalCount || 0,
+          virtual_enabled: !!state.virtualEnabled,
+        }, "WARN");
       }
-      updateGridHint();
-      watchThumbs(grid);
-      ensureScrollObserver();
+      // Log a WARN whenever the grid rebuild itself (append=false) while
+      // the user was scrolled.  This is exactly the "page jumped back to
+      // top" issue we are tracking for jitter.
+      const wasScrolled = beforeScrollTop > Math.max(200, beforeClientHeight);
+      if (!append && wasScrolled) {
+        clientLog("render_grid_replaced_while_scrolled", {
+          elapsed_ms: renderMs,
+          before_scroll_top: Math.round(beforeScrollTop),
+          after_scroll_top: Math.round(afterScrollTop),
+          scroll_delta_px: Math.round(afterScrollTop - beforeScrollTop),
+          before_scroll_height: beforeScrollHeight,
+          after_scroll_height: afterScrollHeight,
+          before_loaded: beforeLoaded,
+          after_loaded: afterLoaded,
+          before_base: beforeBase,
+          after_base: afterBase,
+          input_videos: beforeVideosInput,
+          scanning: !!scanning,
+          soft: false, // callers that know they are soft-refreshing can override by logging their own event
+          total: state.totalCount || 0,
+          virtual_enabled: !!state.virtualEnabled,
+        }, "WARN");
+      }
+      clientLog("render_grid", {
+        elapsed_ms: renderMs,
+        append: !!append,
+        mode: state.virtualEnabled ? "virtual" : "flat",
+        input_videos: beforeVideosInput,
+        before_loaded: beforeLoaded,
+        after_loaded: afterLoaded,
+        before_base: beforeBase,
+        after_base: afterBase,
+        dropped_head: dropped,
+        virtual_enabled: !!state.virtualEnabled,
+        scanning: !!scanning,
+        before_scroll_top: Math.round(beforeScrollTop),
+        after_scroll_top: Math.round(afterScrollTop),
+        scroll_delta_px: Math.round(afterScrollTop - beforeScrollTop),
+        before_scroll_height: beforeScrollHeight,
+        after_scroll_height: afterScrollHeight,
+        has_more: !!state.hasMore,
+        total: state.totalCount || 0,
+      }, (renderMs > 80 || dropped > 0 || (!append && wasScrolled)) ? "WARN" : "INFO");
     }
 
     let lastScanning = false;
@@ -3795,7 +4110,25 @@
       if (scrollObserver) scrollObserver.disconnect();
       scrollObserver = new IntersectionObserver(
         (entries) => {
-          if (entries.some((e) => e.isIntersecting)) loadMore();
+          const intersecting = entries.some((e) => e.isIntersecting);
+          // Sentinel is only reachable by scrolling to the bottom, so no
+          // content-height guard needed here.  The padBot cap keeps the
+          // scrollbar usable without preventing sentinel visibility.
+          if (intersecting) {
+            clientLog("sentinel_load_more_triggered", {
+              elapsed_ms: 0,
+              trigger: "intersection_sentinel",
+              scroll_top: Math.round(root.scrollTop),
+              scroll_height: root.scrollHeight,
+              client_height: root.clientHeight,
+              has_more: !!state.hasMore,
+              loading_more: !!loadingMore,
+              offset: state.offset || 0,
+              loaded: state.loadedVideos.length,
+              loaded_base: Number(state.loadedBaseOffset) || 0,
+            }, loadingMore ? "WARN" : "INFO");
+            loadMore("intersection_sentinel");
+          }
         },
         { root, rootMargin: "160px", threshold: 0 }
       );
@@ -3805,6 +4138,63 @@
     let refreshToken = 0;
 
     async function refresh(opts) {
+      // Global throttle + merging for refresh() calls.  Multiple triggers
+      // (polling, channel click, folder change, filter change) can fire
+      // within 1-2s of each other while a scan is in progress.  Running them
+      // back-to-back resets state.offset to 0, aborts in-flight fetches, and
+      // visibly "jumps" the grid.  The fix:
+      //   - A bare minimum 1500ms gap between any two refresh() runs.
+      //   - If we are still in the cooldown window, merge the pending call
+      //     with a timer so we run exactly once when the window opens.
+      //     Interactive triggers (user clicks) always beat poll refreshes so
+      //     scroll offset is properly reset on explicit user actions.
+      const options = opts || {};
+      const MIN_INTERVAL_MS = 1500;
+      const nowTick = Date.now();
+      if (typeof state._refreshPendingLock !== "boolean") state._refreshPendingLock = false;
+      if (typeof state._lastFullRefresh !== "number") state._lastFullRefresh = 0;
+
+      const throttled = (state._refreshRunning === true)
+        || (nowTick - state._lastFullRefresh) < MIN_INTERVAL_MS
+        || state._refreshPendingLock === true;
+
+      if (throttled) {
+        // Merge with existing pending refresh, or schedule a new one.
+        // Preserve the most "explicit" options: user actions (soft=false)
+        // must not be merged down to a soft refresh, and explicit nav=true
+        // must not be merged down to nav=false.
+        const pending = state._refreshPending || null;
+        const mergedOpts = pending ? pending.opts : {};
+        if (!mergedOpts.soft || options.soft === false) mergedOpts.soft = options.soft === false ? false : (mergedOpts.soft ?? options.soft);
+        if (mergedOpts.nav || options.nav === true) mergedOpts.nav = true;
+        else if (mergedOpts.nav === false || options.nav === false) mergedOpts.nav = false;
+        mergedOpts.merged_source = (mergedOpts.merged_source ? mergedOpts.merged_source + "+" : "")
+          + (options.soft ? "poll" : "ui");
+        if (pending && pending.timeoutId) clearTimeout(pending.timeoutId);
+        const wait = MIN_INTERVAL_MS - Math.max(0, nowTick - state._lastFullRefresh);
+        const timeoutId = setTimeout(() => {
+          state._refreshPending = null;
+          // Re-enter the real function through the normal throttle gate
+          // which should now be open.
+          refresh(mergedOpts);
+        }, Math.max(50, wait));
+        state._refreshPending = { timeoutId, opts: mergedOpts };
+        return;
+      }
+      state._refreshRunning = true;
+      state._refreshPendingLock = true;
+      try {
+        return await _refreshImpl(options);
+      } finally {
+        state._refreshRunning = false;
+        state._lastFullRefresh = Date.now();
+        // Release the pending lock on next microtask so a merged call that
+        // fires immediately before this point still goes through the gate.
+        setTimeout(() => { state._refreshPendingLock = false; }, 10);
+      }
+    }
+
+    async function _refreshImpl(opts) {
       const refreshStarted = clientNow();
       const options = opts || {};
       const token = ++refreshToken;
@@ -3813,17 +4203,30 @@
       // and the new filtered page is fetched.  The old cards remain visible
       // intentionally, but the count must not look frozen during a slow scan.
       if ($("countLabel")) $("countLabel").textContent = "筛选中…";
+      const softRefresh = !!options.soft;
       clientLog("refresh_start", filterStateFields({
         elapsed_ms: 0,
         token,
         nav_requested: options.nav !== false,
         dom_sub_rows: $("subFolderRows")?.querySelectorAll(".filter-row").length || 0,
         dom_sub_tags: $("subFolderRows")?.querySelectorAll("[data-folder]").length || 0,
+        soft: softRefresh,
+        merged_source: options.merged_source || "",
       }), "INFO", refreshOperationId);
-      state.offset = 0;
-      loadingMore = false;
-      cancelListRequests();
-      resetThumbQueue();
+      // soft (polling) refresh preserves the user's current scroll/page.
+      // Explicit user-initiated refresh always resets to the first page.
+      const currentOffset = state.offset || 0;
+      const hadScrolled = currentOffset > (state.pageSize || 0);
+      if (!softRefresh || !hadScrolled) {
+        state.offset = 0;
+        loadingMore = false;
+        cancelListRequests();
+        resetThumbQueue();
+      } else {
+        // Soft refresh still cancels previous fetches, but do NOT clear the
+        // visible thumbnail queue so cards do not flash placeholders.
+        cancelListRequests();
+      }
       let needNav = options.nav !== false;
       if (!state.navCache) needNav = true;
 
@@ -3882,8 +4285,13 @@
         state.folder = state.category + "/" + state.folder;
       }
       let data;
+      // Soft refresh keeps the user's current visible page (if the page is
+      // still within bounds after a scan updated totalCount).  This prevents
+      // the grid from jumping back to offset 0 every time the scan ticker
+      // emits a new generation.
+      const fetchOffset = (softRefresh && hadScrolled) ? currentOffset : 0;
       try {
-        data = await fetchVideos(0);
+        data = await fetchVideos(fetchOffset);
       } catch (e) {
         if (isAbortError(e) || token !== refreshToken) {
           clientLog("refresh_aborted", filterStateFields({
@@ -4074,24 +4482,122 @@
       }
     }
 
-    async function loadMore() {
-      if (!state.hasMore || loadingMore) return;
+    let loadMoreCallCount = 0;
+    let loadMoreAbortCount = 0;
+
+    async function loadMore(trigger) {
+      const callSeq = ++loadMoreCallCount;
+      const triggerName = trigger || "unknown";
+      if (!state.hasMore || loadingMore) {
+        clientLog("load_more_skipped", {
+          elapsed_ms: 0,
+          seq: callSeq,
+          trigger: triggerName,
+          reason: loadingMore ? "already_loading" : (!state.hasMore ? "no_more" : "unknown"),
+          loading_more: !!loadingMore,
+          has_more: !!state.hasMore,
+          offset: state.offset || 0,
+          total: state.totalCount || 0,
+          loaded: state.loadedVideos.length,
+          loaded_base: Number(state.loadedBaseOffset) || 0,
+          abort_count_so_far: loadMoreAbortCount,
+        }, (loadingMore && state.hasMore) ? "WARN" : "INFO");
+        return;
+      }
       loadingMore = true;
       const hint = $("loadMoreHint");
       if (hint) hint.textContent = "加载中…";
+      const root = $("contentScroll");
+      const beforeTop = root ? root.scrollTop : 0;
+      const beforeHeight = root ? root.scrollHeight : 0;
+      const beforeOffset = state.offset || 0;
+      const startedAt = performance.now();
       try {
+        clientLog("load_more_start", {
+          elapsed_ms: 0,
+          seq: callSeq,
+          trigger: triggerName,
+          offset: beforeOffset,
+          page_size: state.pageSize || 0,
+          loaded: state.loadedVideos.length,
+          loaded_base: Number(state.loadedBaseOffset) || 0,
+          total: state.totalCount || 0,
+          has_more: !!state.hasMore,
+          scroll_top: Math.round(beforeTop),
+          scroll_height: beforeHeight,
+          client_height: root ? root.clientHeight : 0,
+        }, "INFO");
         const data = await fetchVideos(state.offset);
-        if (!data) return;
+        if (!data) {
+          // fetchVideos already logged page_load_aborted on cancel; just mark.
+          loadMoreAbortCount += 1;
+          clientLog("load_more_no_data", {
+            elapsed_ms: Number((performance.now() - startedAt).toFixed(1)),
+            seq: callSeq,
+            trigger: triggerName,
+            offset_before: beforeOffset,
+            offset_after: state.offset || 0,
+            abort_count_so_far: loadMoreAbortCount,
+          }, "WARN");
+          return;
+        }
         const batch = data.videos || [];
         state.hasMore = !!data.has_more;
         state.offset += batch.length;
         if (!batch.length) state.hasMore = false;
         renderGrid(batch, false, true);
+        const afterTop = root ? root.scrollTop : 0;
+        const afterHeight = root ? root.scrollHeight : 0;
+        const deltaTop = afterTop - beforeTop;
+        const deltaHeight = afterHeight - beforeHeight;
+        // If adding N rows shifted the viewport more than a couple of rows
+        // we log it: it usually means the user kept scrolling while the
+        // batch rendered and our layout pushed the content relative to them.
+        const jumped = Math.abs(deltaTop) >= Math.max(200, (root ? root.clientHeight : 0) * 0.4);
+        clientLog("load_more_done", {
+          elapsed_ms: Number((performance.now() - startedAt).toFixed(1)),
+          seq: callSeq,
+          trigger: triggerName,
+          batch: batch.length,
+          offset_before: beforeOffset,
+          offset_after: state.offset || 0,
+          has_more_after: !!state.hasMore,
+          total: state.totalCount || 0,
+          count: data.count || 0,
+          raw_count: data.raw_count || 0,
+          scroll_top_before: Math.round(beforeTop),
+          scroll_top_after: Math.round(afterTop),
+          scroll_top_delta_px: Math.round(deltaTop),
+          scroll_height_before: beforeHeight,
+          scroll_height_after: afterHeight,
+          scroll_height_delta_px: deltaHeight,
+          jumped,
+          abort_count_so_far: loadMoreAbortCount,
+        }, jumped ? "WARN" : "INFO");
       } catch (e) {
-        if (isAbortError(e)) return;
+        if (isAbortError(e)) {
+          loadMoreAbortCount += 1;
+          clientLog("load_more_aborted", {
+            elapsed_ms: Number((performance.now() - startedAt).toFixed(1)),
+            seq: callSeq,
+            trigger: triggerName,
+            offset_before: beforeOffset,
+            offset_after: state.offset || 0,
+            abort_count_so_far: loadMoreAbortCount,
+            reason: "abort",
+          }, "WARN");
+          return;
+        }
         console.warn(e);
         if (hint) hint.textContent = "加载失败，请继续下滑重试";
         state.hasMore = true;
+        clientLog("load_more_failed", {
+          elapsed_ms: Number((performance.now() - startedAt).toFixed(1)),
+          seq: callSeq,
+          trigger: triggerName,
+          offset_before: beforeOffset,
+          error: String((e && e.message) || e).slice(0, 240),
+        }, "ERROR");
       } finally {
         loadingMore = false;
       }

@@ -317,6 +317,25 @@ def make_thumbnail(
                     )
                     no_video_stream = True
                     break
+                # Corrupted / truncated containers: retrying another seek point
+                # only starts more ffmpeg processes and repeats the same failure.
+                if (
+                    "invalid data found when processing input" in stderr_lower
+                    or "moov atom not found" in stderr_lower
+                    or "error opening input" in stderr_lower
+                ):
+                    emit(
+                        "WARN",
+                        "thumbnail_source_corrupted",
+                        force=True,
+                        video=video,
+                        output=out,
+                        elapsed_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
+                        attempt=f"seek={ss}",
+                        reason="invalid_input",
+                    )
+                    no_video_stream = True
+                    break
             except subprocess.TimeoutExpired as exc:
                 attempts.append(f"seek={ss}:timeout={exc.timeout}s")
             except Exception as exc:

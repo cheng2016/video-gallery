@@ -17,6 +17,10 @@ _MAX_DISK_LIBS = 12
 _libs_lock = threading.RLock()
 _scanned_caches = False
 _load_log_ts: dict[str, float] = {}
+# Short-term cooldown for roots whose catalog is missing, so every page
+# refresh does not re-stat the same absent cache dir and re-emit WARN.
+_catalog_missing_until: dict[str, float] = {}
+_CATALOG_MISSING_COOLDOWN_S = 60.0
 
 
 def _libs_guard(operation: str):
@@ -516,7 +520,14 @@ def load_library_from_index(root: Path | str) -> bool:
         return True
 
     cache = ensure_cache_dir(root_p)
+    cache_s = str(cache)
+    # Cooldown: if we recently found no catalog for this root, skip the
+    # re-stat and the rate-limited WARN until it expires.
+    missing_until = _catalog_missing_until.get(cache_s)
+    if missing_until and missing_until > time.time():
+        return False
     if not catalog_exists(cache):
+        _catalog_missing_until[cache_s] = time.time() + _CATALOG_MISSING_COOLDOWN_S
         from vg.diagnostics import emit_rate_limited
 
         emit_rate_limited(
@@ -530,6 +541,7 @@ def load_library_from_index(root: Path | str) -> bool:
             cache=cache,
         )
         return False
+    _catalog_missing_until.pop(cache_s, None)
     index_mtime = catalog_mtime(cache)
     with _libs_guard("disk_lib_load_state"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)

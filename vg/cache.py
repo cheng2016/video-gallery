@@ -185,6 +185,32 @@ def thumb_file_ready(cache: Path | None, vid: str) -> bool:
         return False
 
 
+def thumb_stat(cache: Path | None, vid: str) -> tuple[bool, int]:
+    """Single-stat form of (thumb_file_ready, thumb_version).
+
+    The previous ``attach_thumb_meta`` flow called ``thumb_file_ready``
+    followed by ``thumb_version`` for every positive match.  Each call
+    issues its own ``Path.exists()`` + ``Path.stat()``, so a single video
+    cost two disk stats.  On Windows against spinning disks (and worse
+    across multiple drives D/E/F/G), this compounded to >1.1s for a
+    single 18-video page request:
+
+        [PERF] api_videos_sql ... thumb_meta_ms=1184.9 ...
+
+    This helper performs exactly one ``os.stat`` and returns both the
+    "ready" boolean and the version (mtime) int.
+    """
+    if not cache or not vid:
+        return (False, 0)
+    p = thumb_path(cache, vid)
+    try:
+        st = os.stat(p)
+    except OSError:
+        return (False, 0)
+    ready = st.st_size > 24
+    return (ready, int(st.st_mtime) if ready else 0)
+
+
 def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
     """读取预览图（支持加密 VG1 与明文 JPEG）；带内存 LRU。"""
     from vg.privacy import unpack_thumb_bytes
@@ -355,14 +381,33 @@ def read_index_counts(cache: Path) -> tuple[int | None, dict[str, int] | None]:
 
 
 def list_thumb_ids(cache: Path | None) -> set[str]:
-    """Stem names of .vgt files in one cache directory (one readdir, no video disk)."""
+    """Stem names of .vgt files in one cache directory (one readdir, no video disk).
+
+    Uses ``os.scandir`` instead of ``Path.glob + is_file``.  The previous
+    glob-based form issued a fresh ``stat`` for every entry, which on a
+    2785-file cache directory added up to >700 ms per call:
+
+        [PERF] fill_thumbs_for_videos elapsed_ms=725.3 ... cached=2785
+
+    ``scandir`` already carries the file type from the directory read on
+    Windows, so no per-entry stat is needed.
+    """
     ids: set[str] = set()
     if not cache:
         return ids
     try:
-        for path in cache.glob(f"*{THUMB_EXT}"):
-            if path.is_file():
-                ids.add(path.stem)
+        with os.scandir(cache) as it:
+            for entry in it:
+                name = entry.name
+                if not name.endswith(THUMB_EXT):
+                    continue
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        ids.add(name[: -len(THUMB_EXT)])
+                except OSError:
+                    # Stale entry / permission glitch — still count by name so
+                    # the caller does not needlessly regenerate the thumb.
+                    ids.add(name[: -len(THUMB_EXT)])
     except OSError as exc:
         from vg.diagnostics import error
 
@@ -481,10 +526,52 @@ def save_index(
             return False
 
 
+# Per-root cache_dir cache: avoids repeated is_dir() / ensure_cache_dir() calls
+# for every video in a page (all videos on the same root share one cache dir).
+_cache_dir_by_root: dict[str, Path | None] = {}
+_cache_dir_by_root_lock = threading.Lock()
+
+
+def _resolve_cache_dir_for_item(v: dict) -> Path | None:
+    """Resolve cache_dir with per-root memoisation (one is_dir per root)."""
+    raw = (v.get("_lib_cache") or "").strip()
+    if raw:
+        p = Path(raw)
+        try:
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    root = (v.get("_lib_root") or v.get("root") or "").strip()
+    if root:
+        with _cache_dir_by_root_lock:
+            cached = _cache_dir_by_root.get(root)
+            if cached is not None:
+                return cached
+        try:
+            d = ensure_cache_dir(Path(root))
+            with _cache_dir_by_root_lock:
+                _cache_dir_by_root[root] = d
+            return d
+        except OSError:
+            pass
+    cache = STATE.get("cache_dir")
+    return Path(cache) if cache else None
+
+
+# Negative thumb cache: remember videos confirmed to have no thumb so we skip
+# the file-system stat on subsequent calls.  Cleared whenever lib_gen changes
+# (scan may have generated new thumbs).
+_thumb_neg_cache: dict[str, bool] = {}
+_thumb_neg_cache_gen: int = -1
+_thumb_neg_cache_lock = threading.Lock()
+_THUMB_NEG_CACHE_MAX = 8192
+
+
 def attach_thumb_meta(v: dict) -> dict:
     """给列表项补 has_thumb / thumb_v（只看文件是否存在，避免列表接口解密过慢）。"""
-    from vg.disk_libs import cache_dir_for_item
     from vg.roots import thumb_id_for_item
+    from vg.diagnostics import aggregate
 
     vid = thumb_id_for_item(v) or (v.get("id") or "")
     # Trust scan/index flags on the hot list path — re-statting every card on
@@ -494,9 +581,26 @@ def attach_thumb_meta(v: dict) -> dict:
             v["thumb_id"] = vid
         if not v.get("thumb_v"):
             v["thumb_v"] = 1
+        aggregate("attach_thumb_meta_fast_path", 0.0)
         return v
 
-    cache = cache_dir_for_item(v) or STATE.get("cache_dir")
+    # Negative cache: if we already confirmed this video has no thumb in the
+    # current generation, skip the file-system checks entirely.
+    global _thumb_neg_cache_gen
+    cur_gen = int(STATE.get("lib_gen") or 0)
+    if cur_gen != _thumb_neg_cache_gen:
+        with _thumb_neg_cache_lock:
+            _thumb_neg_cache.clear()
+            _thumb_neg_cache_gen = cur_gen
+    if vid:
+        with _thumb_neg_cache_lock:
+            if _thumb_neg_cache.get(vid):
+                v["has_thumb"] = False
+                v["thumb_v"] = 0
+                aggregate("attach_thumb_meta_neg_cache", 0.0)
+                return v
+
+    cache = _resolve_cache_dir_for_item(v) or STATE.get("cache_dir")
     # Prefer the stamped owner root so SQL-backed list rows still resolve .vgt
     # without falling back to the active disk cache.
     if cache is None:
@@ -508,11 +612,29 @@ def attach_thumb_meta(v: dict) -> dict:
                 cache = resolve_cache_dir_for_root(Path(root))
             except OSError:
                 cache = None
-    if cache and vid and (thumb_cache_get(vid, cache) is not None or thumb_file_ready(cache, vid)):
+    # In-memory LRU hit short-circuits before any disk stat.
+    if cache and vid and thumb_cache_get(vid, cache) is not None:
         v["has_thumb"] = True
         v["thumb_v"] = thumb_version(cache, vid) or 1
         v["thumb_id"] = vid
+        aggregate("attach_thumb_meta_mem_hit", 0.0)
         return v
+    # Single os.stat for both "ready" and "version" instead of calling
+    # thumb_file_ready + thumb_version separately (two stats per video).
+    ready, ver = thumb_stat(cache, vid) if (cache and vid) else (False, 0)
+    if ready:
+        v["has_thumb"] = True
+        v["thumb_v"] = ver or 1
+        v["thumb_id"] = vid
+        aggregate("attach_thumb_meta_disk_hit", 0.0)
+        return v
+    # Record negative result so the next call for this video is O(1).
+    if vid:
+        with _thumb_neg_cache_lock:
+            _thumb_neg_cache[vid] = True
+            while len(_thumb_neg_cache) > _THUMB_NEG_CACHE_MAX:
+                _thumb_neg_cache.pop(next(iter(_thumb_neg_cache)), None)
     v["has_thumb"] = False
     v["thumb_v"] = 0
+    aggregate("attach_thumb_meta_disk_miss", 0.0)
     return v

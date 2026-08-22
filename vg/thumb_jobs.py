@@ -52,13 +52,51 @@ def thumbnail_job_key(cache: Path | str, file_id: str) -> str:
     return f"{root.casefold()}::{file_id}"
 
 
-def note_frontend_activity(hold_seconds: float = 0.6) -> None:
-    """Ask not-yet-started thumbnail jobs to yield for a short quiet window."""
-    global _foreground_until
-    until = time.monotonic() + max(0.0, float(hold_seconds))
+_fg_note_seq = 0
+
+
+def note_frontend_activity(hold_seconds: float = 0.6, source: str = "unknown") -> None:
+    """Ask not-yet-started thumbnail jobs to yield for a short quiet window.
+
+    ``source`` identifies which subsystem is keeping the "foreground busy"
+    flag alive so we can distinguish, from logs, whether a massive backlog
+    was caused by:
+      - the polling ticker calling /api/status (cheap, should yield briefly),
+      - the list view paging /api/videos (medium),
+      - visible thumbnails on /thumb/* (legitimate, must yield), or
+      - playback /stream/* (long 4s hold, expected).
+
+    A rate-limited event is emitted on large pushes so we can trace the
+    exact chain of `_foreground_until` bumps that ended up delaying a
+    batch thumbnail by 30+ seconds.
+    """
+    global _foreground_until, _fg_note_seq
+    hold = max(0.0, float(hold_seconds))
+    now = time.monotonic()
+    until = now + hold
+    bumped = False
     with _jobs_lock:
         if until > _foreground_until:
+            previous = _foreground_until
             _foreground_until = until
+            bumped = True
+    if bumped and hold >= 0.4:
+        _fg_note_seq += 1
+        from vg.diagnostics import aggregate, emit_rate_limited
+
+        aggregate("foreground_activity_note", hold * 1000.0)
+        emit_rate_limited(
+            "INFO",
+            "foreground_activity_note",
+            key=source,
+            interval=10.0,
+            force=False,
+            source=source,
+            hold_s=f"{hold:.2f}",
+            until_extended_ms=f"{max(0.0, until - previous) * 1000.0:.0f}" if previous else f"{hold * 1000.0:.0f}",
+            pending=pending_thumbnail_jobs(),
+            seq=_fg_note_seq,
+        )
 
 
 def batch_thumbnail_slots() -> int:
@@ -75,24 +113,52 @@ def batch_thumbnail_slots() -> int:
 
 
 def _wait_for_frontend_idle() -> None:
-    started = time.monotonic()
-    while True:
-        with _jobs_lock:
-            remaining = _foreground_until - time.monotonic()
-        if remaining <= 0:
-            waited = time.monotonic() - started
-            if waited >= 0.5:
-                from vg.diagnostics import emit
+    """Yield briefly for visible thumbnail work, but never block a worker.
 
-                emit(
-                    "PERF",
-                    "thumbnail_batch_frontend_yield",
-                    force=True,
-                    waited_ms=f"{waited * 1000.0:.1f}",
-                    pending=pending_thumbnail_jobs(),
-                )
-            return
-        time.sleep(min(0.1, remaining))
+    The previous implementation sat in a ``while _foreground_until > now``
+    loop sleeping up to 0.1s per iteration.  When the browser kept polling
+    (status + thumbnail fetches every ~2s), ``note_frontend_activity`` kept
+    pushing ``_foreground_until`` forward and every batch worker ended up
+    parked here *simultaneously*.  The result was ``thumbnail_job_queue_wait``
+    warnings of 35+ seconds and a scan backlog that never drained while
+    anyone was browsing the page, even though ``PriorityQueue`` already
+    guarantees visible jobs run before batch jobs purely by priority value.
+
+    The new contract is intentionally minimal: do a bounded, one-shot sleep
+    so high-priority foreground jobs that were queued right before this batch
+    job was dequeued have a chance to be claimed by one of the other
+    workers.  If the browser stays active, batch workers still make forward
+    progress (slowly) instead of being parked and creating a self-sustaining
+    backlog that explodes waited_ms.
+    """
+    started = time.monotonic()
+    with _jobs_lock:
+        remaining = _foreground_until - time.monotonic()
+    if remaining > 0.0:
+        # Bound the yield.  120 ms is long enough for any visible request
+        # already on the queue to be picked up by another worker, but short
+        # enough that a 1822-video batch still drains in < 4 minutes on a
+        # 14-worker pool even while the UI is alive.
+        time.sleep(min(0.12, remaining))
+    waited = time.monotonic() - started
+    if waited >= 0.05:
+        from vg.diagnostics import aggregate
+
+        aggregate("thumbnail_batch_frontend_yield", waited * 1000.0)
+
+
+def _max_batch_started_during_foreground() -> int:
+    """How many batch slots may be claimed while the UI hold is active.
+
+    Previously *all* batch slots were deferred while ``_foreground_until``
+    was in the future which caused 100% of workers to requeue + sleep 50ms
+    over and over again.  With N workers we now allow ``ceil(N/4)`` batch
+    workers to actually start, so the backlog drains slowly even if the
+    user stays on the page, while the remaining workers remain immediately
+    available for visible thumbnail requests.  When no foreground hold is
+    active the full ``batch_thumbnail_slots()`` still applies.
+    """
+    return max(1, (_worker_n + 3) // 4)
 
 
 def _worker() -> None:
@@ -104,30 +170,35 @@ def _worker() -> None:
                 current = _jobs.get(job.key)
                 if current is not job or job.started:
                     continue
-                # Batch jobs yield harder when the page is actively loading thumbs.
                 if job.priority >= THUMB_PRIORITY_BATCH:
-                    # Do not claim a batch slot while the foreground hold is
-                    # active.  Otherwise every worker can enter
-                    # _wait_for_frontend_idle after claiming a batch item and
-                    # visible requests wait behind the scan batch.
-                    if _foreground_until > time.monotonic():
+                    foreground_active = _foreground_until > time.monotonic()
+                    started_batch = sum(
+                        1
+                        for other in _jobs.values()
+                        if other.started and other.priority >= THUMB_PRIORITY_BATCH
+                    )
+                    if foreground_active:
+                        # Do not let *every* worker claim a batch item while
+                        # a UI hold is active; reserve the rest for visible
+                        # work.  But also do not defer every single worker,
+                        # which previously caused the whole queue to stall
+                        # and produce 35s waited_ms while browsing.
+                        cap = _max_batch_started_during_foreground()
+                    else:
+                        cap = batch_thumbnail_slots()
+                    if started_batch >= cap:
                         _queue.put((job.priority, next(_sequence), job))
                         requeued = True
                     else:
-                        started_batch = sum(
-                            1
-                            for other in _jobs.values()
-                            if other.started and other.priority >= THUMB_PRIORITY_BATCH
-                        )
-                        if started_batch >= batch_thumbnail_slots():
-                            _queue.put((job.priority, next(_sequence), job))
-                            requeued = True
-                        else:
-                            job.started = True
+                        job.started = True
                 else:
                     job.started = True
             if requeued:
-                time.sleep(0.05)
+                # Reduced from 50 ms to 10 ms.  Combined with the new
+                # ``_max_batch_started_during_foreground`` cap, requeues are
+                # now far less frequent and do not need a long sleep to
+                # avoid busy looping on the PriorityQueue.
+                time.sleep(0.01)
                 continue
             if job.priority >= THUMB_PRIORITY_BATCH:
                 _wait_for_frontend_idle()

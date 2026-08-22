@@ -920,7 +920,10 @@ def scan_videos(
         cache = ensure_cache_dir(root)
         STATE["cache_dir"] = cache
 
+    t0 = time.perf_counter()
     old_map = _load_old_video_map(cache, root) if incremental else {}
+    _load_map_ms = (time.perf_counter() - t0) * 1000.0
+    log(f"[计时] _load_old_video_map: {_load_map_ms:.1f}ms, 条目={len(old_map)}")
     old_by_id: dict[str, dict] = {}
     if old_map:
         log(f"[增量] 可复用旧条目 {len(old_map)} 个")
@@ -968,6 +971,11 @@ def scan_videos(
     last_tree_n = 0
     scan_counts: dict[str, int] = {}
     scan_samples: dict[str, list[str]] = {}
+    # --- 计时：各阶段累计耗时 ---
+    _cum_fp_ms = 0.0      # 指纹计算累计
+    _cum_publish_ms = 0.0  # _publish_live 累计
+    _cum_store_live_ms = 0.0  # store_live_library 累计
+    _n_fp_calls = 0         # 指纹调用次数
 
     def count_scan(reason: str, path: Path | str | None = None, detail: str = "") -> None:
         scan_counts[reason] = scan_counts.get(reason, 0) + 1
@@ -979,9 +987,10 @@ def scan_videos(
 
     def _publish_live(force_tree: bool = False) -> None:
         """Push mid-scan catalog without wiping other disks from STATE."""
-        nonlocal last_progress_ts, last_tree_n
+        nonlocal last_progress_ts, last_tree_n, _cum_publish_ms, _cum_store_live_ms
         import time as _time
 
+        _pub_t0 = _time.perf_counter()
         now = _time.time()
         # Items are stamped as they are found; just expose the live list.
         STATE["scan_live"] = found
@@ -989,10 +998,27 @@ def scan_videos(
         STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
         # Sync disk_libs / tree infrequently — scan_live already covers API reads.
         if force_tree or (len(found) - last_tree_n >= 400) or (now - last_progress_ts >= 3.0):
+            _store_t0 = _time.perf_counter()
             try:
                 store_live_library(root_s, found)
             except Exception as e:
                 log(f"[扫描] 实时入库失败: {e}")
+            _cum_store_live_ms += (_time.perf_counter() - _store_t0) * 1000.0
+            # Keep STATE["videos"] in sync so videos_for_scope() returns the
+            # latest snapshot instead of a stale pre-scan list.  Merge with
+            # videos from other (non-scanning) roots to preserve multi-root data.
+            try:
+                from vg.roots import _root_compare_key, get_mounted_roots
+
+                scan_key = _root_compare_key(root_s)
+                other = [
+                    v for v in (STATE.get("videos") or [])
+                    if _root_compare_key(v.get("_lib_root") or v.get("root") or "") != scan_key
+                ]
+                STATE["videos"] = list(found) + other
+            except Exception as _exc:
+                log(f"[扫描] STATE[videos] 同步失败（仅保留当前根）: {_exc}")
+                STATE["videos"] = list(found)
             if not quiet:
                 try:
                     from vg.roots import get_mounted_roots, tree_for_scope
@@ -1001,13 +1027,16 @@ def scan_videos(
                         STATE["tree"] = tree_for_scope(None)
                     else:
                         STATE["tree"] = build_tree(root, found)
-                except Exception:
+                except Exception as _exc:
+                    log(f"[扫描] tree_for_scope 失败，回退 build_tree: {_exc}")
                     try:
                         STATE["tree"] = build_tree(root, found)
-                    except Exception:
-                        pass
+                    except Exception as _exc2:
+                        log(f"[扫描] build_tree 也失败，目录树将为空: {_exc2}")
+                        STATE["tree"] = {"name": root.name or str(root), "path": "", "count": 0, "children": [], "videos": []}
             last_tree_n = len(found)
             last_progress_ts = now
+        _cum_publish_ms += (_time.perf_counter() - _pub_t0) * 1000.0
 
     def on_walk_error(err: OSError) -> None:
         count_scan("directory_error", detail=str(err))
@@ -1017,7 +1046,7 @@ def scan_videos(
         STATE["scan_progress"] = f"已发现 {len(found)} 个视频…（部分目录无权限已跳过）"
 
     def ingest_file(full: Path, name: str, ext: str, *, count_folder: bool) -> dict | None:
-        nonlocal reused, added
+        nonlocal reused, added, _cum_fp_ms, _n_fp_calls
         try:
             rel = safe_rel(full, root)
             st = full.stat()
@@ -1089,7 +1118,16 @@ def scan_videos(
             elif not signature_match:
                 count_scan("video_fingerprint_changed", full)
             vid = video_id(rel)
-            file_sig = _file_fingerprint(full, st)
+            file_sig = ""
+            if old is not None:
+                # Only fingerprint when there is an old entry to compare
+                # against.  A full scan with empty old_map has nothing to
+                # validate, so computing blake2b over 192 KB per file is
+                # pure waste (~76 s for 2785 videos).
+                _fp_t0 = time.perf_counter()
+                file_sig = _file_fingerprint(full, st)
+                _cum_fp_ms += (time.perf_counter() - _fp_t0) * 1000.0
+                _n_fp_calls += 1
             if not file_sig:
                 count_scan("video_fingerprint_failed", full)
             item = {
@@ -1184,6 +1222,13 @@ def scan_videos(
                     note_found()
         found = collapse_segment_sets(found)
 
+    # --- 计时：主循环结束 ---
+    _walk_end_ms = (time.perf_counter() - scan_started) * 1000.0
+    log(f"[计时] 主遍历完成: 总耗时={_walk_end_ms:.0f}ms, 目录={scan_counts.get('directories_scanned',0)}, "
+        f"候选文件={scan_counts.get('candidate_files',0)}, 指纹调用={_n_fp_calls}, "
+        f"指纹累计={_cum_fp_ms:.0f}ms, publish累计={_cum_publish_ms:.0f}ms, "
+        f"store_live累计={_cum_store_live_ms:.0f}ms, 找到={len(found)}")
+
     if old_by_id:
         adopted = 0
         for item in found:
@@ -1221,17 +1266,27 @@ def scan_videos(
         incremental=incremental,
     )
 
+    _post_t0 = time.perf_counter()
     found.sort(key=lambda x: (x.get("rel") or "").lower())
+    _sort_ms = (time.perf_counter() - _post_t0) * 1000.0
+
+    _stamp_t0 = time.perf_counter()
     stamp_lib_meta(found, root=root_s, cache=cache, overwrite=True)
+    _stamp_ms = (time.perf_counter() - _stamp_t0) * 1000.0
     for v in found:
         v["root"] = root_s
         if "_folder_raw" not in v:
             v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
     STATE["scan_live"] = found
+
+    _store_t0 = time.perf_counter()
     try:
         store_live_library(root_s, found)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log(f"[扫描] 最终 store_live_library 失败: {_exc}")
+    _store_final_ms = (time.perf_counter() - _store_t0) * 1000.0
+
+    _tree_t0 = time.perf_counter()
     try:
         from vg.roots import get_mounted_roots, tree_for_scope
 
@@ -1239,8 +1294,12 @@ def scan_videos(
             STATE["tree"] = tree_for_scope(None)
         else:
             STATE["tree"] = build_tree(root, found)
-    except Exception:
+    except Exception as _exc:
+        log(f"[扫描] tree_for_scope(最终) 失败，回退 build_tree: {_exc}")
         STATE["tree"] = build_tree(root, found)
+    _tree_ms = (time.perf_counter() - _tree_t0) * 1000.0
+    log(f"[计时] 后处理: sort={_sort_ms:.1f}ms, stamp_lib_meta={_stamp_ms:.1f}ms, "
+        f"store_live={_store_final_ms:.1f}ms, build_tree={_tree_ms:.1f}ms")
 
     # Never replace the whole multi-disk STATE with one disk mid-flight.
     multi = False
@@ -1248,14 +1307,21 @@ def scan_videos(
         from vg.roots import get_mounted_roots
 
         multi = len(get_mounted_roots()) > 1
-    except Exception:
+    except Exception as _exc:
+        log(f"[扫描] 检测多根失败，按单根处理: {_exc}")
         multi = False
 
     if multi:
         # Leave other disks intact; unified publish happens after save_index.
         pass
     else:
-        rebuild_indexes(found)
+        _rebuild_t0 = time.perf_counter()
+        try:
+            rebuild_indexes(found)
+        except Exception as _exc:
+            log(f"[扫描] rebuild_indexes 失败，STATE 可能不一致: {_exc}")
+        _rebuild_ms = (time.perf_counter() - _rebuild_t0) * 1000.0
+        log(f"[计时] rebuild_indexes: {_rebuild_ms:.1f}ms")
 
     extra = f"（{len(errors)} 个目录跳过）" if errors else ""
     tip = (
@@ -1267,7 +1333,12 @@ def scan_videos(
     log(f"[扫描] 完成，共 {len(found)} 个{tip}{extra}")
     saved_counts = walk_counts
     saved_n = sum(saved_counts.values())
-    save_index(cache, root, found, file_count=saved_n, folder_counts=saved_counts)
+    _save_t0 = time.perf_counter()
+    _save_ok = save_index(cache, root, found, file_count=saved_n, folder_counts=saved_counts)
+    _save_ms = (time.perf_counter() - _save_t0) * 1000.0
+    if not _save_ok:
+        log(f"[扫描] save_index 返回失败！缓存可能未持久化，下次启动将重新扫描")
+    log(f"[计时] save_index: {_save_ms:.1f}ms, 视频={len(found)}, ok={_save_ok}")
     try:
         sync_disk_lib_memory(root_s, found)
     except Exception as e:
@@ -1312,8 +1383,12 @@ def scan_videos(
                     publish_unified_library()
                 else:
                     rebuild_indexes(found)
-            except Exception:
-                rebuild_indexes(found)
+            except Exception as _exc2:
+                log(f"[扫描] 最终回退 rebuild_indexes 也失败: {_exc2}")
+                try:
+                    rebuild_indexes(found)
+                except Exception as _exc3:
+                    log(f"[扫描] rebuild_indexes 彻底失败: {_exc3}")
     elif not ffmpeg:
         STATE["thumb_progress"] = "未找到 ffmpeg，已跳过预览图（安装后重启可生成）"
         log("[预览图] 未找到 ffmpeg，已跳过")

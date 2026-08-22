@@ -99,7 +99,7 @@ from vg.scan import start_scan
 from vg.search import parse_search_query, video_matches_query
 from vg.series import collapse_to_series_cards, series_episodes
 from vg.state import STATE, video_query_cache_get, video_query_cache_put
-from vg.taxonomy import ensure_video_taxonomy, taxonomy_facets
+from vg.taxonomy import ensure_video_taxonomy, taxonomy_facets, taxonomy_facets_pair
 from vg.thumb_jobs import (
     THUMB_PRIORITY_VISIBLE,
     note_frontend_activity,
@@ -305,7 +305,14 @@ def _serve_cached_videos_response():
         g._diag_started = time.perf_counter()
         g._diag_request_id = diagnostic_request_id()
     # This hook can return before later before_request handlers run.
-    note_frontend_activity(0.45)
+    try:
+        _off = max(0, int(request.args.get("offset", 0) or 0))
+    except ValueError:
+        _off = 0
+    note_frontend_activity(
+        0.45,
+        source=f"api_videos_cache_hook:offset={_off}",
+    )
     key = (
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
@@ -328,11 +335,23 @@ def _let_foreground_requests_preempt_thumbnails():
         return None
     path = request.path or ""
     if path.startswith(("/stream/", "/playlist/", "/hls/")):
-        note_frontend_activity(4.0)
-    elif path in ("/", "/api/tree", "/api/videos", "/api/videos-by-ids") or path.startswith(
-        ("/thumb/", "/api/series/")
-    ):
-        note_frontend_activity(0.45)
+        note_frontend_activity(4.0, source=f"playback:{path.split('/',2)[-1][:40]}")
+    elif path == "/":
+        note_frontend_activity(0.45, source="home_page")
+    elif path == "/api/tree":
+        note_frontend_activity(0.45, source="api_tree")
+    elif path == "/api/videos":
+        try:
+            _off = max(0, int(request.args.get("offset", 0) or 0))
+        except ValueError:
+            _off = 0
+        note_frontend_activity(0.45, source=f"api_videos:offset={_off}")
+    elif path == "/api/videos-by-ids":
+        note_frontend_activity(0.45, source="api_videos_by_ids")
+    elif path.startswith("/thumb/"):
+        note_frontend_activity(0.45, source=f"thumb:{path.split('/',2)[-1][:40]}")
+    elif path.startswith("/api/series/"):
+        note_frontend_activity(0.45, source=f"api_series:{path.split('/',3)[-1][:40]}")
     return None
 
 
@@ -431,9 +450,11 @@ def _cache_videos_response(resp):
 
 @app.route("/")
 def index():
-    """返回页面；用字符串注入盘符 JSON，不依赖 Jinja，避免 {{ }} 原样显示。"""
+    """返回页面；用字符串注入盘符 JSON，不依赖 Jinja，避免 {{ }} 原样展示。"""
+    page_served = time.perf_counter()
     html_path = APP_DIR / "templates" / "index.html"
     html = html_path.read_text(encoding="utf-8")
+    html_size = len(html)
     try:
         drives = list_drives_info()
         root = STATE["root"]
@@ -450,14 +471,26 @@ def index():
             ensure_ascii=False,
         )
     except Exception as e:
-        print(f"【错误】页面注入盘符失败: {e}")
+        log(f"[错误] 页面注入盘符失败: {e}")
         payload = '{"drives":[],"current":"","scanning":false}'
     boot = f"<script>window.__BOOT_DRIVES__ = {payload};</script>"
     if "</head>" in html:
         html = html.replace("</head>", boot + "\n</head>", 1)
     else:
         html = boot + html
-    return Response(html, mimetype="text/html; charset=utf-8")
+    _page_serve_ms = (time.perf_counter() - page_served) * 1000.0
+    log(
+        f"[页面] index.html 已发送: {html_size} 字节, "
+        f"视频={len(STATE.get('videos', []))}, "
+        f"扫描中={STATE.get('scanning')}, 耗时={_page_serve_ms:.1f}ms"
+    )
+    resp = Response(html, mimetype="text/html; charset=utf-8")
+    # Prevent browser from caching the HTML — ensures JS changes are
+    # picked up immediately on refresh without Ctrl+Shift+R.
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/api/client-log", methods=["POST"])
@@ -613,20 +646,54 @@ def _build_tree_payload(lib: str) -> dict:
         categories = facets.get("categories") or []
         count = int(facets.get("count") or len(videos))
     else:
+        # Per-segment timing inside the facets recomputation branch.
+        # Previous logs showed ``facets_ms=882`` but ``taxonomy_facets_pair``
+        # only accounted for ~3.5ms — the gap is in this loop (type/cat/genre
+        # counting) and the subsequent list builds.  We split:
+        #   loop_ms        : the for-loop over all videos
+        #     genre_ms     : cumulative ensure_video_genres() time
+        #     cat_ms       : cumulative _video_category() time
+        #   genre_hits/misses : whether ensure_video_genres found a cached
+        #                       non-empty list or re-ran detect_genres
+        #                       (empty genres [] is falsy → always misses)
+        #   build_types_ms / build_genres_ms / build_cat_ms : list construction
+        #   taxonomy_ms    : taxonomy_facets_pair (also has its own detail line)
+        loop_t0 = time.perf_counter()
         type_counts: dict[str, int] = {}
         cat_counts: dict[str, int] = {}
         genre_counts: dict[str, int] = {}
+        genre_ms = 0.0
+        cat_ms = 0.0
+        genre_hits = 0
+        genre_misses = 0
         for v in videos:
             ext = (v.get("ext") or "").lower() or "unknown"
             type_counts[ext] = type_counts.get(ext, 0) + 1
+            tc = time.perf_counter()
             cat = _video_category(v)
+            cat_ms += (time.perf_counter() - tc) * 1000.0
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            # Pre-check genre cache hit (non-empty list) to attribute time
+            # to "actually running detect_genres" vs "reading cached field".
+            cached_genres = v.get("genres")
+            if isinstance(cached_genres, list) and cached_genres:
+                genre_hits += 1
+            else:
+                genre_misses += 1
+            tg = time.perf_counter()
             for g in ensure_video_genres(v):
                 genre_counts[g] = genre_counts.get(g, 0) + 1
+            genre_ms += (time.perf_counter() - tg) * 1000.0
+        loop_ms = (time.perf_counter() - loop_t0) * 1000.0
+
+        bt_t0 = time.perf_counter()
         types = [
             {"ext": ext, "count": cnt, "label": ext.lstrip(".").upper() or "未知"}
             for ext, cnt in sorted(type_counts.items(), key=lambda x: (-x[1], x[0]))
         ]
+        build_types_ms = (time.perf_counter() - bt_t0) * 1000.0
+
+        bg_t0 = time.perf_counter()
         genre_order = {name: i for i, (name, _) in enumerate(GENRE_DEFS)}
         genres = [
             {"id": name, "name": name, "count": cnt}
@@ -636,13 +703,47 @@ def _build_tree_payload(lib: str) -> dict:
             )
             if cnt > 0
         ]
+        build_genres_ms = (time.perf_counter() - bg_t0) * 1000.0
+
+        bc_t0 = time.perf_counter()
         categories = build_category_facets(cat_counts)
-        themes = taxonomy_facets(videos, "themes")
-        backgrounds = taxonomy_facets(videos, "backgrounds")
+        build_cat_ms = (time.perf_counter() - bc_t0) * 1000.0
+
+        # Single-pass taxonomy facets (themes + backgrounds together) instead
+        # of two separate full-list scans.  For a 2785-video catalog this was
+        # the dominant cost in tree_build (facets_ms ~ 721 ms out of 907 ms).
+        tx_t0 = time.perf_counter()
+        themes, backgrounds = taxonomy_facets_pair(videos)
+        taxonomy_ms = (time.perf_counter() - tx_t0) * 1000.0
+
         count = len(videos)
+
+        diagnostic_emit(
+            "PERF",
+            "tree_build_facets_breakdown",
+            force=True,
+            videos=len(videos),
+            loop_ms=f"{loop_ms:.1f}",
+            genre_ms=f"{genre_ms:.1f}",
+            cat_ms=f"{cat_ms:.1f}",
+            genre_hits=genre_hits,
+            genre_misses=genre_misses,
+            build_types_ms=f"{build_types_ms:.1f}",
+            build_genres_ms=f"{build_genres_ms:.1f}",
+            build_cat_ms=f"{build_cat_ms:.1f}",
+            taxonomy_ms=f"{taxonomy_ms:.1f}",
+        )
     facets_ms = (time.perf_counter() - facets_started) * 1000.0
     mounts_started = time.perf_counter()
-    mounts = roots_summary(all_videos)
+    # Pass the scoped ``videos`` (already materialised from SQLite/memory)
+    # as the snapshot source, not ``all_videos = STATE["videos"] or []``.
+    # During a scan STATE["videos"] may still be empty (publish happens at
+    # the end), which made ``use_snapshot`` flip to False and forced
+    # ``roots_summary`` to reopen every per-disk catalog for each root:
+    #     roots_summary_slow 206ms  D:\:56.5ms/0 | E:\:43.0ms/0 | G:\:77.5ms/0
+    # The scoped ``videos`` list is a valid snapshot of the current catalog
+    # state and lets the O(N) bucketisation path run instead.
+    mounts = roots_summary(videos)
     mounts_ms = (time.perf_counter() - mounts_started) * 1000.0
     payload = {
         "tree": tree,
@@ -684,8 +785,10 @@ def api_tree():
     cache_result = "hit" if heavy is not None else "miss"
     if heavy is None:
         heavy = _build_tree_payload(lib)
-        if not STATE.get("scanning") and not STATE.get("updating"):
-            _store_tree_payload(cache_key, heavy)
+        # Key already embeds scanning/updating/lib_gen/id(videos), so caching
+        # during a scan is safe: repeated requests with identical (lib + state)
+        # will reuse the payload instead of rebuilding for 3–10 seconds each.
+        _store_tree_payload(cache_key, heavy)
 
     serialize_started = time.perf_counter()
     response = jsonify({
@@ -1107,6 +1210,13 @@ def api_videos():
     elif not sql_roots:
         sql_skip_reason = "no_roots"
     sql_eligible = not sql_skip_reason
+    # Time the segments that happen BEFORE ``sql_started``: arg parsing,
+    # parse_search_query, mounted-roots lookup, ``_catalog_caches_for_roots``
+    # and the include_descendants probe.  The existing api_videos_sql PERF
+    # line only reports sql_ms + facets_ms + thumb_meta_ms + serialize_ms,
+    # which previously summed to ~94ms while the request took 1312ms — the
+    # ~1.2s gap lived entirely in this pre-sql setup region.
+    setup_t0 = time.perf_counter()
     if sql_eligible:
         from vg.catalog_db import (
             merge_catalog_facets,
@@ -1115,7 +1225,9 @@ def api_videos():
             query_catalogs_page,
         )
 
+        _caches_t0 = time.perf_counter()
         sql_caches = _catalog_caches_for_roots(sql_roots)
+        caches_ms = (time.perf_counter() - _caches_t0) * 1000.0
         if not sql_caches:
             sql_skip_reason = "no_catalog_cache"
             sql_eligible = False
@@ -1123,8 +1235,17 @@ def api_videos():
             # Match Python scope: exact folder only when user unchecked「全部」
             # on a folder that still has children; otherwise include descendants.
             include_descendants = True
+            probe_ms = 0.0
+            probe_count = 0
+            has_children = False
             if folder and not folder_all:
-                has_children = False
+                # ``query_catalog_facets`` here is a full SQLite scan over the
+                # catalog just to detect subfolders.  When sql_caches spans
+                # multiple disks this is called once per cache and can quietly
+                # dominate the request (observed: total 1.3s with only 94ms
+                # attributed across sql_ms/facets_ms/thumb_meta_ms/serialize_ms
+                # — the ~1.2s gap was this probe plus _catalog_caches_for_roots).
+                _probe_started = time.perf_counter()
                 for cache in sql_caches:
                     probe = query_catalog_facets(
                         cache,
@@ -1134,11 +1255,30 @@ def api_videos():
                         ext=ext,
                         search=q_raw,
                     )
+                    probe_count += 1
                     if probe.get("subfolders"):
                         has_children = True
                         break
                 include_descendants = not has_children
+                probe_ms = (time.perf_counter() - _probe_started) * 1000.0
+                if probe_ms >= 100.0:
+                    diagnostic_emit(
+                        "WARN",
+                        "api_videos_sql_include_descendants_probe_slow",
+                        force=True,
+                        request_id=getattr(g, "_diag_request_id", ""),
+                        probe_ms=f"{probe_ms:.1f}",
+                        probes=probe_count,
+                        caches=len(sql_caches),
+                        folder=folder,
+                        category=category or "all",
+                        ext=ext,
+                        has_children=has_children,
+                        include_descendants=include_descendants,
+                    )
 
+            # Total pre-sql setup time (parse + caches lookup + probe).
+            setup_ms = (time.perf_counter() - setup_t0) * 1000.0
             sql_started = time.perf_counter()
             query_kwargs = dict(
                 category=category,
@@ -1298,14 +1438,29 @@ def api_videos():
                 "facets_included": offset == 0,
             })
             serialize_ms = (time.perf_counter() - serialize_started) * 1000.0
+            total_ms = (time.perf_counter() - api_started) * 1000.0
+            # Verify the per-segment times account for the whole request.
+            # Expected: setup_ms + sql_ms + thumb_meta_ms + facets_ms
+            #           + level_facet_ms + serialize_ms ≈ total_ms
+            # If the gap is large, the missing time is in an untimed region
+            # (e.g. between segments, or in a path we didn't instrument).
+            attributed_ms = (
+                setup_ms + sql_ms + thumb_meta_ms + facets_ms
+                + level_facet_ms + serialize_ms
+            )
+            gap_ms = total_ms - attributed_ms
             diagnostic_perf(
                 "api_videos_sql",
-                (time.perf_counter() - api_started) * 1000.0,
+                total_ms,
                 force=True,
                 rows=len(slim),
                 total_rows=total,
                 offset=offset,
                 caches=len(sql_caches),
+                setup_ms=f"{setup_ms:.1f}",
+                caches_ms=f"{caches_ms:.1f}",
+                probe_ms=f"{probe_ms:.1f}",
+                probe_count=probe_count,
                 sql_ms=f"{sql_ms:.1f}",
                 facets_ms=f"{facets_ms:.1f}",
                 base_facet_ms=f"{base_facet_ms:.1f}",
@@ -1313,6 +1468,7 @@ def api_videos():
                 level_facet_ms=f"{level_facet_ms:.1f}",
                 thumb_meta_ms=f"{thumb_meta_ms:.1f}",
                 serialize_ms=f"{serialize_ms:.1f}",
+                gap_ms=f"{gap_ms:.1f}",
                 response_bytes=response.calculate_content_length(),
                 category=category or "all",
                 folder=folder,
@@ -1322,6 +1478,26 @@ def api_videos():
                 type_facets=len(facets.get("types") or []),
                 sort=sort,
             )
+            if gap_ms >= 100.0:
+                # Surface unattributed time so we know there's still a
+                # hidden hot spot we haven't instrumented.
+                diagnostic_emit(
+                    "WARN",
+                    "api_videos_sql_unattributed_time",
+                    force=True,
+                    request_id=getattr(g, "_diag_request_id", ""),
+                    total_ms=f"{total_ms:.1f}",
+                    attributed_ms=f"{attributed_ms:.1f}",
+                    gap_ms=f"{gap_ms:.1f}",
+                    setup_ms=f"{setup_ms:.1f}",
+                    sql_ms=f"{sql_ms:.1f}",
+                    facets_ms=f"{facets_ms:.1f}",
+                    thumb_meta_ms=f"{thumb_meta_ms:.1f}",
+                    level_facet_ms=f"{level_facet_ms:.1f}",
+                    serialize_ms=f"{serialize_ms:.1f}",
+                    offset=offset,
+                    folder=folder,
+                )
             return response
 
     if sql_skip_reason:
@@ -1339,7 +1515,6 @@ def api_videos():
 
     query_key = (
         int(STATE.get("lib_gen") or 0),
-        id(STATE.get("videos")),
         lib,
         category,
         folder,
@@ -1428,13 +1603,14 @@ def api_videos():
         slim.append(row)
 
     page_ms = (time.perf_counter() - page_started) * 1000.0
+    has_more = offset + len(slim) < total
     payload = {
         "videos": slim,
         "count": total,
         "raw_count": raw_count,
         "offset": offset,
         "limit": limit,
-        "has_more": offset + len(slim) < total,
+        "has_more": has_more,
         "genres": scoped_genres,
         "themes": scoped_themes,
         "backgrounds": scoped_backgrounds,
@@ -1448,6 +1624,47 @@ def api_videos():
     response = jsonify(payload)
     serialize_ms = (time.perf_counter() - serialize_started) * 1000.0
     total_ms = (time.perf_counter() - api_started) * 1000.0
+
+    scrolling = offset > 0
+    # Diagnostics for scroll/pagination jitter:
+    #   - overshoot: client asked for an offset beyond the current result set.
+    #     This is the #1 backend-side cause of "suddenly has_more becomes
+    #     false on a still-loading page and the browser stops paginating
+    #     even though the user knows more videos exist".
+    #   - empty_page_on_scroll: scrolling request that returned zero rows is
+    #     a UI bug candidate (the page will silently stall instead of loading
+    #     more).
+    overshoot = offset > 0 and offset >= total
+    empty_page_on_scroll = scrolling and len(slim) == 0
+    jitter_warn = overshoot or empty_page_on_scroll or (scrolling and total_ms >= 800.0)
+    if jitter_warn:
+        from vg.diagnostics import emit as _diag_emit
+
+        _diag_emit(
+            "WARN",
+            "api_videos_scroll_jitter",
+            force=True,
+            request_id=getattr(g, "_diag_request_id", ""),
+            scrolling=scrolling,
+            offset=offset,
+            limit=limit,
+            total_rows=total,
+            returned_rows=len(slim),
+            has_more=has_more,
+            raw_count=raw_count,
+            overshoot=overshoot,
+            empty_page_on_scroll=empty_page_on_scroll,
+            total_ms=f"{total_ms:.1f}",
+            query_ms=f"{query_ms:.1f}",
+            page_ms=f"{page_ms:.1f}",
+            lib=lib or "all",
+            category=category or "all",
+            folder=folder,
+            folder_all=folder_all,
+            ext=ext,
+            sort=sort,
+            view=view,
+        )
     diagnostic_perf(
         "api_videos",
         total_ms,
@@ -1459,6 +1676,11 @@ def api_videos():
         rows=len(slim),
         total_rows=total,
         offset=offset,
+        limit=limit,
+        has_more=has_more,
+        scrolling=scrolling,
+        overshoot=overshoot,
+        empty_page=empty_page_on_scroll,
         cache=query_cache,
         response_bytes=response.calculate_content_length(),
         category=category or "all",
@@ -1697,7 +1919,7 @@ def thumb(vid: str):
     # Root hint was given but file is not ready yet: do not block on
     # ensure_library / full-catalog search for deferred card loads.
     if prefer_root and defer:
-        note_frontend_activity(0.8)
+        note_frontend_activity(0.8, source=f"thumb_deferred:{prefer_root[:40]}")
         item = None
         if STATE.get("scanning") or STATE.get("updating"):
             # The scan owns the catalog/cache transition.  Loading the whole

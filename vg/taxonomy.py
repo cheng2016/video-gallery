@@ -177,3 +177,94 @@ def taxonomy_facets(videos: list[dict], axis: str) -> list[dict]:
         )
         if count > 0
     ]
+
+
+def taxonomy_facets_pair(videos: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Count both taxonomy axes in a single pass.
+
+    The previous ``_build_tree_payload`` flow called
+    ``taxonomy_facets(videos, "themes")`` and
+    ``taxonomy_facets(videos, "backgrounds")`` separately, each iterating
+    the entire video list and calling ``ensure_video_taxonomy``.
+
+    This folded single pass also emits a structured PERF line
+    ``taxonomy_facets_pair_detail`` that splits the total time into:
+      - ``cold``  : videos whose taxonomy_ver != TAXONOMY_VERSION (need
+                    ``classify_video_taxonomy`` regex matching)
+      - ``hot``   : videos already classified (read cached fields only)
+      - ``classify_ms`` : time spent inside classify_video_taxonomy (cold)
+      - ``iterate_ms``  : time spent counting + reading cached fields (hot)
+
+    This lets the log tell whether a slow ``facets_ms`` is dominated by
+    cold classification (one-time cost, expected on first tree_build) or
+    by per-item overhead even when everything is cached (would indicate
+    a real algorithmic problem worth optimising).
+    """
+    import time
+    from vg.diagnostics import emit
+
+    t_start = time.perf_counter()
+    theme_counts: dict[str, int] = {}
+    bg_counts: dict[str, int] = {}
+    cold_count = 0
+    hot_count = 0
+    classify_ms = 0.0
+    for video in videos:
+        try:
+            already = (
+                int(video.get("taxonomy_ver") or 0) == TAXONOMY_VERSION
+                and isinstance(video.get("themes"), list)
+                and isinstance(video.get("backgrounds"), list)
+            )
+        except (TypeError, ValueError):
+            already = False
+        if already:
+            hot_count += 1
+            themes = video["themes"]
+            backgrounds = video["backgrounds"]
+        else:
+            cold_count += 1
+            tc = time.perf_counter()
+            themes, backgrounds = classify_video_taxonomy(
+                video.get("rel") or "",
+                video.get("name") or "",
+            )
+            classify_ms += (time.perf_counter() - tc) * 1000.0
+            video["themes"] = themes
+            video["backgrounds"] = backgrounds
+            video["taxonomy_ver"] = TAXONOMY_VERSION
+        for value in themes:
+            theme_counts[value] = theme_counts.get(value, 0) + 1
+        for value in backgrounds:
+            bg_counts[value] = bg_counts.get(value, 0) + 1
+    iterate_ms = (time.perf_counter() - t_start) * 1000.0 - classify_ms
+    emit(
+        "PERF",
+        "taxonomy_facets_pair_detail",
+        force=True,
+        videos=len(videos),
+        cold=cold_count,
+        hot=hot_count,
+        classify_ms=f"{classify_ms:.1f}",
+        iterate_ms=f"{iterate_ms:.1f}",
+        total_ms=f"{classify_ms + iterate_ms:.1f}",
+    )
+    theme_order = {name: index for index, (name, _) in enumerate(THEME_DEFS)}
+    bg_order = {name: index for index, (name, _) in enumerate(BACKGROUND_DEFS)}
+    themes_facets = [
+        {"id": name, "name": name, "count": count}
+        for name, count in sorted(
+            theme_counts.items(),
+            key=lambda item: (theme_order.get(item[0], 999), -item[1], item[0]),
+        )
+        if count > 0
+    ]
+    backgrounds_facets = [
+        {"id": name, "name": name, "count": count}
+        for name, count in sorted(
+            bg_counts.items(),
+            key=lambda item: (bg_order.get(item[0], 999), -item[1], item[0]),
+        )
+        if count > 0
+    ]
+    return themes_facets, backgrounds_facets

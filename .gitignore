@@ -9,3 +9,16 @@ startup.log
 run.log
 dist/
 build/
+logs/
+.qoder/
+_th.py
+_jit.py
+_jit2.py
+_chk.py
+_analyze_log.py
+_recheck.py
+_rechk.py
+_rechk2.py
+_rechk3.py
+_rechk4.py
+_cachechk.py
