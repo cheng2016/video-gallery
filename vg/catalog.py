@@ -202,7 +202,8 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
     STATE["by_thumb_id"] = indexes["by_thumb_id"]
     # Existing ownership must survive a unified multi-disk rebuild.
     stamp_lib_meta(videos, overwrite=False)
-    STATE["facets"] = indexes["facets"]
+    facets = indexes["facets"]
+    STATE["facets"] = facets
     STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
     invalidate_query_caches()
     try:
@@ -211,6 +212,33 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
         invalidate_response_caches()
     except ImportError:
         pass
+    # Warm the on-disk facets cache so a restart does not need to re-count
+    # 2785 videos again (was ~13 ms facets_ms, but with per-scope tree +
+    # type/genre counting on every cold start it adds up quickly).  This is
+    # best-effort: any write failure is logged via save_facets_disk_cache's
+    # own diagnostics but must not crash state publication.
+    try:
+        from vg.catalog_cache import (
+            emit_save_log,
+            save_facets_disk_cache,
+        )
+
+        save_stats = save_facets_disk_cache(
+            facets,
+            len(videos),
+            only_if_missing=False,
+        )
+        event = save_stats.pop("event", "facets_disk_cache_save")
+        # "skip_reason" means nothing was written; treat as INFO so it does
+        # not spam WARN on every per-root catalog load during startup.
+        if save_stats.get("skip_reason") and not save_stats.get("bytes_written"):
+            emit_save_log("INFO", event, **save_stats)
+        else:
+            emit_save_log("PERF", event, force=True, **save_stats)
+    except Exception as exc:
+        from vg.diagnostics import error
+
+        error("facets_disk_cache_save_unexpected_exception", exc)
 
 
 def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> None:

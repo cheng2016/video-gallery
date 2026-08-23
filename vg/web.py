@@ -171,10 +171,23 @@ def _video_response_cache_key() -> tuple:
     existing = getattr(g, "_video_response_cache_key", None)
     if existing is not None:
         return existing
+    try:
+        _off = max(0, int(request.args.get("offset", 0) or 0))
+    except ValueError:
+        _off = 0
+    try:
+        _lim_raw = request.args.get("limit", 60) or 60
+        _lim = max(1, min(200, int(_lim_raw)))
+    except ValueError:
+        _lim = 60
     return (
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
         _stable_request_args(),
+        # 分页参数必须单独入 key；否则 loadMore offset=20 的结果会覆盖
+        # 首屏 offset=0 缓存，导致筛选栏（types/genres 等）被意外清空。
+        _off,
+        _lim,
     )
 
 
@@ -205,6 +218,12 @@ def _store_video_response(key: tuple, response: Response) -> None:
             limit=_VIDEO_RESPONSE_CACHE_MAX_BYTES // 2,
         )
         return
+    _off = getattr(g, "_video_response_cache_off", None)
+    _lim = getattr(g, "_video_response_cache_lim", None)
+    try:
+        sample = json.loads(value[0]) if value[0] else {}
+    except Exception:
+        sample = {}
     with diagnostic_timed_lock(
         _video_response_cache_lock,
         "video_response_cache_write",
@@ -223,6 +242,41 @@ def _store_video_response(key: tuple, response: Response) -> None:
         ):
             _, removed = _video_response_cache.popitem(last=False)
             _video_response_cache_bytes -= len(removed[0])
+    # 每次新写入都留痕：方便下次排查「响应缓存返回了错误内容」时直接对比
+    # key 里的 offset/limit 与实际响应体是否一致、以及 facets 数量是否合理。
+    # offset=0 首屏写入强制打日志；offset>0 的翻页写入通常 types_len=0，
+    # 为避免刷屏仅 force=False；任何 mismatch 都升 WARN。
+    res_offset = sample.get("offset")
+    res_types_len = (
+        len(sample.get("types") or [])
+        if isinstance(sample.get("types"), list)
+        else -1
+    )
+    mismatch = (
+        (res_offset is not None and res_offset != _off)
+        or (_off == 0 and res_types_len == 0)
+    )
+    emit_force = bool(mismatch or _off == 0 or _lim >= 60)
+    emit_level = "WARN" if mismatch else "INFO"
+    diagnostic_emit(
+        emit_level,
+        "api_videos_response_cache_write_detail",
+        force=emit_force,
+        request_id=getattr(g, "_diag_request_id", ""),
+        offset=_off,
+        limit=_lim,
+        res_offset=res_offset,
+        res_rows=len(sample.get("videos") or []) if isinstance(sample.get("videos"), list) else -1,
+        res_count=sample.get("count"),
+        res_types_len=res_types_len,
+        res_genres_len=len(sample.get("genres") or []) if isinstance(sample.get("genres"), list) else -1,
+        res_subfolders_len=len(sample.get("subfolders") or []) if isinstance(sample.get("subfolders"), list) else -1,
+        offset_match=(res_offset is None or res_offset == _off),
+        zero_types_ok=(not _off == 0 or res_types_len > 0),
+        cached_body_bytes=size,
+        cache_entries=len(_video_response_cache),
+        cache_bytes_total=_video_response_cache_bytes,
+    )
 
 
 def invalidate_response_caches() -> None:
@@ -309,6 +363,11 @@ def _serve_cached_videos_response():
         _off = max(0, int(request.args.get("offset", 0) or 0))
     except ValueError:
         _off = 0
+    try:
+        _lim_raw = request.args.get("limit", 60) or 60
+        _lim = max(1, min(200, int(_lim_raw)))
+    except ValueError:
+        _lim = 60
     note_frontend_activity(
         0.45,
         source=f"api_videos_cache_hook:offset={_off}",
@@ -317,14 +376,57 @@ def _serve_cached_videos_response():
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
         _stable_request_args(),
+        # 分页参数必须单独入 key；否则 loadMore offset=20 的结果（facets/genres/types 空）
+        # 会覆盖 offset=0 首屏缓存，下次 polling refresh 命中后把筛选栏清空，
+        # 视觉上就是「滑动一会儿标签突然变了/没了」。
+        _off,
+        _lim,
     )
     g._video_response_cache_key = key
+    g._video_response_cache_off = _off
+    g._video_response_cache_lim = _lim
     cached = _cached_video_response(key)
     if cached is None:
         diagnostic_aggregate("api_videos_response_cache_miss")
         return None
     diagnostic_aggregate("api_videos_response_cache_hit")
     body, status, mimetype = cached
+    try:
+        sample = json.loads(body) if body else {}
+    except Exception:
+        sample = {}
+    res_offset = sample.get("offset")
+    res_types_len = (
+        len(sample.get("types") or [])
+        if isinstance(sample.get("types"), list)
+        else -1
+    )
+    # 正常命中不刷屏（force=False INFO）；但 offset=0 的首屏命中必须强制留痕，
+    # 以及"请求的 offset/limit 与响应体落盘时记录的不一致"也是 cache key
+    # 错乱的硬证据，打 WARN 级别告警。
+    mismatch = (
+        (res_offset is not None and res_offset != _off)
+        or (_off == 0 and res_types_len == 0)
+    )
+    emit_force = bool(mismatch or _off == 0 or _lim >= 60)
+    emit_level = "WARN" if mismatch else "INFO"
+    diagnostic_emit(
+        emit_level,
+        "api_videos_response_cache_hit_detail",
+        force=emit_force,
+        request_id=getattr(g, "_diag_request_id", ""),
+        offset=_off,
+        limit=_lim,
+        res_offset=res_offset,
+        res_rows=len(sample.get("videos") or []) if isinstance(sample.get("videos"), list) else -1,
+        res_count=sample.get("count"),
+        res_types_len=res_types_len,
+        res_genres_len=len(sample.get("genres") or []) if isinstance(sample.get("genres"), list) else -1,
+        res_subfolders_len=len(sample.get("subfolders") or []) if isinstance(sample.get("subfolders"), list) else -1,
+        offset_match=(res_offset is None or res_offset == _off),
+        zero_types_ok=(not _off == 0 or res_types_len > 0),
+        cached_body_bytes=len(body),
+    )
     return Response(body, status=status, mimetype=mimetype)
 
 
@@ -619,12 +721,59 @@ def _build_tree_payload(lib: str) -> dict:
     started = time.perf_counter()
     root = STATE["root"]
     all_videos = STATE["videos"] or []
+    scanning = bool(STATE.get("scanning"))
     scope_started = time.perf_counter()
     videos = videos_for_scope(lib or None)
     scope_ms = (time.perf_counter() - scope_started) * 1000.0
+
+    # ------------------------------------------------------------------
+    # Disk-cache read attempt (tree + facets for the unified case).
+    # Skip during a scan: STATE["lib_gen"] bumps every publish and the
+    # live catalog is only partially built, so reads would almost always
+    # signature-mismatch and waste I/O.
+    # ------------------------------------------------------------------
+    tree_cache_stats: dict | None = None
+    facets_disk_stats: dict | None = None
+    tree_cache_used = False
+    facets_disk_used = False
+
+    if not scanning and len(all_videos) > 0 and len(videos) > 0:
+        try:
+            from vg.catalog_cache import (
+                emit_load_log,
+                load_facets_disk_cache,
+                load_tree_disk_cache,
+            )
+        except Exception:
+            emit_load_log = None  # type: ignore
+            load_facets_disk_cache = None  # type: ignore
+            load_tree_disk_cache = None  # type: ignore
+    else:
+        emit_load_log = None  # type: ignore
+        load_facets_disk_cache = None  # type: ignore
+        load_tree_disk_cache = None  # type: ignore
+
+    # Tree read attempt
     tree_started = time.perf_counter()
-    tree = tree_for_scope(lib or None)
+    tree = None
+    if load_tree_disk_cache is not None:
+        loaded_tree, ts = load_tree_disk_cache(lib, len(videos))
+        tree_cache_stats = ts
+        if loaded_tree is not None:
+            tree = loaded_tree
+            tree_cache_used = True
+    if tree is None:
+        tree = tree_for_scope(lib or None)
     tree_ms = (time.perf_counter() - tree_started) * 1000.0
+    if emit_load_log is not None and tree_cache_stats is not None:
+        ev = tree_cache_stats.pop("event", "tree_disk_cache_load")
+        if tree_cache_stats.get("hit"):
+            tree_cache_stats["tree_ms_if_recompute"] = (
+                f"{tree_ms:.1f}"  # total actually spent reading the cache
+            )
+            emit_load_log("PERF", ev, force=True, from_build_tree=True, **tree_cache_stats)
+        elif tree_cache_stats.get("miss_reason"):
+            emit_load_log("PERF", ev, force=True, from_build_tree=True, **tree_cache_stats)
 
     # Prefer precomputed facets for the unified catalog; scoped views recompute.
     # Also reject cache when it disagrees with the folder tree (same video source).
@@ -635,8 +784,35 @@ def _build_tree_payload(lib: str) -> dict:
         and facets
         and int(facets.get("count") or -1) == len(videos)
         and int(facets.get("count") or -1) == tree_count
-        and not STATE.get("scanning")
+        and not scanning
     )
+    # If STATE["facets"] is not usable but we have a valid disk cache for the
+    # whole-library facets (lib="" matches disk cache's unified scope), fill
+    # it from disk so we skip the per-video counting loop.  Scoped libs always
+    # recompute — the disk facets file only describes the union.
+    if not use_cached and not lib and not scanning and load_facets_disk_cache is not None:
+        loaded_facets, fs = load_facets_disk_cache(len(videos))
+        facets_disk_stats = fs
+        if (
+            loaded_facets is not None
+            and int(loaded_facets.get("count") or -1) == len(videos)
+            and int(loaded_facets.get("count") or -1) == tree_count
+        ):
+            facets = loaded_facets
+            STATE["facets"] = facets  # next callers benefit from the in-memory form
+            use_cached = True
+            facets_disk_used = True
+        if fs:
+            ev = fs.pop("event", "facets_disk_cache_load")
+            if fs.get("hit") or fs.get("miss_reason"):
+                emit_load_log(
+                    "PERF",
+                    ev,
+                    force=True,
+                    from_build_tree=True,
+                    injected=facets_disk_used,
+                    **fs,
+                )
     facets_started = time.perf_counter()
     if use_cached:
         types = facets.get("types") or []
@@ -745,6 +921,88 @@ def _build_tree_payload(lib: str) -> dict:
     # state and lets the O(N) bucketisation path run instead.
     mounts = roots_summary(videos)
     mounts_ms = (time.perf_counter() - mounts_started) * 1000.0
+
+    # Warm on-disk caches lazily (only_if_missing=True) for this payload if
+    # we were forced to recompute any of it.  This is the secondary write
+    # path; the primary one is ``apply_catalog_to_state`` +
+    # ``publish_unified_library``.  Here we cover the edge cases where the
+    # cache file did not exist at state-publish time (e.g. first run on a
+    # new ``STATE["cache_dir"]`` after switching privacy settings, or a
+    # manual deletion of the cache dir while the app runs).
+    #
+    # All write calls are fully wrapped in try/except and self-log via
+    # ``emit_save_log``/diagnostic_error; any exception must not break the
+    # tree response because the in-memory payload is still valid.
+    warm_facets_result: dict = {}
+    warm_tree_result: dict = {}
+    if not scanning and len(videos) > 0:
+        try:
+            from vg.catalog_cache import (
+                emit_save_log as _bs_emit_save,
+                save_facets_disk_cache as _bs_save_facets,
+                save_tree_disk_cache as _bs_save_tree,
+            )
+
+            # Facets warm: only for lib="" (unified scope matches the disk
+            # facets schema count field exactly).
+            if not lib:
+                composed_facets = {
+                    "types": types,
+                    "genres": genres,
+                    "themes": themes,
+                    "backgrounds": backgrounds,
+                    "categories": categories,
+                    "count": count,
+                }
+                warm_facets_result = _bs_save_facets(
+                    composed_facets, len(videos), only_if_missing=True
+                )
+                ev = warm_facets_result.pop("event", "facets_disk_cache_save")
+                if warm_facets_result.get("bytes_written"):
+                    _bs_emit_save(
+                        "PERF",
+                        ev,
+                        force=True,
+                        from_build_tree=True,
+                        lib=lib or "all",
+                        **warm_facets_result,
+                    )
+                elif warm_facets_result.get("skip_reason") and warm_facets_result.get("skip_reason") != "already_valid":
+                    _bs_emit_save(
+                        "WARN",
+                        ev,
+                        force=True,
+                        from_build_tree=True,
+                        lib=lib or "all",
+                        **warm_facets_result,
+                    )
+
+            # Tree warm: for any lib (we compute per-scope trees).
+            warm_tree_result = _bs_save_tree(
+                lib, tree, len(videos), only_if_missing=True
+            )
+            ev = warm_tree_result.pop("event", "tree_disk_cache_save")
+            if warm_tree_result.get("bytes_written"):
+                _bs_emit_save(
+                    "PERF",
+                    ev,
+                    force=True,
+                    from_build_tree=True,
+                    **warm_tree_result,
+                )
+            elif warm_tree_result.get("skip_reason") and warm_tree_result.get("skip_reason") != "already_valid":
+                _bs_emit_save(
+                    "WARN",
+                    ev,
+                    force=True,
+                    from_build_tree=True,
+                    **warm_tree_result,
+                )
+        except Exception as exc:
+            from vg.diagnostics import error
+
+            error("build_tree_payload_cache_warm_unexpected_exception", exc)
+
     payload = {
         "tree": tree,
         "types": types,
@@ -766,6 +1024,8 @@ def _build_tree_payload(lib: str) -> dict:
         categories=len(categories),
         roots=len(mounts),
         facets_cache="hit" if use_cached else "miss",
+        facets_disk_cache="hit" if facets_disk_used else ("miss" if facets_disk_stats is not None else "skip"),
+        tree_disk_cache="hit" if tree_cache_used else ("miss" if tree_cache_stats is not None else "skip"),
         scope_ms=f"{scope_ms:.1f}",
         tree_ms=f"{tree_ms:.1f}",
         facets_ms=f"{facets_ms:.1f}",

@@ -465,17 +465,26 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
     for r in roots:
         root_started = time.perf_counter()
         r_key = _root_compare_key(r)
-        # 优先按盘取片；扫描/更新期间直接复用统一内存快照，避免和
-        # SQLite 写入竞争。扫描发布新 generation 后会走正常目录索引。
+        # 优先按盘取片；调用方显式传了 videos 时优先用内存 bucketize，
+        # 避免和 SQLite 写入竞争；之前的「先查 SQLite，SQLite 非空就不走
+        # bucketize」顺序会导致 /api/roots 即使传了已发布的 2785 条
+        # STATE["videos"] 仍退化为全表扫描，触发 roots_summary_slow。
         subset: list[dict]
         if use_snapshot:
             subset = list(snap_buckets.get(r_key, [])) if snap_buckets is not None else []
+        elif videos is not None:
+            # Explicit snapshot passed by the caller: bucketize once and
+            # consult per-disk SQLite only if this root is absent from the
+            # snapshot (handles freshly-mounted / not-yet-published roots).
+            if snap_buckets is None:
+                snap_buckets = _bucketize(list(videos or []))
+            subset = list(snap_buckets.get(r_key, []))
+            if not subset:
+                subset = _videos_from_root(r)
         else:
+            # No snapshot at all: trust the per-disk catalog as source of
+            # truth, with STATE videos as a fallback.
             subset = _videos_from_root(r)
-            if not subset and videos is not None:
-                if snap_buckets is None:
-                    snap_buckets = _bucketize(list(videos or []))
-                subset = list(snap_buckets.get(r_key, []))
             if not subset and state_videos_raw:
                 if state_buckets is None:
                     state_buckets = _bucketize(list(state_videos_raw or []))
@@ -503,6 +512,11 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
             force=True,
             roots=len(roots),
             scanning=bool(STATE.get("scanning")),
+            updating=bool(STATE.get("updating")),
+            use_snapshot=use_snapshot,
+            explicit_videos=videos is not None,
+            videos_len=len(list(videos or [])),
+            state_videos_len=len(list(STATE.get("videos") or [])),
             per_root="|".join(root_timings),
         )
     return out
@@ -673,6 +687,89 @@ def publish_unified_library() -> int:
     STATE["tree"] = tree_for_scope(None)
     rebuild_indexes(merged)
     STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+    # Warm on-disk cache for facets + per-scope folder trees.
+    # ``rebuild_indexes`` already ran ``save_facets_disk_cache`` via
+    # apply_catalog_to_state, so here we only persist the folder trees:
+    #   (a) the lib="all" merged multi-disk tree (STATE["tree"] above),
+    #   (b) one tree per individual lib so single-disk selections on the
+    #       sidebar also skip the O(N) tree build.
+    try:
+        from vg.catalog_cache import (
+            emit_save_log,
+            save_tree_disk_cache,
+        )
+        import time as _cache_t
+
+        _warm_started = _cache_t.perf_counter()
+        # (a) all
+        all_tree = STATE.get("tree") or {}
+        merged_count = len(merged)
+        warm_stats_list: list[dict] = []
+        if all_tree and merged_count:
+            st = save_tree_disk_cache("", all_tree, merged_count, only_if_missing=False)
+            warm_stats_list.append(st)
+        # (b) per lib (take unique libs from merged videos to cover only the
+        # disks that actually contributed videos this publish)
+        seen_libs: set[str] = set()
+        for v in merged:
+            s = str(v.get("_lib_root") or v.get("root") or "").rstrip("\\/")
+            if s:
+                seen_libs.add(s)
+        for lib_s in seen_libs:
+            try:
+                from vg.web import videos_for_scope  # type: ignore
+            except Exception:
+                videos_for_scope = None  # type: ignore
+            try:
+                scoped_vids = videos_for_scope(lib_s) if videos_for_scope else [
+                    x for x in merged
+                    if str(x.get("_lib_root") or x.get("root") or "").rstrip("\\/") == lib_s
+                ]
+            except Exception:
+                scoped_vids = [
+                    x for x in merged
+                    if str(x.get("_lib_root") or x.get("root") or "").rstrip("\\/") == lib_s
+                ]
+            if not scoped_vids:
+                continue
+            try:
+                per_lib_tree = tree_for_scope(lib_s)
+            except Exception:
+                per_lib_tree = None
+            if per_lib_tree:
+                st = save_tree_disk_cache(
+                    lib_s, per_lib_tree, len(scoped_vids), only_if_missing=False
+                )
+                warm_stats_list.append(st)
+        overall_ms = (_cache_t.perf_counter() - _warm_started) * 1000.0
+        # Aggregate stats into a single PERF line so log scanning tools can
+        # answer "did the cache layer save work on this restart?" with one
+        # search token.
+        written = sum(1 for s in warm_stats_list if s.get("bytes_written"))
+        skipped = sum(1 for s in warm_stats_list if s.get("skip_reason"))
+        emit_save_log(
+            "PERF",
+            "publish_tree_disk_cache_warm",
+            force=True,
+            scope_count=len(warm_stats_list),
+            written=written,
+            skipped=skipped,
+            total_ms=f"{overall_ms:.1f}",
+            merged_count=merged_count,
+            libs=sorted(seen_libs),
+        )
+        # One detailed line per scope — not force=True to avoid spam.  Still
+        # useful for targeted debug if full logging is on.
+        for st in warm_stats_list:
+            ev = st.pop("event", "tree_disk_cache_save")
+            if st.get("bytes_written"):
+                emit_save_log("PERF", ev, force=True, **st)
+            elif st.get("skip_reason"):
+                emit_save_log("INFO", ev, **st)
+    except Exception as exc:
+        from vg.diagnostics import error
+
+        error("publish_tree_disk_cache_warm_unexpected_exception", exc)
     # Clear live scan snapshot once the unified catalog is published.
     if STATE.get("scan_live") is not None:
         STATE["scan_live"] = None

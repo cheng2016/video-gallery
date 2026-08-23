@@ -1682,6 +1682,16 @@
       trees: Object.create(null), // lib -> folder tree
       paintedTreeLib: null,
       catalogCount: 0,   // all-disks total; never replace with a single-disk list count
+      _sidebarFingerprint: "",   // applyNavChrome 总指纹，完全一致时跳过 5 大容器 DOM 重建
+      _treeFingerprint: "",      // syncNavFromCache 左栏 folder tree 渲染指纹
+      _lastCatTagsKey: "",       // renderCategoryTags 输入指纹（避免软刷新无意义 innerHTML 重写）
+      _lastCatTagsHtml: "",      // renderCategoryTags 输出 HTML 缓存
+      _lastChannelsHtml: "",     // renderChannels 输出 HTML 缓存
+      _lastChannelsKey: "",      // renderChannels 输入指纹
+      _lastExtHtml: "",          // renderExtTags 输出 HTML 缓存
+      _lastExtKey: "",           // renderExtTags 输入指纹
+      _lastSortHtml: "",         // renderSortTags 输出 HTML 缓存
+      _lastSortKey: "",          // renderSortTags 输入指纹
     };
 
     const CHANNEL_ICO = {
@@ -2398,6 +2408,10 @@
         throw e;
       } finally {
         activeListControllers.delete(controller);
+        // 首屏请求（offset 空或 0）只要结束（成功/失败/取消）就清掉
+        // 「等待 facets」标记：避免请求异常后 tree_nav 永远被压制不渲染。
+        const wasFirstPage = offset == null || Number(offset) === 0;
+        if (wasFirstPage) state._firstPageVideoPending = false;
       }
     }
 
@@ -2841,6 +2855,39 @@
       return String(lib || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
     }
 
+    // === Sidebar / tags fingerprint helpers ==================================
+    // 严格比对「两次渲染输入是否完全相同」；相同时跳过 innerHTML 重写，
+    // 避免 polling soft refresh 期间标签/频道/树看起来在"闪一下/变化"。
+    function _fpJson(v) {
+      try { return JSON.stringify(v); } catch (_) { return ""; }
+    }
+    function _fpSidebar(treeData) {
+      if (!treeData) return "";
+      const roots = (treeData.roots || []).map((r) =>
+        `${String(r.path || "")}\n${String(r.label || "")}\n${Number(r.count || 0)}\n${_fpJson(r.categories || [])}`
+      ).join("||");
+      return [
+        "sb-v1",
+        String(treeData.lib || ""),
+        String(treeData.count || 0),
+        String(!!treeData.scanning),
+        String(!!treeData.multi),
+        String(treeData.root || ""),
+        _fpJson(treeData.categories || []),
+        _fpJson(treeData.types || []),
+        _fpJson(treeData.tree || null),
+        roots,
+      ].join("\x01");
+    }
+    function _fpCategoriesShort(arr) {
+      return (arr || []).map((c) => `${String(c.id === "" ? "__root__" : (c.id || c.name || ""))}:${Number(c.count || 0)}`).join(",");
+    }
+    function _fpTypesShort(arr) {
+      return (arr || []).map((t) => `${String(t.ext || "")}:${Number(t.count || 0)}`).join(",");
+    }
+    // 短 hash（6 位 36 进制），指纹太长时写入日志只留前缀方便肉眼识别
+    function _fpPrefix(fp, n) { return String(fp || "").slice(0, n || 16); }
+
     function rememberNav(treeData) {
       if (!treeData) return;
       state.navCache = treeData;
@@ -2919,8 +2966,14 @@
       const painted = libCacheKey(state.paintedTreeLib);
       const want = libCacheKey(state.lib);
       if (cached && painted !== want) {
-        state.tree = cached;
-        if ($("tree")) $("tree").innerHTML = renderTree(cached);
+        const treeFp = _fpJson(cached || null);
+        // folder tree 节点指纹相同就不重写 innerHTML，避免 DOM 节点被重新创建
+        // 导致选中高亮/滚动位置被重置，眼睛看到的"左侧树跳动"。
+        if (state._treeFingerprint !== treeFp) {
+          state.tree = cached;
+          if ($("tree")) $("tree").innerHTML = renderTree(cached);
+          state._treeFingerprint = treeFp;
+        }
         state.paintedTreeLib = state.lib || "";
       }
       highlightNav();
@@ -2930,11 +2983,36 @@
         elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
         cache_hit: !!cached,
         painted_lib: state.paintedTreeLib || "",
+        tree_fp_changed: cached && (state._treeFingerprint === _fpJson(cached || null)),
       }));
     }
 
     async function applyNavChrome(treeData) {
       const started = clientNow();
+      const fp = _fpSidebar(treeData);
+      // 侧栏 5 大容器（mount chips / channels / sortTags / extTags / folder tree）
+      // 的完整输入指纹。若与上次完全相同，仅更新高亮/标题，不做任何 innerHTML
+      // 重写 → 眼睛看到的"标签闪一下/变化"被彻底压制。
+      if (fp && state._sidebarFingerprint === fp) {
+        lastScanning = !!treeData.scanning;
+        state.tree = treeData.tree;
+        state.root = treeData.root || state.root;
+        if (treeData.multi || (treeData.roots || []).length > 1) state.multi = true;
+        state.paintedTreeLib = treeData.lib || "";
+        highlightNav();
+        updateAsideTitles();
+        clientLog("nav_chrome_rendered", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          tree_lib: treeData.lib || "",
+          category_count: (treeData.categories || []).length,
+          root_count: (treeData.roots || []).length,
+          type_count: (treeData.types || []).length,
+          skip_reason: "fingerprint_match",
+          fingerprint_prefix: _fpPrefix(fp, 24),
+        }));
+        return;
+      }
+      state._sidebarFingerprint = fp;
       lastScanning = !!treeData.scanning;
       state.tree = treeData.tree;
       state.root = treeData.root || state.root;
@@ -2952,6 +3030,8 @@
         category_count: (treeData.categories || []).length,
         root_count: (treeData.roots || []).length,
         type_count: (treeData.types || []).length,
+        rebuild: true,
+        fingerprint_prefix: _fpPrefix(fp, 24),
       }));
     }
 
@@ -3026,13 +3106,14 @@
 
     function renderChannels(categories, total) {
       const started = clientNow();
-      const finish = (mode) => clientLog("channel_rendered", filterStateFields({
+      const finish = (mode, extra) => clientLog("channel_rendered", filterStateFields({
         elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
         mode,
         category_count: state.categories.length,
         mounted_root_count: (state.mountedRoots || []).length,
         rendered_items: $("channelList") ? $("channelList").querySelectorAll(".channel-item").length : 0,
         sidebar_hidden: document.body.classList.contains("sidebar-hidden"),
+        ...(extra || {}),
       }));
       state.categories = categories || [];
       // 频道行只在「已选盘、未选盘下频道」时出现；单盘/全部目录时由左侧频道承载，
@@ -3055,8 +3136,15 @@
             <span class="badge">${c.count}</span>
           </div>`;
         }
+        const key = `ch-single|multi=0|cat=${String(state.category || "")}|total=${Number(total || 0)}|${_fpCategoriesShort(state.categories)}`;
+        if (state._lastChannelsKey === key && state._lastChannelsHtml === html) {
+          finish("single", { skip_reason: "html_identical", key_prefix: _fpPrefix(key, 24) });
+          return;
+        }
         $("channelList").innerHTML = html;
-        finish("single");
+        state._lastChannelsKey = key;
+        state._lastChannelsHtml = html;
+        finish("single", { rebuild: true, key_prefix: _fpPrefix(key, 24) });
         return;
       }
 
@@ -3117,8 +3205,16 @@
         }
         html += `</div>`;
       }
+      const rootsFp = (roots || []).map((r) => `${r.path || ""}:${Number(r.count || 0)}:${(r.categories || []).map((c) => `${String(c.id === "" ? "__root__" : (c.id || c.name || ""))}:${Number(c.count || 0)}`).join("|")}`).join("||");
+      const key = `ch-multi|multi=1|lib=${String(state.lib || "")}|cat=${String(state.category || "")}|total=${Number(allBadge)}|roots_len=${rootsFp.length}|roots_prefix=${_fpPrefix(rootsFp, 80)}|cats=${_fpCategoriesShort(state.categories)}`;
+      if (state._lastChannelsKey === key && state._lastChannelsHtml === html) {
+        finish("multi", { skip_reason: "html_identical", key_prefix: _fpPrefix(key, 24) });
+        return;
+      }
       $("channelList").innerHTML = html;
-      finish("multi");
+      state._lastChannelsKey = key;
+      state._lastChannelsHtml = html;
+      finish("multi", { rebuild: true, key_prefix: _fpPrefix(key, 24) });
     }
 
     function renderCategoryTags(categories) {
@@ -3179,9 +3275,27 @@
       );
       if (!visible || !values.length) {
         row.style.display = "none";
+        const hideKey = `cat-tags-hide|vis=${visible ? 1 : 0}|sb=${sidebarHidden ? 1 : 0}|lib=${String(state.lib || "")}|cat=${String(state.category || "")}|scope=${sourceScope}|multi=${state.multi ? 1 : 0}`;
+        if (state._lastCatTagsKey === hideKey && state._lastCatTagsHtml === "") {
+          clientLog("category_tags_rendered", filterStateFields({
+            visible: false,
+            skip_reason: "html_identical",
+            key_prefix: _fpPrefix(hideKey, 24),
+            sidebar_hidden: sidebarHidden,
+            source_scope: sourceScope,
+            source_count: source.length,
+            tag_count: 0,
+            elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          }), scopeWarning ? "WARN" : "INFO");
+          return;
+        }
         box.innerHTML = "";
+        state._lastCatTagsKey = hideKey;
+        state._lastCatTagsHtml = "";
         clientLog("category_tags_rendered", filterStateFields({
           visible: false,
+          rebuild: true,
+          key_prefix: _fpPrefix(hideKey, 24),
           reason: !visible
             ? (!state.lib ? "sidebar_visible_without_disk" : "category_selected")
             : (state.lib && !mount && !navScopedToLib ? "selected_mount_missing" : "no_categories"),
@@ -3200,9 +3314,30 @@
         const label = item.name || item.id || "未分类";
         html += `<button type="button" class="tag ${state.category === id ? "active" : ""}" data-category="${escapeAttr(id)}">${escapeHtml(label)}<span class="tag-n">${item.count || 0}</span></button>`;
       }
+      const showKey = `cat-tags-show|sb=${sidebarHidden ? 1 : 0}|lib=${String(state.lib || "")}|cat=${String(state.category || "")}|scope=${sourceScope}|values=${_fpCategoriesShort(values)}`;
+      if (state._lastCatTagsKey === showKey && state._lastCatTagsHtml === html) {
+        clientLog("category_tags_rendered", filterStateFields({
+          visible: true,
+          skip_reason: "html_identical",
+          key_prefix: _fpPrefix(showKey, 24),
+          lib: state.lib || "",
+          category: state.category || "",
+          sidebar_hidden: sidebarHidden,
+          source_scope: sourceScope,
+          source_count: source.length,
+          tag_count: values.length + 1,
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          categories: values.map((item) => `${item.id || item.name || ""}:${item.count || 0}`).join(",").slice(0, 500),
+        }), scopeWarning ? "WARN" : "INFO");
+        return;
+      }
       box.innerHTML = html;
+      state._lastCatTagsKey = showKey;
+      state._lastCatTagsHtml = html;
       clientLog("category_tags_rendered", filterStateFields({
         visible: true,
+        rebuild: true,
+        key_prefix: _fpPrefix(showKey, 24),
         lib: state.lib || "",
         category: state.category || "",
         sidebar_hidden: sidebarHidden,
@@ -3215,18 +3350,30 @@
     }
 
     function renderSortTags() {
-      $("sortTags").innerHTML = SORTS.map((s) =>
+      const sortHtml = SORTS.map((s) =>
         `<button type="button" class="tag ${state.sort === s.id ? "active" : ""}" data-sort="${s.id}">${s.label}</button>`
       ).join("");
       const views = [
         { id: "flat", label: "单集" },
         { id: "series", label: "合集" },
       ];
+      const viewHtml = views.map((s) =>
+        `<button type="button" class="tag ${state.view === s.id ? "active" : ""}" data-view="${s.id}">${s.label}</button>`
+      ).join("");
+      const key = `sort-tags|sort=${String(state.sort || "")}|view=${String(state.view || "")}`;
+      const st = $("sortTags");
       const vt = $("viewTags");
-      if (vt) {
-        vt.innerHTML = views.map((s) =>
-          `<button type="button" class="tag ${state.view === s.id ? "active" : ""}" data-view="${s.id}">${s.label}</button>`
-        ).join("");
+      const writeNow = (
+        state._lastSortKey !== key ||
+        state._lastSortHtml !== sortHtml ||
+        state._lastSortViewHtml !== viewHtml
+      );
+      if (writeNow) {
+        if (st) st.innerHTML = sortHtml;
+        if (vt) vt.innerHTML = viewHtml;
+        state._lastSortKey = key;
+        state._lastSortHtml = sortHtml;
+        state._lastSortViewHtml = viewHtml;
       }
       const currentSort = SORTS.find((s) => s.id === state.sort) || SORTS[0];
       const currentView = views.find((s) => s.id === state.view) || views[0];
@@ -3237,18 +3384,133 @@
     function renderExtTags(types, source) {
       const started = clientNow();
       state.types = types || [];
+      // Source 优先级：video_facets* 系列比 tree_nav 系列高，因为前者是
+      // 「当前查询路径精确统计」，后者是「侧栏全库/全目录粗粒度统计」。
+      // 页面加载时 tree_nav 先返回，video_facets 稍后回来；如果低优先级
+      // 被允许覆盖高优先级，用户会看到标签先显示 8 个格式再突然变 3 个，
+      // 也就是反复反馈的"滑动列表 标签还是会跳变"。高优先级一旦写入，
+      // 只有用户主动改 filter（调用 resetExtTagsSourcePriority）时才允许
+      // 低优先级重新占位。
+      const EXT_SOURCE_PRIORITY = {
+        video_facets_mount_reset: 5,
+        video_facets_reset: 4,
+        video_facets_retry: 3,
+        video_facets: 2,
+        tree_nav: 1,
+        unknown: 0,
+      };
+      const newPri = Number(EXT_SOURCE_PRIORITY[source || "unknown"]) || 0;
+      const lastPri = Number(EXT_SOURCE_PRIORITY[state._extTagsLastSource || "unknown"]) || 0;
       let html = `<button type="button" class="tag ${!state.ext ? "active" : ""}" data-ext="">全部</button>`;
       for (const t of state.types) {
         html += `<button type="button" class="tag ${state.ext === t.ext ? "active" : ""}" data-ext="${escapeAttr(t.ext)}">${escapeHtml(t.label)}<span class="tag-n">${t.count}</span></button>`;
       }
+      const key = `ext-tags|ext=${String(state.ext || "")}|types=${_fpTypesShort(state.types)}`;
+      const identicalHtml = state._lastExtKey === key && state._lastExtHtml === html;
+      // 当首屏 /api/videos 请求已挂起（fetchVideos(0) 发出尚未返回），直接
+      // 跳过 tree_nav 的渲染，避免用户先看到"全库 8 种统计"再被当前查询
+      // 的精确统计覆盖（8→3 的视觉跳变）。video_facets 返回后立即写入。
+      const awaitingFirstPage = state._firstPageVideoPending === true;
+      if ((source === "tree_nav") && awaitingFirstPage && !identicalHtml) {
+        clientLog("format_tags_rendered", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          source: source || "unknown",
+          type_count: state.types.length,
+          types: state.types.map((item) => `${item.ext || item.id || ""}:${item.count || 0}`).join(",").slice(0, 500),
+          selected_ext: state.ext || "",
+          suppress_reason: "awaiting_first_page_facets",
+          new_priority: newPri,
+          last_priority: lastPri,
+          key_prefix: _fpPrefix(key, 24),
+        }));
+        return;
+      }
+      // video_facets* 系列如果返回 types=[]，通常是「非首屏响应节省带宽不传 facets」
+      // 的假空信号（后端 offset>0 时 facets_ms=0）。此时不能把已有的精确 ext 标签
+      // 栏清空，否则用户会看到「4 个格式→瞬间变 1 个全部」的视觉跳变。
+      const lastKeyHasTypes = !!state._lastExtKey && String(state._lastExtKey).includes("|types=");
+      const lastTypesStr = lastKeyHasTypes
+        ? (String(state._lastExtKey).split("|types=").slice(1).join("|types=") || "")
+        : "";
+      const lastEffectiveTypeCount = lastKeyHasTypes
+        ? Math.max(0, (lastTypesStr.match(/[^,]+/g) || []).filter((s) => s && s.includes(":")).length)
+        : 0;
+      const src = String(source || "unknown");
+      if (src.startsWith("video_facets") && state.types.length === 0 && lastEffectiveTypeCount > 0 && !state._firstPageVideoPending) {
+        clientLog("format_tags_rendered", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          source: source || "unknown",
+          type_count: 0,
+          types: "",
+          selected_ext: state.ext || "",
+          suppress_reason: "empty_types_from_non_first_page_facets",
+          preserved_type_count: lastEffectiveTypeCount,
+          last_source: state._extTagsLastSource || "",
+          new_priority: newPri,
+          last_priority: lastPri,
+          key_prefix: _fpPrefix(state._lastExtKey || key, 24),
+        }), "WARN");
+        return;
+      }
+      if (newPri < lastPri && !identicalHtml) {
+        // 低优先级不覆盖高优先级已画好的标签栏；但如果内容完全相同就不
+        // 单独记录"被压制"，只走 html_identical 的统一分支。
+        clientLog("format_tags_rendered", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          source: source || "unknown",
+          type_count: state.types.length,
+          types: state.types.map((item) => `${item.ext || item.id || ""}:${item.count || 0}`).join(",").slice(0, 500),
+          selected_ext: state.ext || "",
+          suppress_reason: "lower_priority",
+          last_source: state._extTagsLastSource || "",
+          new_priority: newPri,
+          last_priority: lastPri,
+          key_prefix: _fpPrefix(key, 24),
+        }));
+        return;
+      }
+      if (identicalHtml) {
+        clientLog("format_tags_rendered", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          source: source || "unknown",
+          type_count: state.types.length,
+          types: state.types.map((item) => `${item.ext || item.id || ""}:${item.count || 0}`).join(",").slice(0, 500),
+          selected_ext: state.ext || "",
+          skip_reason: "html_identical",
+          new_priority: newPri,
+          last_priority: lastPri,
+          key_prefix: _fpPrefix(key, 24),
+        }));
+        return;
+      }
       $("extTags").innerHTML = html;
+      state._lastExtKey = key;
+      state._lastExtHtml = html;
+      state._extTagsLastSource = (newPri > lastPri || identicalHtml) ? (source || "unknown") : (state._extTagsLastSource || "unknown");
       clientLog("format_tags_rendered", filterStateFields({
         elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
         source: source || "unknown",
         type_count: state.types.length,
         types: state.types.map((item) => `${item.ext || item.id || ""}:${item.count || 0}`).join(",").slice(0, 500),
         selected_ext: state.ext || "",
+        rebuild: true,
+        new_priority: newPri,
+        last_priority: lastPri,
+        key_prefix: _fpPrefix(key, 24),
       }));
+    }
+
+    function resetExtTagsSourcePriority(reason) {
+      // 用户主动切换筛选条件（category / folder path / root / sort / view
+      // / ext / genre / theme）或准备重新请求 /api/videos 时调用：清空
+      // 高优先级占位，允许新的 tree_nav 先显示默认标签。
+      state._extTagsLastSource = null;
+      state._lastExtKey = null;
+      state._lastExtHtml = null;
+      // 同时标记「首屏请求挂起」：之后的 tree_nav 渲染被跳过，等 video_facets
+      // 返回后直接写入精确值，彻底压制"先 8 标签再 3 标签"的跳变。
+      state._firstPageVideoPending = true;
+      if (reason) clientLog("ext_tags_priority_reset", { reason: String(reason).slice(0, 80) }, "INFO");
     }
 
     function renderMergedTaxonomyTags() {
@@ -3258,18 +3520,44 @@
       const row = $("genreRow");
       const box = $("genreTags");
       if (!row || !box) return;
+      const beforeTagCount = box.querySelectorAll(".tag").length;
+      const beforeRowVisible = row.style.display !== "none";
       if (state.genre && !genres.some((item) => item.name === state.genre)) state.genre = "";
       if (state.theme && !themes.some((item) => item.name === state.theme)) state.theme = "";
       if (!genres.length && !themes.length) {
-        row.style.display = "none";
-        box.innerHTML = "";
+        // 非首屏 /api/videos（offset>0）不传 taxonomy facets 时 genres=[],themes=[] 是假空。
+        // 如果之前已经有非空 DOM，不能清空（否则用户会看到「类型+主题标签突然消失」）。
+        // 只有初始无 DOM（beforeTagCount===0）或首屏挂起等待 true 时，才允许真隐藏。
+        const initialEmpty = beforeTagCount === 0 && !beforeRowVisible;
+        const awaitingFirstPage = state._firstPageVideoPending === true;
+        if (initialEmpty || awaitingFirstPage) {
+          row.style.display = "none";
+          box.innerHTML = "";
+          clientLog("taxonomy_tags_rendered", filterStateFields({
+            elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+            genre_count: 0,
+            theme_count: 0,
+            tag_count: 0,
+            tag_count_before: beforeTagCount,
+            visible: false,
+            cleared_reason: initialEmpty ? "initial_empty" : "awaiting_first_page",
+          }), "INFO");
+          return;
+        }
         clientLog("taxonomy_tags_rendered", filterStateFields({
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
           genre_count: 0,
           theme_count: 0,
-          tag_count: 0,
-          visible: false,
-        }));
+          merged_count: 0,
+          duplicate_count: 0,
+          count_mismatch_count: 0,
+          tag_count_before: beforeTagCount,
+          tag_count_preserved: beforeTagCount,
+          suppress_reason: "empty_taxonomy_from_non_first_page_facets",
+          selected_genre: state.genre || "",
+          selected_theme: state.theme || "",
+          visible: beforeRowVisible,
+        }), "WARN");
         return;
       }
       row.style.display = "flex";
@@ -3343,18 +3631,48 @@
       const stateValue = isBackground ? "background" : "theme";
       const row = $(isBackground ? "backgroundRow" : "themeRow");
       const box = $(isBackground ? "backgroundTags" : "themeTags");
-      state[stateList] = values || [];
-      if (!state[stateList].length) {
-        row.style.display = "none";
-        box.innerHTML = "";
-        if (state[stateValue]) state[stateValue] = "";
+      if (!row || !box) return;
+      const beforeTagCount = box.querySelectorAll(".tag").length;
+      const beforeRowVisible = row.style.display !== "none";
+      const selectedBefore = state[stateValue] || "";
+      const nextValues = values || [];
+      const awaitingFirstPage = state._firstPageVideoPending === true;
+      if (!nextValues.length) {
+        state[stateList] = [];
+        // 初始空 or 首屏等待 → 正常隐藏
+        const initialEmpty = beforeTagCount === 0 && !beforeRowVisible;
+        if (initialEmpty || awaitingFirstPage) {
+          row.style.display = "none";
+          box.innerHTML = "";
+          if (state[stateValue]) state[stateValue] = "";
+          clientLog("background_tags_rendered", filterStateFields({
+            elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+            tag_kind: isBackground ? "background" : "theme",
+            visible: false,
+            tag_count: 0,
+            tag_count_before: beforeTagCount,
+            selected_before: selectedBefore,
+            selected_after: "",
+            cleared_reason: initialEmpty ? "initial_empty" : "awaiting_first_page",
+          }));
+          return;
+        }
+        // 假空：offset>0 响应不传 facets，已有 DOM 保留，不清选中
         clientLog("background_tags_rendered", filterStateFields({
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          visible: false,
-          tag_count: 0,
-        }));
+          tag_kind: isBackground ? "background" : "theme",
+          visible: beforeRowVisible,
+          tag_count_before: beforeTagCount,
+          tag_count_preserved: beforeTagCount,
+          suppress_reason: isBackground
+            ? "empty_background_from_non_first_page_facets"
+            : "empty_theme_from_non_first_page_facets",
+          selected_before: selectedBefore,
+          selected_preserved: selectedBefore,
+        }), "WARN");
         return;
       }
+      state[stateList] = nextValues;
       if (state[stateValue] && !state[stateList].some((item) => item.name === state[stateValue])) {
         state[stateValue] = "";
       }
@@ -3365,10 +3683,16 @@
         html += `<button type="button" class="tag ${state[stateValue] === item.name ? "active" : ""}" data-${attr}="${escapeAttr(item.name)}">${escapeHtml(item.name)}<span class="tag-n">${item.count}</span></button>`;
       }
       box.innerHTML = html;
+      const afterTagCount = box.querySelectorAll(".tag").length;
       clientLog("background_tags_rendered", filterStateFields({
         elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+        tag_kind: isBackground ? "background" : "theme",
         visible: true,
-        tag_count: box.querySelectorAll(".tag").length,
+        tag_count_before: beforeTagCount,
+        tag_count: afterTagCount,
+        tag_count_delta: afterTagCount - beforeTagCount,
+        selected_before: selectedBefore,
+        selected_after: state[stateValue] || "",
         selected_background: state.background || "",
       }));
     }
@@ -3390,6 +3714,7 @@
         rows: box.querySelectorAll(".filter-row").length,
         tags: box.querySelectorAll("[data-folder]").length,
       } : { rows: 0, tags: 0 };
+      const categoryEmpty = !state.category || state.category === "__root__";
       clientLog("subfolder_render_before", {
         elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
         level_count: rows.length,
@@ -3400,19 +3725,54 @@
         dom_rows: beforeDom.rows,
         dom_tags: beforeDom.tags,
       });
-      if (!state.category || state.category === "__root__" || !rows.length) {
+      if (categoryEmpty) {
         box.innerHTML = "";
         syncSubfolderOverflow("render_cleared");
         renderStickyFilterRow();
         clientLog("subfolder_render_cleared", {
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          reason: !state.category || state.category === "__root__" ? "category_empty" : "api_levels_empty",
+          reason: "category_empty",
           level_count: rows.length,
           category: state.category || "",
           folder: state.folder || "",
           dom_rows_after: box.querySelectorAll(".filter-row").length,
           dom_tags_after: box.querySelectorAll("[data-folder]").length,
-        }, rows.length ? "WARN" : "INFO");
+        }, "INFO");
+        return;
+      }
+      if (!rows.length) {
+        // 非首屏 /api/videos（offset>0）为了节省带宽不传 subfolder_levels，
+        // 这里收到 levels=[] 是"假空"，如果已有 rows 就必须保留 DOM，否则
+        // 用户会看到吸顶栏从「3 个子目录标签」瞬间变成「1 个全部」。
+        // 只有初始 DOM 本来就没有 rows 时才真正清空。
+        if (beforeDom.rows === 0) {
+          box.innerHTML = "";
+          syncSubfolderOverflow("render_cleared");
+          renderStickyFilterRow();
+          clientLog("subfolder_render_cleared", {
+            elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+            reason: "api_levels_empty_initial_empty",
+            level_count: rows.length,
+            category: state.category || "",
+            folder: state.folder || "",
+            dom_rows_after: box.querySelectorAll(".filter-row").length,
+            dom_tags_after: box.querySelectorAll("[data-folder]").length,
+          }, "INFO");
+          return;
+        }
+        // 真异常场景：已有 DOM 但 levels 传来空，跳过清空并打 WARN。
+        syncSubfolderOverflow("levels_empty_skipped");
+        renderStickyFilterRow();
+        clientLog("subfolder_render_skipped", {
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          skip_reason: "api_levels_empty_preserve_existing",
+          level_count: rows.length,
+          category: state.category || "",
+          folder: state.folder || "",
+          folder_all: !!state.folderAll,
+          dom_rows_preserved: beforeDom.rows,
+          dom_tags_preserved: beforeDom.tags,
+        }, "WARN");
         return;
       }
       box.innerHTML = rows.map((lv, idx) => {
@@ -3450,29 +3810,43 @@
       const box = $("stickyFilterRow");
       const sticky = $("scopeSticky");
       if (!box) return;
+      const beforeTagCount = box.querySelectorAll(".tag").length;
       const subRows = $("subFolderRows") ? $("subFolderRows").querySelectorAll(".filter-row") : [];
       let src = subRows.length ? subRows[subRows.length - 1] : null;
+      let fallbackReason = "";
       if (!src) {
         const extRow = $("extTags") && $("extTags").closest(".filter-row");
         src = extRow || null;
+        fallbackReason = "sub_rows_empty";
       }
       if (!src) {
+        const wasEmpty = beforeTagCount === 0 && !sticky.classList.contains("has-filter-row");
         box.innerHTML = "";
         if (sticky) sticky.classList.remove("has-filter-row");
         clientLog("sticky_filter_rendered", {
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
           source: "none",
+          fallback_reason: fallbackReason || "no_sub_and_no_ext_row",
+          tag_count_before: beforeTagCount,
           tag_count: 0,
-        });
+          sub_rows: subRows.length,
+        }, wasEmpty ? "INFO" : "WARN");
         return;
       }
       box.innerHTML = src.innerHTML;
       if (sticky) sticky.classList.add("has-filter-row");
+      const afterTagCount = box.querySelectorAll(".tag").length;
+      const finalSource = subRows.length ? "subfolder" : "format";
+      const suspiciousCollapse = beforeTagCount >= 3 && afterTagCount === 1;
       clientLog("sticky_filter_rendered", {
         elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-        source: subRows.length ? "subfolder" : "format",
-        tag_count: box.querySelectorAll(".tag").length,
-      });
+        source: finalSource,
+        fallback_reason: fallbackReason || "",
+        tag_count_before: beforeTagCount,
+        tag_count: afterTagCount,
+        tag_count_delta: afterTagCount - beforeTagCount,
+        sub_rows: subRows.length,
+      }, suspiciousCollapse ? "WARN" : "INFO");
     }
 
     function applyFolderButton(btn) {
@@ -3807,13 +4181,39 @@
         state.loadedVideos.slice(start, end).map(cardHtml).join("") +
         `<div class="v-spacer" style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
       // Detect spacer jumps that would visibly "push" the scroll position.
-      // A padTop/padBot change > one row without a corresponding user scroll
-      // usually means totalCount or loadedBase shifted underneath them
-      // (e.g. soft refresh offset mismatch, or MAX_LOADED_VIDEOS trimming)
-      // and is the most common source of "the page jumped on its own".
+      //
+      // Threshold tuning rationale:
+      //   rowStride = 306 px.  A normal fast user scroll easily advances
+      //   firstRow by 2…6 rows between two rAF batches → padTop moves
+      //   612…1836 px.  Treating *any* such jump as "abnormal" caused us to
+      //   forcibly compensate scrollTop on nearly every scroll tick, pushing
+      //   the page in ways the user did not intend (the classic "the screen
+      //   rushes on its own" complaint).
+      //
+      //   New rule: only flag and compensate when something other than user
+      //   scroll activity disturbs the coordinate system — i.e. loadedBase
+      //   head-trim, loadedCount tail-append or totalCount resize.  Plain
+      //   firstRow translation due to scroll is labelled render_window_shift
+      //   and is NOT compensated.
       const padTopJump = beforePadTop >= 0 ? padTop - beforePadTop : 0;
       const padBotJump = beforePadBot >= 0 ? padBot - beforePadBot : 0;
-      if (Math.abs(padTopJump) >= rowStride * 2 || Math.abs(padBotJump) >= rowStride * 4) {
+      const beforeCompScrollTop = Math.round(scrollTop);
+      let compensatedForPadTopPx = 0;
+      let compensatedForPadBotPx = 0;
+      const baseNow = Number(state.loadedBaseOffset) || 0;
+      const loadedNow = state.loadedVideos.length;
+      const baseShifted = (state._lastVBase ?? -1) !== baseNow;
+      const loadedShifted = (state._lastVLoaded ?? -1) !== loadedNow;
+      const totalShifted = (state._lastVTotal ?? -1) !== total;
+      state._lastVBase = baseNow;
+      state._lastVLoaded = loadedNow;
+      state._lastVTotal = total;
+      let jumpReason = "render_window_shift"; // user scrolled fast
+      if (baseShifted) jumpReason = "loaded_head_trim";
+      else if (loadedShifted && padTopJump !== 0) jumpReason = "loaded_tail_append";
+      else if (totalShifted) jumpReason = "total_rebound";
+      const bufferDisturbed = jumpReason !== "render_window_shift";
+      if (Math.abs(padTopJump) >= rowStride * 4 || Math.abs(padBotJump) >= rowStride * 8) {
         clientLog("virtual_grid_spacer_jump", {
           elapsed_ms: 0,
           pad_top_before: beforePadTop,
@@ -3823,14 +4223,43 @@
           pad_bot_after: padBot,
           pad_bot_delta: padBotJump,
           loaded_base: loadedBase,
+          loaded_videos: loadedNow,
+          total_count: total,
+          first_row: firstRow,
+          last_row: lastRow,
+          scroll_top: beforeCompScrollTop,
+          scroll_height: scrollHeight,
+          client_height: viewH,
+          jump_reason: jumpReason,
+          base_shifted: baseShifted,
+          loaded_shifted: loadedShifted,
+          total_shifted: totalShifted,
+        }, "WARN");
+        if (bufferDisturbed && Math.abs(padTopJump) >= rowStride * 3 && root) {
+          root.scrollTop += padTopJump;
+          compensatedForPadTopPx = padTopJump;
+        }
+        if (bufferDisturbed && Math.abs(padBotJump) >= rowStride * 4 && root) {
+          root.scrollTop += padBotJump;
+          compensatedForPadBotPx = padBotJump;
+        }
+      }
+      if (compensatedForPadTopPx || compensatedForPadBotPx) {
+        clientLog("scroll_position_compensated", {
+          elapsed_ms: 0,
+          pad_top_comp_px: compensatedForPadTopPx,
+          pad_bot_comp_px: compensatedForPadBotPx,
+          scroll_top_before: beforeCompScrollTop,
+          scroll_top_after: root ? Math.round(root.scrollTop) : beforeCompScrollTop,
+          scroll_height_before: scrollHeight,
+          scroll_height_after: root ? root.scrollHeight : scrollHeight,
+          loaded_base: loadedBase,
           loaded_videos: state.loadedVideos.length,
           total_count: total,
           first_row: firstRow,
           last_row: lastRow,
-          scroll_top: Math.round(scrollTop),
-          scroll_height: scrollHeight,
-          client_height: viewH,
-        }, "WARN");
+          cols,
+        }, "INFO");
       }
       updateGridHint();
       watchThumbs(grid);
@@ -4222,6 +4651,11 @@
         loadingMore = false;
         cancelListRequests();
         resetThumbQueue();
+        // 回到首屏必定是用户（或 soft refresh）发起了一次全新查询：
+        // 清掉 video_facets 高优先级占位，允许新的 tree_nav 先显示标签。
+        resetExtTagsSourcePriority(
+          softRefresh ? "soft_refresh_reset_offset" : "refresh_reset_offset"
+        );
       } else {
         // Soft refresh still cancels previous fetches, but do NOT clear the
         // visible thumbnail queue so cards do not flash placeholders.

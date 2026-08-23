@@ -265,6 +265,9 @@ def main():
         print(f"\n已有视频库在运行 → {url}")
         print("已打开现有页面，无需再开一份。关闭原来的启动窗口即可停止。\n")
         bootlog.step("reuse_instance", url)
+        bootlog.abort_skip_commit(
+            f"reuse_instance mode=reuse port={args.port} url={url}"
+        )
         if not args.no_open:
             try:
                 webbrowser.open(url)
@@ -283,6 +286,10 @@ def main():
         f"root={args.root!r} host={args.host} port={args.port} lan={STATE['lan_share']} "
         f"no_thumbs={args.no_thumbs} no_open={args.no_open} rescan={args.rescan}",
     )
+    # 端口选择 + 启动参数解析全部通过：本次启动确实要跑服务了，
+    # 把 latest.txt 指针挂到当前会话日志。如果后面 fail，这里已经
+    # 写过 latest 的副作用是可以接受的（fail 的日志也值得被追踪）。
+    bootlog.commit_latest_pointer()
 
     try:
         if args.root:
