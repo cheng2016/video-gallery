@@ -40,13 +40,24 @@ def register(app) -> None:
                     primary = str(Path(STATE["root"]).resolve())
             except OSError:
                 primary = str(STATE.get("root") or "")
+            per_root_counts: list[str] = []
+            per_root_cat_names: list[str] = []
             for mount in mounts:
                 mount["current"] = (
                     bool(primary)
                     and mount.get("path", "").lower() == primary.lower()
                 )
+                cats = mount.get("categories") or []
+                per_root_counts.append(
+                    f"{mount.get('path','')}:count={mount.get('count',0)}:cats={len(cats)}"
+                )
+                # 每个盘保留前 5 个分类名，方便"G:\\:0 但应该有 5 分类"的诊断。
+                names = [str(c.get("name") or "?") for c in cats[:5]]
+                per_root_cat_names.append(
+                    f"{mount.get('path','')}:[{','.join(names)}]"
+                )
             try:
-                from vg.diagnostics import perf
+                from vg.diagnostics import perf, info as _info
 
                 perf(
                     "api_roots",
@@ -57,8 +68,28 @@ def register(app) -> None:
                     multi=len(mounts) > 1,
                     primary_defined=bool(primary),
                 )
-            except Exception:
-                pass
+                # 前台「mounts_rendered 仍显示 G:\\:0」但后端是否已经返回了
+                # counts，这条 INFO 直接给出返回体的每盘摘要。
+                _info(
+                    "api_roots_response_summary",
+                    force=True,
+                    roots=len(mounts),
+                    snap_len=len(snap),
+                    scanning=bool(STATE.get("scanning")),
+                    updating=bool(STATE.get("updating")),
+                    meta_running=bool(STATE.get("meta_progress")),
+                    thumb_pending=int(STATE.get("thumb_pending") or 0),
+                    lib_gen=int(STATE.get("lib_gen") or 0),
+                    per_root_counts=" | ".join(per_root_counts),
+                    per_root_cat5=" | ".join(per_root_cat_names),
+                    primary=primary or "",
+                )
+            except Exception as _ex:
+                try:
+                    from vg.diagnostics import error as _diag_err
+                    _diag_err("api_roots_response_diag_failed", _ex)
+                except Exception:
+                    pass
             return jsonify({
                 "ok": True,
                 "roots": mounts,

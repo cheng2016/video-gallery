@@ -462,6 +462,11 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
 
     out = []
     root_timings: list[str] = []
+    # 诊断：把每一盘"数据源选择 + 计数 + 分类"打到日志，避免前台看到 0
+    # categories 但后端到底走了 snapshot bucket / disk SQLite / STATE 哪个
+    # 分支无从反查。关键观察点：G 盘扫完 STATE.videos 里 1822 条
+    # _lib_root 是否与 mounted G:\\ 归一化 key 一致。
+    diag_snippets: list[str] = []
     for r in roots:
         root_started = time.perf_counter()
         r_key = _root_compare_key(r)
@@ -470,29 +475,63 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
         # bucketize」顺序会导致 /api/roots 即使传了已发布的 2785 条
         # STATE["videos"] 仍退化为全表扫描，触发 roots_summary_slow。
         subset: list[dict]
+        source_used = "unknown"
+        snapshot_len = 0
+        sql_len = 0
+        state_len = 0
         if use_snapshot:
             subset = list(snap_buckets.get(r_key, [])) if snap_buckets is not None else []
+            source_used = "snapshot"
+            snapshot_len = len(subset)
         elif videos is not None:
             # Explicit snapshot passed by the caller: bucketize once and
             # consult per-disk SQLite only if this root is absent from the
             # snapshot (handles freshly-mounted / not-yet-published roots).
             if snap_buckets is None:
                 snap_buckets = _bucketize(list(videos or []))
-            subset = list(snap_buckets.get(r_key, []))
-            if not subset:
-                subset = _videos_from_root(r)
+            subset_cand = list(snap_buckets.get(r_key, []))
+            snapshot_len = len(subset_cand)
+            if subset_cand:
+                subset = subset_cand
+                source_used = "snapshot_explicit"
+            else:
+                sql_cand = _videos_from_root(r)
+                sql_len = len(sql_cand)
+                subset = sql_cand
+                source_used = "sql_fallback(explicit_snap_empty)"
         else:
             # No snapshot at all: trust the per-disk catalog as source of
             # truth, with STATE videos as a fallback.
-            subset = _videos_from_root(r)
-            if not subset and state_videos_raw:
+            sql_cand = _videos_from_root(r)
+            sql_len = len(sql_cand)
+            if sql_cand:
+                subset = sql_cand
+                source_used = "sql(no_snap)"
+            elif state_videos_raw:
                 if state_buckets is None:
                     state_buckets = _bucketize(list(state_videos_raw or []))
                 subset = list(state_buckets.get(r_key, []))
+                source_used = "state_bucket(no_snap)"
+                state_len = len(subset)
+            else:
+                subset = []
+                source_used = "empty(no_snap_no_state)"
         cat_counts: dict[str, int] = {}
         for v in subset:
             cat = video_category(v)
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        # 每个盘采样 2 条 _lib_root，用来核对"归一化 key 对不上"的情况。
+        samples = []
+        for v in subset[:2]:
+            samples.append(
+                f"{v.get('_lib_root')!r}/{v.get('root')!r}"
+            )
+        diag_snippets.append(
+            f"{r}[{r_key}]:src={source_used} "
+            f"snap={snapshot_len} sql={sql_len} state={state_len} "
+            f"count={len(subset)} cats={sorted(cat_counts.items())[:5]} "
+            f"samples=[{';'.join(samples)}]"
+        )
         out.append({
             "path": r,
             "label": root_label(r),
@@ -503,6 +542,39 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
             f"{r}:{(time.perf_counter() - root_started) * 1000.0:.1f}ms/{len(subset)}"
         )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
+    # 不管快慢都打一条 roots_summary_detail，方便"某盘显示 0"的诊断。
+    try:
+        from vg.diagnostics import info as _diag_info
+        snap_lib_root_dist: dict[str, int] = {}
+        for v in list(videos or [])[:300]:
+            k = _root_compare_key(v.get("_lib_root") or v.get("root"))
+            snap_lib_root_dist[k] = snap_lib_root_dist.get(k, 0) + 1
+        state_lib_root_dist: dict[str, int] = {}
+        for v in list(STATE.get("videos") or [])[:300]:
+            k = _root_compare_key(v.get("_lib_root") or v.get("root"))
+            state_lib_root_dist[k] = state_lib_root_dist.get(k, 0) + 1
+        _diag_info(
+            "roots_summary_detail",
+            force=True,
+            elapsed_ms=f"{elapsed_ms:.1f}",
+            roots=len(roots),
+            scanning=bool(STATE.get("scanning")),
+            updating=bool(STATE.get("updating")),
+            use_snapshot=use_snapshot,
+            explicit_videos=videos is not None,
+            videos_len=len(list(videos or [])),
+            state_videos_len=len(list(STATE.get("videos") or [])),
+            per_root=" | ".join(diag_snippets),
+            per_root_times="|".join(root_timings),
+            snap_lib_dist_sample=str(snap_lib_root_dist),
+            state_lib_dist_sample=str(state_lib_root_dist),
+        )
+    except Exception as _ex:
+        try:
+            from vg.diagnostics import error as _diag_err
+            _diag_err("roots_summary_detail_emit_failed", _ex)
+        except Exception:
+            pass
     if elapsed_ms >= 200.0:
         from vg.diagnostics import perf
 

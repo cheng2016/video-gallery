@@ -2572,7 +2572,10 @@
               lastLibGen = gen;
               lastScanFound = found;
               state._libGen = gen;
-              await refresh({ soft: true, nav: false });
+              // genChanged means publish_unified_library merged a new disk
+              // into STATE.videos → MUST refresh sidebar mounts too or
+              // G:\\:0 stays on 0 even though STATE.videos grows.
+              await refresh({ soft: true, nav: true });
             } else if (
               canFull &&
               d.scan_progress &&
@@ -2582,7 +2585,8 @@
               state._lastFullRefresh = now;
               lastLibGen = gen;
               state._libGen = gen;
-              await refresh({ soft: true, nav: false });
+              // Scan finished → lib_gen is about to bump; sync sidebar.
+              await refresh({ soft: true, nav: true });
             } else if (d.thumb_progress && d.thumb_progress !== lastThumbProgress) {
               lastThumbProgress = d.thumb_progress;
               if (now - thumbRefreshTimer > 3000) {
@@ -2594,7 +2598,9 @@
             wasBusy = false;
             lastLibGen = gen;
             state._libGen = gen;
-            await refresh({ soft: true, nav: false });
+            // All background work drained — make sure sidebar mounts land on
+            // final counts instead of stale per-disk zeros.
+            await refresh({ soft: true, nav: true });
             refreshVisibleThumbs();
             clearInterval(state._poll);
             state._poll = null;

@@ -129,6 +129,16 @@ def emit_rate_limited(
     return True
 
 
+def info(event: str, *, force: bool = False, **fields) -> None:
+    """Emit an INFO-level diagnostic event."""
+    emit("INFO", event, force=force or _full_logging, **fields)
+
+
+def warn(event: str, *, force: bool = True, **fields) -> None:
+    """Emit a WARN-level diagnostic event (always printed)."""
+    emit("WARN", event, force=force, **fields)
+
+
 def perf(event: str, elapsed_ms: float, *, force: bool = False, **fields) -> None:
     """Print slow stages by default; full logging prints every instrumented span."""
     emit(
