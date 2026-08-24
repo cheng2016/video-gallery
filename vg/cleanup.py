@@ -87,8 +87,8 @@ def build_cleanup_response(
         "folder": folder,
         "video_count": len(videos),
         "rules": (
-            "同名（忽略大小写）或同体积（≥"
-            f"{MIN_VIDEO_FILE_BYTES // 1024}KB）的不同文件；"
+            "同体积（≥"
+            f"{MIN_VIDEO_FILE_BYTES // 1024}KB）后内容哈希相同的不同文件；"
             "仅在当前所选盘/频道范围内比对"
         ),
     }

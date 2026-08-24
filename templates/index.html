@@ -4602,6 +4602,39 @@
       const afterScrollTop = root ? root.scrollTop : 0;
       const afterScrollHeight = root ? root.scrollHeight : 0;
       const renderMs = Number((performance.now() - renderStarted).toFixed(1));
+      const inputDuplicateCards = (videos || []).filter((v) => !!(v && v.dup));
+      const loadedDuplicateCards = (state.loadedVideos || []).filter((v) => !!(v && v.dup));
+      const inputDuplicateFieldRows = (videos || []).filter((v) =>
+        v && (Object.prototype.hasOwnProperty.call(v, "dup") ||
+          Object.prototype.hasOwnProperty.call(v, "dup_n") ||
+          Object.prototype.hasOwnProperty.call(v, "dup_reason"))
+      ).length;
+      const visibleDuplicateBadges = grid
+        ? grid.querySelectorAll(".dup-badge").length
+        : 0;
+      clientLog("duplicate_badge_render_diagnostics", {
+        append: !!append,
+        mode: state.virtualEnabled ? "virtual" : "flat",
+        input_rows: beforeVideosInput,
+        input_duplicate_field_rows: inputDuplicateFieldRows,
+        input_duplicate_rows: inputDuplicateCards.length,
+        input_duplicate_counts: inputDuplicateCards
+          .map((v) => `${v.dup_n || 0}:${v.dup_reason || ""}`)
+          .join(",")
+          .slice(0, 500),
+        loaded_rows: state.loadedVideos.length,
+        loaded_duplicate_rows: loadedDuplicateCards.length,
+        loaded_duplicate_counts: loadedDuplicateCards
+          .map((v) => `${v.dup_n || 0}:${v.dup_reason || ""}`)
+          .join(",")
+          .slice(0, 500),
+        visible_duplicate_badges: visibleDuplicateBadges,
+        dom_card_count: grid ? grid.querySelectorAll(".card").length : 0,
+        total: state.totalCount || 0,
+        offset: state.offset || 0,
+        has_more: !!state.hasMore,
+        render_ms: renderMs,
+      }, inputDuplicateFieldRows === 0 && beforeVideosInput > 0 ? "WARN" : "INFO");
       // MAX_LOADED_VIDEOS head-trim is a very common "silent jump": the
       // virtual grid's loadedBase advances, which moves padTop and makes the
       // page feel like it "snapped up" a few rows even though the user did
@@ -6310,7 +6343,7 @@
         scopeBits.push(`范围内 ${scope.video_count != null ? scope.video_count : "?"} 部`);
         if (hint) {
           hint.innerHTML = `<strong>范围</strong>：${escapeHtml(scopeBits.join(" · "))}。`
-            + ` <strong>判定</strong>：${escapeHtml(scope.rules || "同名或同体积的不同文件")}。`
+            + ` <strong>判定</strong>：${escapeHtml(scope.rules || "同体积后内容哈希相同的不同文件")}。`
             + ` 切换上方「盘 / 频道」后会重新扫描。`;
         }
         const groups = (data.groups || []).filter((g) => (g.items || []).length);

@@ -148,6 +148,16 @@ def collapse_to_series_cards(videos: list[dict]) -> list[dict]:
         title = cover.get("series_title") or cover.get("name") or "剧集"
         seasons = sorted({int(x.get("season") or 1) for x in items_sorted})
         total_size = sum(int(x.get("size") or 0) for x in items_sorted)
+        duplicate_items = [x for x in items_sorted if x.get("dup")]
+        duplicate_count = max(
+            [int(x.get("dup_n") or 0) for x in duplicate_items] + [len(duplicate_items), 0]
+        )
+        duplicate_reasons = sorted({
+            reason
+            for x in duplicate_items
+            for reason in str(x.get("dup_reason") or "").split("+")
+            if reason
+        })
         cards.append({
             "id": sid,
             "kind": "series",
@@ -171,7 +181,9 @@ def collapse_to_series_cards(videos: list[dict]) -> list[dict]:
             "cover_id": cover.get("id") or "",
             "has_thumb": cover.get("has_thumb"),
             "thumb_v": cover.get("thumb_v"),
-            "dup": any(x.get("dup") for x in items_sorted),
+            "dup": bool(duplicate_items),
+            "dup_n": duplicate_count,
+            "dup_reason": "+".join(duplicate_reasons),
             "bad": any(x.get("bad") for x in items_sorted),
             "lib_label": cover.get("lib_label") or cover.get("_lib_label") or "",
             "root": cover.get("root") or cover.get("_lib_root") or "",

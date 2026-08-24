@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 from flask import Flask
 
@@ -14,6 +16,8 @@ from vg.state import STATE
 
 class FakeCatalogRepository:
     def __init__(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
         size = MIN_VIDEO_FILE_BYTES + 1
         self.videos = [
             {
@@ -24,7 +28,7 @@ class FakeCatalogRepository:
                 "folder": "电影",
                 "ext": ".mp4",
                 "size": size,
-                "root": "D:/library",
+                "root": str(self.root),
             },
             {
                 "id": "b" * 16,
@@ -33,10 +37,14 @@ class FakeCatalogRepository:
                 "rel": "电影/b.mp4",
                 "folder": "电影",
                 "ext": ".mp4",
-                "size": size + 1,
-                "root": "D:/library",
+                "size": size,
+                "root": str(self.root),
             },
         ]
+        for video in self.videos:
+            path = self.root / video["rel"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((b"same-content" * ((size // 12) + 1))[:size])
         self.lookup_calls: list[tuple[str, str | None]] = []
 
     def videos_for_scope(self, lib: str | None = None) -> list[dict]:
@@ -56,17 +64,19 @@ class FakeCatalogRepository:
 class ServiceInterfaceTests(unittest.TestCase):
     def test_cleanup_depends_on_scope_reader_interface(self) -> None:
         repository = FakeCatalogRepository()
+        self.addCleanup(repository.tmp.cleanup)
         response = build_cleanup_response(
             "dup",
             category="电影",
             reader=repository,
         )
         self.assertEqual(response["scope"]["video_count"], 2)
-        self.assertEqual(response["groups"][0]["reason"], "同名")
+        self.assertEqual(response["groups"][0]["reason"], "同内容")
         self.assertEqual(response["roots"][0]["label"], "D:")
 
     def test_convert_route_accepts_repository_substitute(self) -> None:
         repository = FakeCatalogRepository()
+        self.addCleanup(repository.tmp.cleanup)
         app = Flask("convert-interface-test")
         register_convert(app, repository=repository)
         previous_ffmpeg = STATE.get("ffmpeg")

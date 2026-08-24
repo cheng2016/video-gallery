@@ -75,8 +75,8 @@ class CleanupScopeTests(unittest.TestCase):
                 "rel": "电影/同名片_copy.mp4",
                 "folder": "电影",
                 "ext": ".mp4",
-                "size": big + 1,
-                "size_h": "201KB",
+                "size": big,
+                "size_h": "200KB",
                 "mtime": 2,
                 "mtime_h": "",
             },
@@ -93,6 +93,12 @@ class CleanupScopeTests(unittest.TestCase):
                 "mtime_h": "",
             },
         ]
+        for item in items:
+            path = self.root / item["rel"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            seed = b"same-content" if item["id"] in {"m1", "m2"} else b"other-content"
+            size = int(item["size"])
+            path.write_bytes((seed * ((size // len(seed)) + 1))[:size])
         save_root_library(self.root, items)
         publish_unified_library()
         self.client = web.app.test_client()
@@ -102,12 +108,12 @@ class CleanupScopeTests(unittest.TestCase):
             STATE[key] = value
         self.tmp.cleanup()
 
-    def test_all_channels_sees_cross_folder_name_dup(self) -> None:
+    def test_all_channels_sees_content_dup(self) -> None:
         data = self.client.get("/api/cleanup?type=dup").get_json()
         self.assertTrue(data["ok"])
-        name_groups = [g for g in data["groups"] if g["reason"] == "同名"]
-        self.assertEqual(len(name_groups), 1)
-        self.assertEqual(len(name_groups[0]["items"]), 3)
+        content_groups = [g for g in data["groups"] if g["reason"] == "同内容"]
+        self.assertEqual(len(content_groups), 1)
+        self.assertEqual({it["id"] for it in content_groups[0]["items"]}, {"m1", "m2"})
         self.assertEqual(data["scope"]["category"], "")
 
     def test_category_limits_dup_to_channel(self) -> None:
@@ -115,12 +121,11 @@ class CleanupScopeTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["scope"]["category"], "电影")
         self.assertEqual(data["scope"]["video_count"], 2)
-        name_groups = [g for g in data["groups"] if g["reason"] == "同名"]
-        self.assertEqual(len(name_groups), 1)
-        ids = {it["id"] for it in name_groups[0]["items"]}
+        content_groups = [g for g in data["groups"] if g["reason"] == "同内容"]
+        self.assertEqual(len(content_groups), 1)
+        ids = {it["id"] for it in content_groups[0]["items"]}
         self.assertEqual(ids, {"m1", "m2"})
-        # 电视剧里的同名不应进入本组
-        self.assertTrue(all(it["folder"].startswith("电影") for it in name_groups[0]["items"]))
+        self.assertTrue(all(it["folder"].startswith("电影") for it in content_groups[0]["items"]))
 
     def test_tv_channel_alone_has_no_dup_pair(self) -> None:
         data = self.client.get("/api/cleanup?type=dup&category=电视剧").get_json()

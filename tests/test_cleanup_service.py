@@ -53,8 +53,8 @@ class CleanupServiceTests(unittest.TestCase):
         set_mounted_roots([str(self.root.resolve())], primary=str(self.root))
         size = MIN_VIDEO_FILE_BYTES + 1
         save_root_library(self.root, [
-            self.item("a", "电影/same.mp4", size, bad=True),
-            self.item("b", "电影/copy.mp4", size),
+            self.item("a", "电影/same.mp4", size, bad=True, content=b"same-content"),
+            self.item("b", "电影/copy.mp4", size, content=b"same-content"),
             self.item("c", "电视剧/only.mp4", size + 1),
         ])
         publish_unified_library()
@@ -64,9 +64,20 @@ class CleanupServiceTests(unittest.TestCase):
             STATE[key] = value
         self.tmp.cleanup()
 
-    @staticmethod
-    def item(vid: str, rel: str, size: int, *, bad: bool = False) -> dict:
+    def item(
+        self,
+        vid: str,
+        rel: str,
+        size: int,
+        *,
+        bad: bool = False,
+        content: bytes | None = None,
+    ) -> dict:
         path = Path(rel)
+        file_path = self.root / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        seed = content or f"{vid}:{rel}".encode()
+        file_path.write_bytes((seed * ((size // len(seed)) + 1))[:size])
         item = {
             "id": vid,
             "name": path.stem,
@@ -86,7 +97,7 @@ class CleanupServiceTests(unittest.TestCase):
         response = build_cleanup_response("dup", category="电影")
         self.assertEqual(response["scope"]["video_count"], 2)
         self.assertEqual(len(response["groups"]), 1)
-        self.assertEqual(response["groups"][0]["reason"], "同体积")
+        self.assertEqual(response["groups"][0]["reason"], "同内容")
 
     def test_bad_response_is_independent_from_duplicate_detection(self) -> None:
         response = build_cleanup_response("bad", category="电影")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 
 from vg.catalog import (
@@ -19,6 +20,7 @@ from vg.state import STATE
 
 class CatalogContractTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
         self.old_state = {
             key: STATE.get(key)
             for key in ("root", "videos", "by_id", "by_category", "facets", "lib_gen")
@@ -33,6 +35,7 @@ class CatalogContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         for key, value in self.old_state.items():
             STATE[key] = value
+        self.tmp.cleanup()
 
     @staticmethod
     def video(vid: str, rel: str, *, size: int = 1, root: str = "D:/library") -> dict:
@@ -87,9 +90,13 @@ class CatalogContractTests(unittest.TestCase):
     def test_heavy_marks_duplicates_and_light_does_not_recompute_them(self) -> None:
         size = MIN_VIDEO_FILE_BYTES + 1
         heavy_rows = [
-            self.video("a", "电影/same.mp4", size=size),
-            self.video("b", "电影/copy.mp4", size=size),
+            self.video("a", "电影/same.mp4", size=size, root=self.tmp.name),
+            self.video("b", "电影/copy.mp4", size=size, root=self.tmp.name),
         ]
+        for row in heavy_rows:
+            path = Path(row["root"]) / row["rel"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((b"same-content" * ((size // 12) + 1))[:size])
         compute_catalog(heavy_rows, heavy=True)
         self.assertTrue(all(row.get("dup") for row in heavy_rows))
 

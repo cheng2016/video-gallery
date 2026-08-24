@@ -3,20 +3,42 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 from vg.config import MIN_VIDEO_FILE_BYTES
 from vg.duplicates import find_duplicate_groups, mark_duplicates
 
 
 class DuplicateRuleTests(unittest.TestCase):
-    def video(self, vid: str, name: str, size: int, *, folder: str = "电影", kind: str = "") -> dict:
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def video(
+        self,
+        vid: str,
+        name: str,
+        size: int,
+        *,
+        folder: str = "电影",
+        kind: str = "",
+        content: bytes | None = None,
+    ) -> dict:
+        path = self.root / folder / f"{vid}.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        seed = content if content is not None else f"{name}:{vid}".encode()
+        path.write_bytes((seed * ((size // len(seed)) + 1))[:size])
         item = {
             "id": vid,
             "name": name,
             "filename": f"{name}.mp4",
             "rel": f"{folder}/{vid}.mp4",
             "folder": folder,
-            "root": "D:/library",
+            "root": str(self.root),
             "ext": ".mp4",
             "size": size,
         }
@@ -27,9 +49,9 @@ class DuplicateRuleTests(unittest.TestCase):
     def test_groups_and_runtime_badges_share_reasons(self) -> None:
         size = MIN_VIDEO_FILE_BYTES + 1
         videos = [
-            self.video("a", "Same", size),
-            self.video("b", " same ", size),
-            self.video("c", "Other", size + 1),
+            self.video("a", "First", size, content=b"same-content"),
+            self.video("b", "Second", size, content=b"same-content"),
+            self.video("c", "Other", size, content=b"different-content"),
         ]
 
         groups = find_duplicate_groups(videos)
@@ -43,7 +65,7 @@ class DuplicateRuleTests(unittest.TestCase):
             marked = set((item.get("dup_reason") or "").split("+")) - {""}
             self.assertEqual(marked, reasons_by_id.get(item["id"], set()))
 
-        self.assertEqual({group["reason"] for group in groups}, {"同名", "同体积"})
+        self.assertEqual({group["reason"] for group in groups}, {"同内容"})
         self.assertEqual(videos[0]["dup_n"], 2)
         self.assertEqual(videos[1]["dup_n"], 2)
         self.assertNotIn("dup", videos[2])
@@ -57,6 +79,24 @@ class DuplicateRuleTests(unittest.TestCase):
             self.video("d", "Playlist", MIN_VIDEO_FILE_BYTES, kind="m3u8"),
         ]
         self.assertEqual(find_duplicate_groups(videos), [])
+
+    def test_same_name_different_content_is_not_duplicate(self) -> None:
+        size = MIN_VIDEO_FILE_BYTES + 1
+        videos = [
+            self.video("a", "同名", size, content=b"content-a"),
+            self.video("b", "同名", size, content=b"content-b"),
+        ]
+        mark_duplicates(videos)
+        self.assertEqual(find_duplicate_groups(videos), [])
+        self.assertTrue(all("dup" not in item for item in videos))
+
+    def test_different_size_is_not_hashed_or_marked(self) -> None:
+        videos = [
+            self.video("a", "A", MIN_VIDEO_FILE_BYTES + 1, content=b"same-content"),
+            self.video("b", "B", MIN_VIDEO_FILE_BYTES + 2, content=b"same-content"),
+        ]
+        self.assertEqual(find_duplicate_groups(videos), [])
+        self.assertTrue(all("dup" not in item for item in videos))
 
     def test_same_physical_entry_is_not_duplicated(self) -> None:
         item = self.video("a", "Same", MIN_VIDEO_FILE_BYTES)

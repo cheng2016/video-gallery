@@ -51,6 +51,7 @@ from vg.catalog import (
     video_search_text as _video_search_text,
 )
 from vg.catalog_repository import find_video_by_id
+from vg.duplicates import video_identity
 from vg.config import (
     APP_DIR,
     BROWSER_FRIENDLY_EXTS,
@@ -137,6 +138,65 @@ _video_response_cache_bytes = 0
 _tree_payload_cache: OrderedDict[tuple, dict] = OrderedDict()
 _tree_payload_cache_lock = threading.RLock()
 _TREE_PAYLOAD_CACHE_MAX = 16
+
+# Duplicate badges are derived runtime fields and are intentionally removed
+# before a row is persisted to SQLite. The SQL paging path therefore needs a
+# small, generation-scoped lookup to restore those fields without scanning or
+# re-running duplicate detection for every page request.
+_runtime_duplicate_index_lock = threading.RLock()
+_runtime_duplicate_index_key: tuple[int, int, int] | None = None
+_runtime_duplicate_index: dict[str, dict[str, object]] = {}
+_runtime_duplicate_video_count = 0
+
+
+def _video_location_identity(video: dict) -> str:
+    """Return a root/relative-path key for persisted-vs-runtime ID changes."""
+    root = (video.get("_lib_root") or video.get("root") or "").strip().replace("/", "\\").rstrip("\\").casefold()
+    rel = (video.get("rel") or "").replace("\\", "/").strip("/").casefold()
+    if not root or not rel:
+        return ""
+    return f"{root}|{rel}"
+
+
+def _runtime_duplicate_fields_index() -> tuple[dict[str, dict[str, object]], int, int]:
+    """Return ``identity -> duplicate fields`` for the current catalog."""
+    global _runtime_duplicate_index_key
+    global _runtime_duplicate_index
+    global _runtime_duplicate_video_count
+
+    videos = STATE.get("videos") or []
+    key = (id(videos), int(STATE.get("lib_gen") or 0), len(videos))
+    with _runtime_duplicate_index_lock:
+        if key != _runtime_duplicate_index_key:
+            index: dict[str, dict[str, object]] = {}
+            marked_count = 0
+            for video in videos:
+                if not video.get("dup"):
+                    continue
+                identity = video_identity(video)
+                if not identity:
+                    continue
+                fields = {
+                    "dup": True,
+                    "dup_n": int(video.get("dup_n") or 0),
+                    "dup_reason": str(video.get("dup_reason") or "重复"),
+                }
+                index[identity] = fields
+                location_identity = _video_location_identity(video)
+                if location_identity:
+                    # A unified multi-disk catalog may intentionally rewrite a
+                    # colliding runtime id while SQLite retains the source id.
+                    # The owning root + relative path remains stable.
+                    index.setdefault(location_identity, fields)
+                marked_count += 1
+            _runtime_duplicate_index_key = key
+            _runtime_duplicate_index = index
+            _runtime_duplicate_video_count = marked_count
+        return (
+            _runtime_duplicate_index,
+            len(videos),
+            _runtime_duplicate_video_count,
+        )
 
 
 @app.errorhandler(Exception)
@@ -1567,6 +1627,11 @@ def api_videos():
                 )
             sql_ms = (time.perf_counter() - sql_started) * 1000.0
             thumb_started = time.perf_counter()
+            duplicate_index, runtime_video_count, runtime_duplicate_count = (
+                _runtime_duplicate_fields_index()
+            )
+            sql_runtime_field_rows = 0
+            matched_runtime_duplicate_rows = 0
             slim = []
             for video in page:
                 enriched = dict(video)
@@ -1574,6 +1639,14 @@ def api_videos():
                     enriched["root"] = lib or enriched.get("_lib_root") or ""
                 if lib and not enriched.get("root"):
                     enriched["root"] = lib
+                if any(key in enriched for key in ("dup", "dup_n", "dup_reason")):
+                    sql_runtime_field_rows += 1
+                duplicate_fields = duplicate_index.get(video_identity(enriched))
+                if duplicate_fields is None:
+                    duplicate_fields = duplicate_index.get(_video_location_identity(enriched))
+                if duplicate_fields:
+                    enriched.update(duplicate_fields)
+                    matched_runtime_duplicate_rows += 1
                 attach_thumb_meta(enriched)
                 excluded = {
                     "_q", "_lib_root", "_lib_cache", "_folder_raw", "_thumb_id", "segments"
@@ -1586,7 +1659,6 @@ def api_videos():
             facet_started = time.perf_counter()
             base_facet_ms = 0.0
             type_facet_ms = 0.0
-            level_facet_started = time.perf_counter()
             if offset == 0:
                 base_facet_started = time.perf_counter()
                 facet_rows = [
@@ -1631,6 +1703,7 @@ def api_videos():
                 facets = {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
             facets_ms = (time.perf_counter() - facet_started) * 1000.0
             levels = []
+            level_facet_ms = 0.0
             if offset == 0 and category and category != "__root__":
                 level_facet_started = time.perf_counter()
                 # SQL 路径也要返回完整的子类层级。此前只使用当前 folder 的
@@ -1678,7 +1751,7 @@ def api_videos():
                         "selected": selected,
                         "items": items,
                     })
-            level_facet_ms = (time.perf_counter() - level_facet_started) * 1000.0 if offset == 0 else 0.0
+                level_facet_ms = (time.perf_counter() - level_facet_started) * 1000.0
             serialize_started = time.perf_counter()
             response = jsonify({
                 "videos": slim,
@@ -1722,6 +1795,10 @@ def api_videos():
                 probe_ms=f"{probe_ms:.1f}",
                 probe_count=probe_count,
                 sql_ms=f"{sql_ms:.1f}",
+                runtime_video_rows=runtime_video_count,
+                runtime_duplicate_rows=runtime_duplicate_count,
+                sql_runtime_field_rows=sql_runtime_field_rows,
+                matched_runtime_duplicate_rows=matched_runtime_duplicate_rows,
                 facets_ms=f"{facets_ms:.1f}",
                 base_facet_ms=f"{base_facet_ms:.1f}",
                 type_facet_ms=f"{type_facet_ms:.1f}",
