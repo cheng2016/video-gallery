@@ -2250,6 +2250,7 @@
     function setSidebarHidden(hidden) {
       const before = document.body.classList.contains("sidebar-hidden");
       document.body.classList.toggle("sidebar-hidden", !!hidden);
+      state._virtualCols = null;
       if (isMobile()) {
         $("sidebar").classList.toggle("open", !hidden);
       }
@@ -2276,6 +2277,7 @@
       if (isMobile()) {
         const before = $("sidebar").classList.contains("open");
         $("sidebar").classList.toggle("open");
+        state._virtualCols = null;
         clientLog("sidebar_mobile_overlay_changed", filterStateFields({
           open_before: before,
           open_after: $("sidebar").classList.contains("open"),
@@ -4098,7 +4100,30 @@
       const grid = $("grid");
       const w = (grid && grid.clientWidth) || 800;
       const min = window.matchMedia("(max-width: 900px)").matches ? 160 : 220;
-      return Math.max(1, Math.floor((w + VIRTUAL_GAP) / (min + VIRTUAL_GAP)));
+      const calculated = Math.max(1, Math.floor((w + VIRTUAL_GAP) / (min + VIRTUAL_GAP)));
+      // Do not let scrollHeight/scrollbar layout feedback change the column
+      // count during ordinary scroll renders.  A column-count change changes
+      // the virtual catalog height by tens of thousands of pixels and looks
+      // like the whole list was loaded.  Recalculate on an explicit resize
+      // (see bindVirtualScroll) or when the layout is explicitly invalidated.
+      const previous = state._virtualCols;
+      if (!Number.isFinite(previous)) {
+        state._virtualCols = calculated;
+      } else if (previous !== calculated) {
+        clientLog("virtual_columns_changed", {
+          previous_cols: previous,
+          calculated_cols: calculated,
+          kept_cols: previous,
+          grid_width: w,
+          content_width: $("contentScroll")?.clientWidth || 0,
+          window_width: window.innerWidth,
+          mobile_media: window.matchMedia("(max-width: 900px)").matches,
+          scroll_top: Math.round($("contentScroll")?.scrollTop || 0),
+          scroll_height: $("contentScroll")?.scrollHeight || 0,
+          reason: "layout_feedback_during_render",
+        }, "WARN");
+      }
+      return state._virtualCols;
     }
 
     function updateGridHint() {
@@ -4130,7 +4155,15 @@
       if (!grid || !root) return;
       const cols = getVirtualCols();
       const loadedBase = Number(state.loadedBaseOffset) || 0;
-      let total = Math.max(state.totalCount || 0, loadedBase + state.loadedVideos.length);
+      const loadedTotal = loadedBase + state.loadedVideos.length;
+      // While more pages remain, the scrollbar should represent the portion
+      // that is actually loaded.  Using state.totalCount here made the first
+      // 20-card page get a full-catalog scrollHeight, so its thumb looked as
+      // if all 758/781 videos had already been loaded.  Once the final page
+      // arrives, switch to the final catalog total.
+      let total = state.hasMore
+        ? loadedTotal
+        : Math.max(state.totalCount || 0, loadedTotal);
       // During a scan totalCount changes on every _publish_live() call which
       // makes the spacer heights jump and visibly pushes the scroll position.
       // Rounding up to the nearest batch-size multiple keeps the spacer stable
@@ -4152,21 +4185,19 @@
       const end = Math.max(start, Math.min(state.loadedVideos.length, globalEnd - loadedBase));
       const renderStartRow = Math.max(firstRow, Math.floor(loadedBase / cols));
       const padTop = renderStartRow * rowStride;
-      // Cap padBot so scrollHeight doesn't inflate to ~170 000 px when only
-      // a fraction of videos is loaded.  Keeps the scrollbar thumb usable
-      // (≥ ~33 % of track) while still allowing the user to scroll to the
-      // bottom where the sentinel triggers the next batch.
+      // The bottom spacer now represents only the loaded prefix while more
+      // pages remain.  This keeps the first-page thumb proportional to the
+      // first page and lets it shrink naturally as pages are appended.
       const loadedRows = Math.ceil(state.loadedVideos.length / Math.max(cols, 1));
       const loadedContentH = loadedRows * rowStride;
       const rawPadBot = Math.max(0, (totalRows - lastRow - 1) * rowStride);
-      const maxScrollH = padTop + loadedContentH + viewH;
-      const padBot = Math.min(rawPadBot, Math.max(0, maxScrollH - padTop - loadedContentH));
+      const padBot = rawPadBot;
       const beforePadTop = state._lastVPadTop ?? -1;
       const beforePadBot = state._lastVPadBot ?? -1;
       state._lastVPadTop = padTop;
       state._lastVPadBot = padBot;
       // Diagnostic: log spacer state to track scrollbar / list issues
-      if (padBot !== rawPadBot || state.loadedVideos.length <= 40) {
+      if (state.loadedVideos.length <= 40) {
         clientLog("virtual_spacer_state", {
           elapsed_ms: 0,
           loaded: state.loadedVideos.length,
@@ -4176,11 +4207,11 @@
           pad_bot: padBot,
           raw_pad_bot: rawPadBot,
           loaded_content_h: loadedContentH,
-          max_scroll_h: maxScrollH,
+          expected_full_height: totalRows * rowStride,
           view_h: viewH,
           scroll_height: root.scrollHeight,
           capped: padBot < rawPadBot,
-        }, padBot < rawPadBot ? "INFO" : "WARN");
+        }, "INFO");
       }
       grid.innerHTML =
         `<div class="v-spacer" style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
@@ -4218,7 +4249,6 @@
       if (baseShifted) jumpReason = "loaded_head_trim";
       else if (loadedShifted && padTopJump !== 0) jumpReason = "loaded_tail_append";
       else if (totalShifted) jumpReason = "total_rebound";
-      const bufferDisturbed = jumpReason !== "render_window_shift";
       if (Math.abs(padTopJump) >= rowStride * 4 || Math.abs(padBotJump) >= rowStride * 8) {
         clientLog("virtual_grid_spacer_jump", {
           elapsed_ms: 0,
@@ -4241,14 +4271,18 @@
           loaded_shifted: loadedShifted,
           total_shifted: totalShifted,
         }, "WARN");
-        if (bufferDisturbed && Math.abs(padTopJump) >= rowStride * 3 && root) {
+        // Appending a page grows the loaded-prefix height but does not change
+        // the coordinate system.  The old compensation treated any
+        // loaded-count change as a head shift and repeatedly advanced
+        // scrollTop, which in turn triggered page after page in one second.
+        // Only a real head trim (loadedBase changing) needs compensation.
+        if (baseShifted && Math.abs(padTopJump) >= rowStride * 3 && root) {
           root.scrollTop += padTopJump;
           compensatedForPadTopPx = padTopJump;
         }
-        if (bufferDisturbed && Math.abs(padBotJump) >= rowStride * 4 && root) {
-          root.scrollTop += padBotJump;
-          compensatedForPadBotPx = padBotJump;
-        }
+        // The bottom spacer grows naturally as pages are appended.  Never
+        // compensate scrollTop for padBot or appending a page would move the
+        // user backwards by an entire unloaded region.
       }
       if (compensatedForPadTopPx || compensatedForPadBotPx) {
         clientLog("scroll_position_compensated", {
@@ -4267,6 +4301,22 @@
           cols,
         }, "INFO");
       }
+      if (Math.abs(padBotJump) >= rowStride * 4) {
+        clientLog("virtual_bottom_spacer_change", {
+          pad_bot_before: beforePadBot,
+          pad_bot_after: padBot,
+          pad_bot_delta: padBotJump,
+          raw_pad_bot: rawPadBot,
+          total_count: total,
+          loaded_videos: loadedNow,
+          loaded_base: loadedBase,
+          scroll_top: Math.round(scrollTop),
+          scroll_height_before: scrollHeight,
+          scroll_height_after: root ? root.scrollHeight : scrollHeight,
+          change_reason: jumpReason,
+          compensation_applied: compensatedForPadBotPx !== 0,
+        }, "INFO");
+      }
       updateGridHint();
       watchThumbs(grid);
       // Auto-load when the visible window reaches the tail of currently
@@ -4280,7 +4330,22 @@
       // and this nearTail check proactively fetches the next batch as
       // soon as the rendered window touches the last couple of rows of
       // the loaded buffer.
-      const nearTail = state.hasMore && globalEnd >= loadedBase + state.loadedVideos.length - cols * 2;
+      // With a full-height spacer, the first viewport can still overlap the
+      // end of the small loaded prefix (e.g. 20 cards in a 2-column grid).
+      // Do not interpret that initial overlap as a request to prefetch pages
+      // at scrollTop=0; otherwise the first page keeps loading while the
+      // user is still at the top and looks like the whole list was loaded.
+      const loadedEndIndex = loadedBase + state.loadedVideos.length;
+      const loadedEndRow = Math.ceil(loadedEndIndex / Math.max(1, cols));
+      const loadedTailTop = loadedEndRow * rowStride;
+      const viewportBottom = scrollTop + viewH;
+      // Require the viewport to reach the actual end of the loaded prefix.
+      // Do not use the rendered-window end or a generous prefetch margin:
+      // those values made a full-height virtual list request pages while the
+      // user was still far above the loaded tail.
+      const tailTriggerMargin = 0;
+      const loadedTailReached = viewportBottom >= loadedTailTop - tailTriggerMargin;
+      const nearTail = state.hasMore && loadedTailReached;
       if (nearTail && !loadingMore) {
         clientLog("auto_load_more_triggered", {
           elapsed_ms: 0,
@@ -4296,6 +4361,12 @@
           offset: state.offset || 0,
           scroll_top: Math.round(scrollTop),
           scroll_height: scrollHeight,
+          viewport_bottom: Math.round(viewportBottom),
+          loaded_end_index: loadedEndIndex,
+          loaded_end_row: loadedEndRow,
+          loaded_tail_top: loadedTailTop,
+          tail_trigger_margin: tailTriggerMargin,
+          loaded_tail_reached: loadedTailReached,
         }, "INFO");
         loadMore("virtual_grid_tail");
       }
@@ -4355,6 +4426,41 @@
           const shouldRateLog = nowTs - lastScrollLogAt >= 500;
           const distanceFromBottom = Math.max(0, sHeight - sTop - cHeight);
           const nearBottom = state.hasMore && distanceFromBottom < Math.max(400, cHeight * 1.2);
+          // Record both the final catalog geometry and the currently loaded
+          // prefix geometry so scrollbar changes can be distinguished from a
+          // real loaded-list shrink.
+          const cols = getVirtualCols();
+          const rowStride = VIRTUAL_ROW_H + VIRTUAL_GAP;
+          const expectedRows = Math.ceil(Math.max(0, Number(state.totalCount) || 0) / Math.max(1, cols));
+          const expectedFullHeight = expectedRows * rowStride;
+          const loadedTotalForGeometry =
+            (Number(state.loadedBaseOffset) || 0) + state.loadedVideos.length;
+          const loadedRowsForGeometry = Math.ceil(
+            Math.max(0, loadedTotalForGeometry) / Math.max(1, cols)
+          );
+          const loadedPrefixHeight = Math.max(rowStride, loadedRowsForGeometry * rowStride);
+          const thumbRatio = cHeight / Math.max(cHeight, sHeight);
+          const expectedThumbRatio = cHeight / Math.max(cHeight, expectedFullHeight);
+          if (shouldRateLog || nearBottom || jumpCount > 0) {
+            clientLog("virtual_scroll_geometry", filterStateFields({
+              scroll_top: Math.round(sTop),
+              scroll_height: sHeight,
+              client_height: cHeight,
+              expected_full_height: expectedFullHeight,
+              loaded_prefix_height: loadedPrefixHeight,
+              scrollbar_target: state.hasMore ? "loaded_prefix" : "catalog_total",
+              actual_vs_expected_ratio: Number((sHeight / Math.max(1, expectedFullHeight)).toFixed(3)),
+              thumb_ratio: Number(thumbRatio.toFixed(4)),
+              expected_thumb_ratio: Number(expectedThumbRatio.toFixed(4)),
+              loaded: state.loadedVideos.length,
+              loaded_base: Number(state.loadedBaseOffset) || 0,
+              total: state.totalCount || 0,
+              offset: state.offset || 0,
+              has_more: !!state.hasMore,
+              spacer_capped: false,
+              direction,
+            }), "INFO");
+          }
           if (shouldRateLog || nearBottom || jumpCount > 0) {
             lastScrollLogAt = nowTs;
             clientLog("scroll_tick", filterStateFields({
@@ -4380,6 +4486,9 @@
         });
       }, { passive: true });
       window.addEventListener("resize", () => {
+        // Explicit viewport resize is the one safe time to recompute the
+        // responsive column count.
+        state._virtualCols = null;
         if (state.virtualEnabled) renderVirtualGrid();
       });
     }
@@ -4443,7 +4552,34 @@
       empty.style.display = "none";
 
       if (state.virtualEnabled) {
+        const appendScrollTop = root ? root.scrollTop : 0;
+        const appendScrollHeight = root ? root.scrollHeight : 0;
+        const previousOverflowAnchor = root ? root.style.overflowAnchor : "";
+        // Replacing the virtual window's innerHTML can make the browser pick
+        // a different scroll anchor.  That was observed as +328/+99 px jumps
+        // immediately after a page append, which could make the next tail
+        // check fire without an intentional user scroll.
+        if (append && root) root.style.overflowAnchor = "none";
         renderVirtualGrid();
+        const renderScrollTop = root ? root.scrollTop : appendScrollTop;
+        if (append && root) {
+          root.scrollTop = appendScrollTop;
+          root.style.overflowAnchor = previousOverflowAnchor;
+          if (renderScrollTop !== appendScrollTop) {
+            clientLog("virtual_append_scroll_preserved", {
+              before_scroll_top: Math.round(appendScrollTop),
+              render_scroll_top: Math.round(renderScrollTop),
+              after_scroll_top: Math.round(root.scrollTop),
+              scroll_top_delta_before_restore: Math.round(renderScrollTop - appendScrollTop),
+              scroll_height_before: appendScrollHeight,
+              scroll_height_after: root.scrollHeight,
+              appended: beforeVideosInput,
+              loaded_before: beforeLoaded,
+              loaded_after: afterLoaded,
+              offset: state.offset || 0,
+            }, "WARN");
+          }
+        }
         // Always bind the sentinel observer, even when has_more=true.
         // Previously the guard `if (!state.hasMore)` meant that in virtual
         // scroll mode the ONLY trigger for loading more was the nearTail
@@ -4784,7 +4920,27 @@
       state.totalCount = data.count || 0;
       state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
       state.hasMore = !!data.has_more;
-      state.offset = (data.videos || []).length;
+      // A polling refresh intentionally requests the page at the current
+      // offset so it can observe catalog changes without resetting the
+      // user's scroll position.  That page is not the first page, so do not
+      // replace the loaded buffer or rewind the pagination cursor to its
+      // batch length (doing so made 40 loaded cards suddenly become 20 and
+      // caused the next request to duplicate an earlier page).
+      const preserveLoadedBuffer = softRefresh && hadScrolled && fetchOffset > 0;
+      if (preserveLoadedBuffer) {
+        clientLog("refresh_loaded_buffer_preserved", filterStateFields({
+          reason: "soft_refresh_scrolled",
+          requested_offset: fetchOffset,
+          returned_rows: Array.isArray(data.videos) ? data.videos.length : 0,
+          loaded_before: state.loadedVideos ? state.loadedVideos.length : 0,
+          offset_before: currentOffset,
+          offset_after: currentOffset,
+          total: data.count || 0,
+        }), "INFO", refreshOperationId);
+        state.offset = currentOffset;
+      } else {
+        state.offset = (data.videos || []).length;
+      }
       // 记忆的频道/子类若在当前盘无效，导致空列表时自动清空
       // 注意：取消「全部」后根目录可能无片，或落在叶子目录，路径仍可能有效
       const levels = data.subfolder_levels || [];
@@ -4907,7 +5063,13 @@
         rendered_sub_tags: $("subFolderRows")?.querySelectorAll("[data-folder]").length || 0,
       }), "INFO", refreshOperationId);
       renderCrumb();
-      renderGrid(data.videos || [], lastScanning, false);
+      if (!preserveLoadedBuffer) {
+        renderGrid(data.videos || [], lastScanning, false);
+      } else if (state.virtualEnabled) {
+        // Recompute spacers for a changed total while retaining all loaded
+        // cards and the user's current scroll position.
+        renderVirtualGrid();
+      }
       const libTip = state.lib
         ? ((state.mountedRoots.find((r) => sameLibPath(r.path, state.lib)) || {}).label || state.lib)
         : (state.multi ? "全部目录" : "");
