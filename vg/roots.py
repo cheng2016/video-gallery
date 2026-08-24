@@ -757,7 +757,11 @@ def publish_unified_library() -> int:
 
     STATE["videos"] = merged
     STATE["tree"] = tree_for_scope(None)
-    rebuild_indexes(merged)
+    # heavy=False: skip mark_duplicates (reads entire video files from disk).
+    # The dup/dup_n/dup_reason fields are already persisted in the SQLite
+    # catalog and survive the restore.  Full-file hash re-detection belongs
+    # in the scan path, not in a cached startup.
+    rebuild_indexes(merged, heavy=False)
     STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
     # Warm on-disk cache for facets + per-scope folder trees.
     # ``rebuild_indexes`` already ran ``save_facets_disk_cache`` via

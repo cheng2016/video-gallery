@@ -89,11 +89,19 @@ def _content_hash(video: VideoItem) -> tuple[str, int, str]:
 
 
 def find_duplicate_groups(videos: list[VideoItem]) -> list[DuplicateGroup]:
-    """Group distinct files by exact-size candidates plus full content hash.
+    """Group distinct files by exact-size candidates plus content identity.
 
-    Files enter the expensive content-hash stage only when at least two files
-    have the exact same size and are at least ``MIN_VIDEO_FILE_BYTES`` bytes.
-    A full digest is required before a duplicate group is emitted.
+    Three-tier strategy to minimise disk I/O:
+
+    1. Group by exact file size — O(N), no I/O.
+    2. Within each size group, sub-group by the scan ``file_sig`` fingerprint
+       (head + middle + tail, 3 × 64 KiB = 192 KiB already persisted in the
+       catalog).  Size + 192 KiB sampled digest is practically collision-free
+       for video files, so these groups are emitted directly.  **Zero
+       additional disk reads.**
+    3. Only when ``file_sig`` is missing fall back to a full-content blake2b
+       hash.  This is the slow path and should be rare after the first scan.
+
     Playlist, TS-set and synthetic series cards are excluded.
     """
     by_size: dict[int, list[VideoItem]] = {}
@@ -108,38 +116,62 @@ def find_duplicate_groups(videos: list[VideoItem]) -> list[DuplicateGroup]:
     seen: set[tuple[str, tuple[str, ...]]] = set()
     hash_started = time.perf_counter()
     candidate_rows = sum(len(items) for items in by_size.values() if len(items) >= 2)
+    # Tier-2 stats (file_sig, no extra I/O)
+    sig_groups_emitted = 0
+    sig_groups_resolved = 0
+    # Tier-3 stats (full content hash, expensive disk I/O)
     hash_attempts = 0
     hash_cache_hits = 0
     hash_failures = 0
     hash_bytes = 0
 
-    def add_group(candidates: list[VideoItem]) -> None:
+    def add_group(reason: str, candidates: list[VideoItem]) -> None:
         unique = {video_identity(video): video for video in candidates}
         items = list(unique.values())
         if len(items) < 2:
             return
-        key = ("同内容", tuple(sorted(unique)))
+        key = (reason, tuple(sorted(unique)))
         if key in seen:
             return
         seen.add(key)
-        groups.append({"reason": "同内容", "items": items})
+        groups.append({"reason": reason, "items": items})
 
     for candidates in by_size.values():
         if len(candidates) < 2:
             continue
-        by_hash: dict[str, list[VideoItem]] = {}
+
+        # --- Tier 2: existing scan fingerprint (zero I/O) ----------------
+        by_sig: dict[str, list[VideoItem]] = {}
+        missing_sig: list[VideoItem] = []
         for video in candidates:
-            digest, bytes_read, source = _content_hash(video)
-            hash_attempts += 1
-            hash_bytes += bytes_read
-            if source == "cache":
-                hash_cache_hits += 1
-            if not digest:
-                hash_failures += 1
-                continue
-            by_hash.setdefault(digest, []).append(video)
-        for hashed in by_hash.values():
-            add_group(hashed)
+            sig = str(video.get("file_sig") or "").strip()
+            if sig:
+                by_sig.setdefault(sig, []).append(video)
+            else:
+                missing_sig.append(video)
+
+        # Fingerprint sub-groups with 2+ members are duplicates.
+        for sig, sig_members in by_sig.items():
+            if len(sig_members) >= 2:
+                add_group("同内容", sig_members)
+                sig_groups_resolved += 1
+            sig_groups_emitted += 1
+
+        # --- Tier 3: full content hash (only for missing fingerprints) ----
+        if missing_sig:
+            by_hash: dict[str, list[VideoItem]] = {}
+            for video in missing_sig:
+                digest, bytes_read, source = _content_hash(video)
+                hash_attempts += 1
+                hash_bytes += bytes_read
+                if source == "cache":
+                    hash_cache_hits += 1
+                if not digest:
+                    hash_failures += 1
+                    continue
+                by_hash.setdefault(digest, []).append(video)
+            for hashed in by_hash.values():
+                add_group("同内容", hashed)
 
     try:
         from vg.diagnostics import perf as diagnostic_perf
@@ -152,6 +184,8 @@ def find_duplicate_groups(videos: list[VideoItem]) -> list[DuplicateGroup]:
             force=True,
             input_rows=len(videos),
             same_size_candidate_rows=candidate_rows,
+            sig_groups_emitted=sig_groups_emitted,
+            sig_groups_resolved=sig_groups_resolved,
             hash_attempts=hash_attempts,
             hash_cache_hits=hash_cache_hits,
             hash_failures=hash_failures,
