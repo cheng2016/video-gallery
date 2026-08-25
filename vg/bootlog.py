@@ -371,7 +371,7 @@ def init(reset: bool = False) -> Path:
             _PENDING_DIAG.clear()
     for diag_line in pending_diag_snapshot:
         try:
-            ts = datetime.now().strftime("%H:%M:%S")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             formatted = f"[{ts}] [DIAG] {diag_line}\n"
             with _WRITE_LOCK:
                 with _LOG_PATH.open("a", encoding="utf-8", errors="replace") as f:
@@ -444,7 +444,7 @@ def write(msg: str, *, urgent: bool = False) -> None:
         if not _INIT:
             init(reset=False)
         line = str(msg).rstrip("\n")
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         formatted = f"[{ts}] {line}\n"
         if urgent:
             flush(sync=False)

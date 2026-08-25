@@ -12,6 +12,7 @@ from collections import OrderedDict
 
 from vg.cache import ensure_cache_dir
 from vg.catalog import build_category_facets, build_tree, rebuild_indexes, video_category
+from vg.config import MIN_VIDEO_FILE_BYTES
 from vg.disk_libs import (
     archive_current_library,
     ensure_library,
@@ -675,8 +676,20 @@ def tree_for_scope(lib: str | None = None) -> dict:
     }
 
 
-def publish_unified_library() -> int:
-    """Merge all mounted roots into STATE videos/indexes. Folders stay original (no fake prefix)."""
+def publish_unified_library(
+    *,
+    heavy: bool = True,
+    reason: str = "publish",
+    refresh_tree: bool = True,
+) -> int:
+    """Merge mounted roots into STATE videos/indexes.
+
+    ``heavy=False`` is used for post-thumbnail refreshes: thumbnail fields do
+    not affect duplicate grouping, so rerunning the expensive duplicate pass
+    is unnecessary. ``refresh_tree=False`` keeps the existing folder tree when
+    only media metadata changed.
+    """
+    publish_started = time.perf_counter()
     roots = get_mounted_roots()
     if not roots:
         return len(STATE.get("videos") or [])
@@ -756,27 +769,117 @@ def publish_unified_library() -> int:
         pass
 
     STATE["videos"] = merged
-    STATE["tree"] = tree_for_scope(None)
-    # heavy=False: skip mark_duplicates (reads entire video files from disk).
-    # The dup/dup_n/dup_reason fields are already persisted in the SQLite
-    # catalog and survive the restore.  Full-file hash re-detection belongs
-    # in the scan path, not in a cached startup.
-    rebuild_indexes(merged, heavy=False)
-    # Diagnostic: show how many restored videos carry dup badges from cache,
-    # so it's clear whether duplicate detection is effective or needs a
-    # --rescan to refresh.
-    try:
-        dup_count = sum(1 for v in merged if v.get("dup"))
-        no_sig_count = sum(1 for v in merged if not str(v.get("file_sig") or "").strip())
+    tree_refresh_started = time.perf_counter()
+    if refresh_tree:
+        STATE["tree"] = tree_for_scope(None)
+    else:
+        # Thumbnail finalization changes card metadata, not folder membership.
+        # Keep the already published tree and record that the rebuild was
+        # intentionally skipped for later startup-log inspection.
         from vg.diagnostics import emit
+
         emit(
             "INFO",
-            "publish_unified_library_rebuild",
+            "publish_unified_library_tree_refresh_skipped",
             force=True,
-            heavy=False,
+            reason=reason,
             merged_count=len(merged),
-            dup_cached=dup_count,
-            missing_file_sig=no_sig_count,
+            existing_tree=bool(STATE.get("tree")),
+            elapsed_ms=(time.perf_counter() - tree_refresh_started) * 1000.0,
+        )
+    from vg.diagnostics import emit
+
+    emit(
+        "INFO",
+        "file_sig_backfill_deferred",
+        force=True,
+        source="unified_publish",
+        videos=len(merged),
+        reason="only_same_size_duplicate_candidates_are_sampled",
+        full_hash_disabled=True,
+    )
+
+    # Restore duplicate badges from the catalog using size + sampled
+    # fingerprint only. Full-content hashing is intentionally disabled.
+    size_counts: dict[int, int] = {}
+    eligible_rows = 0
+    missing_sig_rows = 0
+    for video in merged:
+        if (video.get("kind") or "") in ("m3u8", "ts_set", "series"):
+            continue
+        try:
+            size = int(video.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size < MIN_VIDEO_FILE_BYTES:
+            continue
+        eligible_rows += 1
+        size_counts[size] = size_counts.get(size, 0) + 1
+    candidate_sizes = {size for size, count in size_counts.items() if count >= 2}
+    for video in merged:
+        if (video.get("kind") or "") in ("m3u8", "ts_set", "series"):
+            continue
+        try:
+            size = int(video.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size in candidate_sizes and not str(video.get("file_sig") or "").strip():
+            missing_sig_rows += 1
+    rebuild_started = time.perf_counter()
+    try:
+        from vg.diagnostics import emit
+
+        emit(
+            "INFO",
+            "publish_unified_library_duplicate_rebuild_start",
+            force=True,
+            heavy=heavy,
+            reason=reason,
+            duplicate_rebuild_skipped=not heavy,
+            merged_count=len(merged),
+            same_size_candidate_rows=sum(size_counts[size] for size in candidate_sizes),
+            eligible_rows=eligible_rows,
+            missing_file_sig=missing_sig_rows,
+            expected_full_hash_fallback=False,
+            full_hash_disabled=True,
+        )
+    except Exception:
+        pass
+    try:
+        rebuild_indexes(merged, heavy=heavy)
+    except Exception:
+        try:
+            from vg.diagnostics import emit
+
+            emit(
+                "ERROR",
+                "publish_unified_library_duplicate_rebuild_failed",
+                force=True,
+                heavy=heavy,
+                reason=reason,
+                merged_count=len(merged),
+                elapsed_ms=(time.perf_counter() - rebuild_started) * 1000.0,
+            )
+        except Exception:
+            pass
+        raise
+    try:
+        from vg.diagnostics import emit
+
+        dup_count = sum(1 for v in merged if v.get("dup"))
+        emit(
+            "PERF",
+            "publish_unified_library_duplicate_rebuild",
+            force=True,
+            heavy=heavy,
+            reason=reason,
+            duplicate_rebuild_skipped=not heavy,
+            merged_count=len(merged),
+            duplicate_rows=dup_count,
+            missing_file_sig=missing_sig_rows,
+            expected_full_hash_fallback=False,
+            full_hash_disabled=True,
+            elapsed_ms=(time.perf_counter() - rebuild_started) * 1000.0,
         )
     except Exception:
         pass
@@ -799,7 +902,7 @@ def publish_unified_library() -> int:
         all_tree = STATE.get("tree") or {}
         merged_count = len(merged)
         warm_stats_list: list[dict] = []
-        if all_tree and merged_count:
+        if refresh_tree and all_tree and merged_count:
             st = save_tree_disk_cache("", all_tree, merged_count, only_if_missing=False)
             warm_stats_list.append(st)
         # (b) per lib (take unique libs from merged videos to cover only the
@@ -809,7 +912,7 @@ def publish_unified_library() -> int:
             s = str(v.get("_lib_root") or v.get("root") or "").rstrip("\\/")
             if s:
                 seen_libs.add(s)
-        for lib_s in seen_libs:
+        for lib_s in (seen_libs if refresh_tree else ()):
             try:
                 from vg.web import videos_for_scope  # type: ignore
             except Exception:
@@ -843,8 +946,15 @@ def publish_unified_library() -> int:
         skipped = sum(1 for s in warm_stats_list if s.get("skip_reason"))
         emit_save_log(
             "PERF",
-            "publish_tree_disk_cache_warm",
+            "publish_tree_disk_cache_warm"
+            if refresh_tree
+            else "publish_tree_disk_cache_warm_skipped",
             force=True,
+            reason=reason,
+            refresh_tree=refresh_tree,
+            skipped_reason="tree_unchanged"
+            if not refresh_tree
+            else "",
             scope_count=len(warm_stats_list),
             written=written,
             skipped=skipped,
@@ -869,6 +979,22 @@ def publish_unified_library() -> int:
         STATE["scan_live"] = None
     if STATE.get("scan_root"):
         STATE["scan_root"] = ""
+    try:
+        from vg.diagnostics import emit
+
+        emit(
+            "PERF",
+            "publish_unified_library_complete",
+            force=True,
+            reason=reason,
+            heavy=heavy,
+            refresh_tree=refresh_tree,
+            roots=len(roots),
+            videos=len(merged),
+            elapsed_ms=(time.perf_counter() - publish_started) * 1000.0,
+        )
+    except Exception:
+        pass
     log(f"[多根] 统一片库 {len(roots)} 个目录，共 {len(merged)} 部")
     return len(merged)
 

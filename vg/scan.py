@@ -2,7 +2,6 @@
 """Video scanning, indexing, and thumbnail batch jobs."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import threading
@@ -71,35 +70,12 @@ from vg.media import (
     make_thumbnail,
     start_metadata_enrichment,
 )
+from vg.signatures import file_fingerprint
 
-
-_FINGERPRINT_CHUNK = 64 * 1024
-
-
-def _file_fingerprint(path: Path, st: os.stat_result | None = None) -> str:
-    """Return a cheap content fingerprint for incremental-scan validation.
-
-    Only three 64 KiB samples (head, middle and tail) are read for large files.  The digest is
-    deliberately independent of mtime: mtime remains the fast path, while
-    this value catches a file rewritten in place with the same size and an
-    unchanged/low-resolution timestamp.
-    """
-    try:
-        stat = st or path.stat()
-        size = int(stat.st_size)
-        digest = hashlib.blake2b(digest_size=16)
-        with path.open("rb") as stream:
-            if size <= _FINGERPRINT_CHUNK * 2:
-                digest.update(stream.read())
-            else:
-                digest.update(stream.read(_FINGERPRINT_CHUNK))
-                stream.seek(max(0, (size // 2) - (_FINGERPRINT_CHUNK // 2)))
-                digest.update(stream.read(_FINGERPRINT_CHUNK))
-                stream.seek(max(0, size - _FINGERPRINT_CHUNK))
-                digest.update(stream.read(_FINGERPRINT_CHUNK))
-        return f"b2:{size}:{digest.hexdigest()}"
-    except (OSError, ValueError):
-        return ""
+# Backward-compatible import for callers/tests that used the former private
+# helper location. Scanning itself defers signature sampling to the final
+# duplicate-candidate stage.
+_file_fingerprint = file_fingerprint
 
 
 def _same_root(a: str | Path | None, b: str | Path | None) -> bool:
@@ -120,6 +96,7 @@ def start_scan(
     do_thumbs: bool = True,
     force: bool = False,
     replace_mounts: bool = True,
+    reuse_preloaded_cache: bool = False,
 ) -> tuple[bool, str]:
     """切换根目录。force=False 优先读缓存（秒开）再后台按目录核个数；force=True 增量全盘扫描。
     replace_mounts=True：片库只保留这一根；False：保留已挂载目录（用于「加入片库」）。
@@ -282,7 +259,38 @@ def start_scan(
                 STATE["scan_progress"] = f"正在加载 {root}（优先缓存）…"
                 STATE["thumb_progress"] = ""
                 STATE["scanning"] = True
-                used_cache = load_or_scan(root, do_thumbs=do_thumbs, force=False, background=False)
+                if reuse_preloaded_cache:
+                    # main.py already restored this root while publishing the
+                    # unified cached library.  Loading it again here caused a
+                    # second catalog/index rebuild on every multi-root start.
+                    reuse_started = time.perf_counter()
+                    root_key = str(root.resolve()).casefold()
+                    preloaded_count = sum(
+                        1
+                        for video in (STATE.get("videos") or [])
+                        if str(video.get("_lib_root") or video.get("root") or "")
+                        .rstrip("\\/")
+                        .casefold()
+                        == root_key.rstrip("\\/")
+                    )
+                    used_cache = True
+                    # Keep the cheap folder-count verification that normally
+                    # follows a cache load; only the duplicate catalog load
+                    # itself is skipped.
+                    want_bg_verify = True
+                    emit(
+                        "PERF",
+                        "scan_cache_reused_preloaded",
+                        force=True,
+                        root=root,
+                        videos=preloaded_count,
+                        load_skipped=True,
+                        rebuild_skipped=True,
+                        elapsed_ms=(time.perf_counter() - reuse_started) * 1000.0,
+                    )
+                    STATE["scan_progress"] = f"已复用启动缓存，共 {preloaded_count} 个视频"
+                else:
+                    used_cache = load_or_scan(root, do_thumbs=do_thumbs, force=False, background=False)
                 STATE["scanning"] = False
                 # 读到缓存后只后台核文件个数；个数一致则不再 walk 视频盘
                 want_bg_verify = bool(used_cache)
@@ -1081,11 +1089,10 @@ def scan_videos(
             and abs(float(old.get("mtime") or 0) - st.st_mtime) < 1.0
         )
         old_sig = str(old.get("file_sig") or "") if old else ""
+        # Content samples are deferred to the final duplicate stage.  The
+        # regular scan only uses size + mtime to reuse catalog rows.
         signature_match = True
-        current_sig = ""
-        if metadata_match and old_sig:
-            current_sig = _file_fingerprint(full, st)
-            signature_match = bool(current_sig) and current_sig == old_sig
+        current_sig = old_sig if metadata_match else ""
         if metadata_match and signature_match:
             item = dict(old)
             item["id"] = item.get("id") or video_id(rel)
@@ -1093,7 +1100,7 @@ def scan_videos(
             item["size_h"] = format_size(st.st_size)
             item["mtime"] = st.st_mtime
             item["mtime_h"] = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
-            item["file_sig"] = current_sig or old_sig or _file_fingerprint(full, st)
+            item["file_sig"] = current_sig or old_sig
             item["thumb"] = f"{item['id']}{THUMB_EXT}"
             item["ext"] = ext
             if ext in PLAYLIST_EXTS:
@@ -1118,16 +1125,9 @@ def scan_videos(
             elif not signature_match:
                 count_scan("video_fingerprint_changed", full)
             vid = video_id(rel)
+            # New or changed files get a signature only if the final
+            # duplicate stage proves that they share an exact size.
             file_sig = ""
-            if old is not None:
-                # Only fingerprint when there is an old entry to compare
-                # against.  A full scan with empty old_map has nothing to
-                # validate, so computing blake2b over 192 KB per file is
-                # pure waste (~76 s for 2785 videos).
-                _fp_t0 = time.perf_counter()
-                file_sig = _file_fingerprint(full, st)
-                _cum_fp_ms += (time.perf_counter() - _fp_t0) * 1000.0
-                _n_fp_calls += 1
             if not file_sig:
                 count_scan("video_fingerprint_failed", full)
             item = {
@@ -1277,6 +1277,19 @@ def scan_videos(
         v["root"] = root_s
         if "_folder_raw" not in v:
             v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
+
+    from vg.diagnostics import emit
+
+    emit(
+        "INFO",
+        "file_sig_backfill_deferred",
+        force=True,
+        source="scan_complete",
+        root=root_s,
+        videos=len(found),
+        reason="deferred_until_duplicate_final_stage",
+        full_hash_disabled=True,
+    )
     STATE["scan_live"] = found
 
     _store_t0 = time.perf_counter()
@@ -1370,23 +1383,52 @@ def scan_videos(
             from vg.roots import get_mounted_roots, publish_unified_library
 
             if len(get_mounted_roots()) > 1:
-                publish_unified_library()
+                publish_unified_library(
+                    heavy=False,
+                    reason="thumbnail_finalize",
+                    refresh_tree=False,
+                )
             else:
-                rebuild_indexes(found)
+                light_refresh_started = time.perf_counter()
+                from vg.diagnostics import emit
+
+                emit(
+                    "INFO",
+                    "thumbnail_finalize_light_refresh_start",
+                    force=True,
+                    root=root,
+                    videos=len(found),
+                    duplicate_rebuild_skipped=True,
+                    tree_rebuild=True,
+                )
+                rebuild_indexes(found, heavy=False)
                 STATE["tree"] = build_tree(root, found)
+                emit(
+                    "PERF",
+                    "thumbnail_finalize_light_refresh",
+                    force=True,
+                    root=root,
+                    videos=len(found),
+                    duplicate_rebuild_skipped=True,
+                    elapsed_ms=(time.perf_counter() - light_refresh_started) * 1000.0,
+                )
         except Exception as e:
             log(f"[多根] 预览图完成后合并失败: {e}")
             try:
                 from vg.roots import get_mounted_roots, publish_unified_library
 
                 if len(get_mounted_roots()) > 1:
-                    publish_unified_library()
+                    publish_unified_library(
+                        heavy=False,
+                        reason="thumbnail_finalize_retry",
+                        refresh_tree=False,
+                    )
                 else:
-                    rebuild_indexes(found)
+                    rebuild_indexes(found, heavy=False)
             except Exception as _exc2:
                 log(f"[扫描] 最终回退 rebuild_indexes 也失败: {_exc2}")
                 try:
-                    rebuild_indexes(found)
+                    rebuild_indexes(found, heavy=False)
                 except Exception as _exc3:
                     log(f"[扫描] rebuild_indexes 彻底失败: {_exc3}")
     elif not ffmpeg:
@@ -1489,6 +1531,18 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                     v["root"] = root_s
                     if "_folder_raw" not in v:
                         v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
+                from vg.diagnostics import emit
+
+                emit(
+                    "INFO",
+                    "file_sig_backfill_deferred",
+                    force=True,
+                    source="cache_restore",
+                    root=root_s,
+                    videos=len(videos),
+                    reason="deferred_until_duplicate_final_stage",
+                    full_hash_disabled=True,
+                )
                 STATE["tree"] = build_tree(root, videos)
                 rebuild_indexes(videos)
                 STATE["scan_progress"] = f"已加载缓存，共 {len(videos)} 个视频"

@@ -2,6 +2,7 @@
 """Pure catalog indexing/tree helpers and the single catalog STATE writer."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TypedDict
 
@@ -132,9 +133,15 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
     Derived fields on video rows remain in-place for compatibility with the
     current card/series behavior.
     """
+    compute_started = time.perf_counter()
+    duplicate_ms = series_ms = index_loop_ms = facets_build_ms = 0.0
     if heavy:
+        stage_started = time.perf_counter()
         mark_duplicates(videos)
+        duplicate_ms = (time.perf_counter() - stage_started) * 1000.0
+    stage_started = time.perf_counter()
     attach_series(videos)
+    series_ms = (time.perf_counter() - stage_started) * 1000.0
 
     by_category: dict[str, list[dict]] = {}
     by_id: dict[str, dict] = {}
@@ -143,6 +150,7 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
     category_counts: dict[str, int] = {}
     genre_counts: dict[str, int] = {}
 
+    stage_started = time.perf_counter()
     for video in videos:
         vid = video.get("id")
         if vid:
@@ -161,7 +169,9 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
         type_counts[ext] = type_counts.get(ext, 0) + 1
         for genre in ensure_video_genres(video):
             genre_counts[genre] = genre_counts.get(genre, 0) + 1
+    index_loop_ms = (time.perf_counter() - stage_started) * 1000.0
 
+    stage_started = time.perf_counter()
     types = [
         {"ext": ext, "count": count, "label": ext.lstrip(".").upper() or "未知"}
         for ext, count in sorted(type_counts.items(), key=lambda item: (-item[1], item[0]))
@@ -179,6 +189,23 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
         )
         if count > 0
     ]
+    facets_build_ms = (time.perf_counter() - stage_started) * 1000.0
+    try:
+        from vg.diagnostics import perf
+
+        perf(
+            "catalog_compute_breakdown",
+            (time.perf_counter() - compute_started) * 1000.0,
+            force=True,
+            videos=len(videos),
+            heavy=heavy,
+            duplicate_ms=duplicate_ms,
+            series_ms=series_ms,
+            index_loop_ms=index_loop_ms,
+            facets_build_ms=facets_build_ms,
+        )
+    except Exception:
+        pass
     return {
         "by_id": by_id,
         "by_thumb_id": by_thumb_id,
@@ -244,4 +271,23 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
 def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> None:
     """Compatibility orchestrator for catalog computation and STATE update."""
     selected = videos if videos is not None else (STATE.get("videos") or [])
-    apply_catalog_to_state(selected, compute_catalog(selected, heavy=heavy))
+    started = time.perf_counter()
+    indexes = compute_catalog(selected, heavy=heavy)
+    compute_ms = (time.perf_counter() - started) * 1000.0
+    apply_started = time.perf_counter()
+    apply_catalog_to_state(selected, indexes)
+    apply_ms = (time.perf_counter() - apply_started) * 1000.0
+    try:
+        from vg.diagnostics import perf
+
+        perf(
+            "catalog_rebuild_breakdown",
+            (time.perf_counter() - started) * 1000.0,
+            force=True,
+            videos=len(selected),
+            heavy=heavy,
+            compute_ms=compute_ms,
+            apply_ms=apply_ms,
+        )
+    except Exception:
+        pass

@@ -370,16 +370,32 @@ def main():
             valid = [root_s] + valid
         if len(valid) > 1:
             set_mounted_roots(valid, primary=root_s)
+            loaded_roots = {}
             for m in valid:
-                ensure_library(m)
+                loaded_roots[m] = bool(ensure_library(m))
             # Publish all cached disks before the background scan starts. The
             # first page therefore already contains the full restored library.
-            restored_count = publish_unified_library()
+            restored_count = publish_unified_library(reason="startup_restore")
             bootlog.step(
                 "restore_unified_library",
                 f"roots={len(valid)} videos={restored_count}",
             )
-            ok, msg = start_scan(root, do_thumbs=not args.no_thumbs, force=args.rescan, replace_mounts=False)
+            # ``publish_unified_library`` above already loaded the current
+            # root's catalog into STATE.  Tell start_scan to reuse that
+            # snapshot instead of loading/rebuilding the same catalog again.
+            root_cache_preloaded = bool(loaded_roots.get(root_s)) and not args.rescan
+            bootlog.step(
+                "start_scan_cache_mode",
+                f"root={root_s} preloaded={root_cache_preloaded} "
+                f"loaded_roots={sum(1 for loaded in loaded_roots.values() if loaded)}",
+            )
+            ok, msg = start_scan(
+                root,
+                do_thumbs=not args.no_thumbs,
+                force=args.rescan,
+                replace_mounts=False,
+                reuse_preloaded_cache=root_cache_preloaded,
+            )
         else:
             ok, msg = start_scan(root, do_thumbs=not args.no_thumbs, force=args.rescan, replace_mounts=True)
         bootlog.step("start_scan_done", f"ok={ok} msg={msg!r}")

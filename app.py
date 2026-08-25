@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 
@@ -63,7 +64,7 @@ def _early_log(text: str) -> Path | None:
     try:
         p = _app_dir() / "startup.log"
         with p.open("a", encoding="utf-8", errors="replace") as f:
-            f.write(text.rstrip() + "\n")
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text.rstrip()}\n")
             f.flush()
         return p
     except Exception:

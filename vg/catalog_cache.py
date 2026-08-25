@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Facets + folder-tree disk cache.
+"""Unified facets + folder-tree disk cache.
 
 The on-disk format avoids a cold ``tree_build`` step on every restart when
 the catalog has not changed.  Previously ``STATE["facets"]`` and every
@@ -8,7 +8,9 @@ a 2785-video / 4-disk multi-root catalog was ``tree_build=199.8ms`` of which
 ``tree_ms=173ms`` was the folder tree and the rest was facets counting.
 With this cache loaded, that cost drops to a few ms of json.load.
 
-Two files are written per ``cache_dir`` (``preview_cache/<root_hash>/``)::
+Unified files are written below the stable application cache directory
+(``preview_cache/unified/``), not below the currently selected disk's catalog
+directory::
 
     facets_cache.json        for the unified ``STATE["facets"]``
     tree_cache_<lib>.json    for one scope (lib="" -> `tree_cache_all.json`)
@@ -40,6 +42,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from vg.config import VGDATA_DIR
 from vg.genres import GENRES_VERSION
 from vg.taxonomy import TAXONOMY_VERSION
 
@@ -51,6 +54,7 @@ _CACHE_SCHEMA = 1
 
 _FACETS_FILENAME = "facets_cache.json"
 _TREE_FILENAME_PREFIX = "tree_cache_"
+_UNIFIED_CACHE_DIRNAME = "unified"
 
 # Thread-local + per-path locks are unnecessary because writes only happen
 # from single-threaded STATE-mutating code (apply_catalog_to_state /
@@ -151,33 +155,19 @@ def _signatures_equal(a: dict, b: dict) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 def _primary_cache_dir() -> Path | None:
-    """Return a writable cache dir, preferring the published STATE cache dir.
+    """Return the stable cache directory for the unified library.
 
-    Facets are written to the *primary* cache dir because they describe the
-    union of all mounted roots; keeping one file per root would be wasteful
-    and harder to keep in sync.
+    ``tree_cache_all.json`` and facets describe all mounted roots, so their
+    ownership must not follow ``STATE["cache_dir"]`` when the primary disk
+    changes from D: to C:. Per-disk catalog and thumbnail caches remain in
+    their existing ``preview_cache/<root_hash>/`` directories.
     """
-    from vg.state import STATE
-
-    s = STATE.get("cache_dir")
-    if s:
-        try:
-            p = Path(s)
-            p.mkdir(parents=True, exist_ok=True)
-            return p
-        except OSError:
-            pass
-    mounted = _mounted_roots_for_signature()
-    if mounted:
-        try:
-            from vg.cache import ensure_cache_dir
-
-            p = ensure_cache_dir(Path(mounted[0]))
-            p.mkdir(parents=True, exist_ok=True)
-            return p
-        except OSError:
-            pass
-    return None
+    try:
+        path = VGDATA_DIR / _UNIFIED_CACHE_DIRNAME
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except OSError:
+        return None
 
 
 def _atomic_write_json(path: Path, data: Any) -> int:
@@ -239,6 +229,7 @@ def load_facets_disk_cache(
     stats: dict[str, Any] = {
         "event": "facets_disk_cache_load",
         "expected_count": int(expected_videos_count),
+        "cache_scope": "unified",
     }
     cache_dir = _primary_cache_dir()
     if cache_dir is None:
@@ -305,6 +296,7 @@ def save_facets_disk_cache(
     stats: dict[str, Any] = {
         "event": "facets_disk_cache_save",
         "count": int(videos_count),
+        "cache_scope": "unified",
     }
     cache_dir = _primary_cache_dir()
     if cache_dir is None:
@@ -380,6 +372,7 @@ def load_tree_disk_cache(
         "event": "tree_disk_cache_load",
         "lib": lib or "all",
         "expected_count": int(expected_videos_count),
+        "cache_scope": "unified",
     }
     cache_dir = _primary_cache_dir()
     if cache_dir is None:
@@ -456,6 +449,7 @@ def save_tree_disk_cache(
         "event": "tree_disk_cache_save",
         "lib": lib or "all",
         "count": int(expected_videos_count),
+        "cache_scope": "unified",
     }
     cache_dir = _primary_cache_dir()
     if cache_dir is None:
