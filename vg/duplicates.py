@@ -173,6 +173,21 @@ def find_duplicate_groups(videos: list[VideoItem]) -> list[DuplicateGroup]:
             for hashed in by_hash.values():
                 add_group("同内容", hashed)
 
+    # Warn when many videos fell through to Tier 3 (full-file hash).
+    # This means they lack file_sig and the slow path was triggered.
+    if hash_attempts >= 4:
+        try:
+            from vg.diagnostics import emit
+            emit(
+                "WARN",
+                "duplicate_sig_missing",
+                force=True,
+                missing_hash_count=hash_attempts,
+                total_candidates=candidate_rows,
+                hint="videos lack file_sig; full-file hash fallback is slow; consider --rescan",
+            )
+        except Exception:
+            pass
     try:
         from vg.diagnostics import perf as diagnostic_perf
     except ImportError:

@@ -762,6 +762,24 @@ def publish_unified_library() -> int:
     # catalog and survive the restore.  Full-file hash re-detection belongs
     # in the scan path, not in a cached startup.
     rebuild_indexes(merged, heavy=False)
+    # Diagnostic: show how many restored videos carry dup badges from cache,
+    # so it's clear whether duplicate detection is effective or needs a
+    # --rescan to refresh.
+    try:
+        dup_count = sum(1 for v in merged if v.get("dup"))
+        no_sig_count = sum(1 for v in merged if not str(v.get("file_sig") or "").strip())
+        from vg.diagnostics import emit
+        emit(
+            "INFO",
+            "publish_unified_library_rebuild",
+            force=True,
+            heavy=False,
+            merged_count=len(merged),
+            dup_cached=dup_count,
+            missing_file_sig=no_sig_count,
+        )
+    except Exception:
+        pass
     STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
     # Warm on-disk cache for facets + per-scope folder trees.
     # ``rebuild_indexes`` already ran ``save_facets_disk_cache`` via
