@@ -215,19 +215,39 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
     """读取预览图（支持加密 VG1 与明文 JPEG）；带内存 LRU。"""
     from vg.privacy import unpack_thumb_bytes
 
+    def mark_request_layer(layer: str, elapsed_ms: float) -> None:
+        # Keep the cache module independent from Flask at import time.  When
+        # called by /thumb/<vid>, this request-local marker is picked up by
+        # vg.web's after-request logger and exposed as X-VG-Cache-Layer.
+        try:
+            from flask import g
+
+            g._vg_cache_layer = layer
+            g._vg_cache_fields = {
+                "cache": str(cache),
+                "video_id": vid,
+                "read_ms": f"{elapsed_ms:.1f}",
+            }
+        except (ImportError, RuntimeError, AttributeError):
+            return
+
     started = time.perf_counter()
     cached = thumb_cache_get(vid, cache)
     if cached is not None:
         from vg.diagnostics import aggregate
 
-        aggregate("thumb_l1_hit", (time.perf_counter() - started) * 1000.0)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        aggregate("thumb_l1_hit", elapsed_ms)
+        mark_request_layer("L1_server_thumb_memory", elapsed_ms)
         return cached
     p = thumb_path(cache, vid)
     try:
         if not p.exists():
             from vg.diagnostics import aggregate
 
-            aggregate("thumb_l2_not_found", (time.perf_counter() - started) * 1000.0)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            aggregate("thumb_l2_not_found", elapsed_ms)
+            mark_request_layer("L3_thumb_missing", elapsed_ms)
             return None
         size = p.stat().st_size
         if size <= 24:
@@ -242,6 +262,10 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
                 size=size,
                 video_id=vid,
             )
+            mark_request_layer(
+                "L3_thumb_invalid",
+                (time.perf_counter() - started) * 1000.0,
+            )
             return None
         _clear_path_attrs_windows(p)
         blob = p.read_bytes()
@@ -250,7 +274,9 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
             thumb_cache_put(vid, raw, cache)
             from vg.diagnostics import aggregate
 
-            aggregate("thumb_l2_hit", (time.perf_counter() - started) * 1000.0)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            aggregate("thumb_l2_hit", elapsed_ms)
+            mark_request_layer("L2_disk_thumb", elapsed_ms)
             return raw
         from vg.diagnostics import emit
 
@@ -270,7 +296,9 @@ def read_thumb_jpeg(cache: Path, vid: str) -> bytes | None:
         error("thumb_read_failed", e, video_id=vid, cache=cache)
     from vg.diagnostics import aggregate
 
-    aggregate("thumb_cache_miss", (time.perf_counter() - started) * 1000.0)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    aggregate("thumb_cache_miss", elapsed_ms)
+    mark_request_layer("L3_thumb_missing", elapsed_ms)
     return None
 
 

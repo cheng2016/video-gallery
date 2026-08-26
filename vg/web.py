@@ -107,6 +107,11 @@ from vg.thumb_jobs import (
     submit_thumbnail_job,
     thumbnail_job_key,
 )
+from vg.thumbs import (
+    clear_thumbnail_failure,
+    mark_thumbnail_failure,
+    thumbnail_failure_is_current,
+)
 from vg.streaming import _stream_file, rewrite_m3u8_for_proxy
 from vg.trash import move_to_trash
 from vg.util import (
@@ -118,9 +123,12 @@ from vg.util import (
 )
 from vg.diagnostics import (
     aggregate as diagnostic_aggregate,
+    begin_request_trace as diagnostic_begin_request_trace,
     call as diagnostic_call,
     emit as diagnostic_emit,
     emit_rate_limited as diagnostic_emit_rate_limited,
+    end_request_trace as diagnostic_end_request_trace,
+    ensure_stall_watchdog as diagnostic_ensure_stall_watchdog,
     error as diagnostic_error,
     full_logging_enabled as diagnostic_full_logging_enabled,
     perf as diagnostic_perf,
@@ -138,6 +146,27 @@ _video_response_cache_bytes = 0
 _tree_payload_cache: OrderedDict[tuple, dict] = OrderedDict()
 _tree_payload_cache_lock = threading.RLock()
 _TREE_PAYLOAD_CACHE_MAX = 16
+# Keep the stable-state browser cache long enough to cover rapid tag
+# switching, while remaining short enough that an external catalog change is
+# not hidden for long.  Scanning/updating and generation mismatches remain
+# no-store regardless of this value.
+_API_BROWSER_CACHE_MAX_AGE = 6
+
+
+def _set_request_cache_layer(layer: str, **fields) -> None:
+    """Record the server-side cache layer selected for the current request.
+
+    The browser may satisfy an image request without contacting Flask at all;
+    that case cannot be observed here.  For requests that do reach the app,
+    this marker lets the after-request logger and ``X-VG-Cache-Layer`` header
+    identify the exact server-side path (memory, disk, or rebuild/query).
+    """
+    try:
+        g._vg_cache_layer = str(layer or "unknown")
+        g._vg_cache_fields = dict(fields)
+    except (AttributeError, RuntimeError):
+        # Called from a test/helper without an active Flask request.
+        return
 
 # Duplicate badges are derived runtime fields and are intentionally removed
 # before a row is persisted to SQLite. The SQL paging path therefore needs a
@@ -352,6 +381,181 @@ def invalidate_response_caches() -> None:
         "tree_payload_cache_invalidate",
     ):
         _tree_payload_cache.clear()
+    global _warm_generation
+    _warm_generation = None
+
+
+_warm_generation = None
+_warm_lock = threading.Lock()
+_warming = False
+_warm_enabled = False
+
+
+# L1 warmup stays off in production: real UI requests often carry prefs
+# (e.g. ext=.mp4) that warm URLs never match, so it only steals startup
+# CPU/disk. Tests may still enable/call warm_response_caches() directly.
+_WARM_DELAY_MS = 1200
+
+
+def enable_response_cache_warm(*, schedule: bool = True) -> None:
+    """Opt-in L1 warmup for tests/experiments. Production never enables this."""
+    global _warm_enabled
+    _warm_enabled = True
+    diagnostic_emit(
+        "INFO",
+        "response_cache_warm_enabled",
+        force=True,
+        lib_gen=int(STATE.get("lib_gen") or 0),
+        videos=len(STATE.get("videos") or []),
+        schedule=schedule,
+    )
+    if schedule:
+        schedule_response_cache_warm()
+
+
+def schedule_response_cache_warm() -> None:
+    """No-op unless enable_response_cache_warm() was called (tests only)."""
+    if not _warm_enabled:
+        return
+    gen = int(STATE.get("lib_gen") or 0)
+    videos_id = id(STATE.get("videos"))
+    delay_ms = int(_WARM_DELAY_MS)
+    diagnostic_emit(
+        "INFO",
+        "response_cache_warm_scheduled",
+        force=True,
+        lib_gen=gen,
+        videos=len(STATE.get("videos") or []),
+        delay_ms=delay_ms,
+    )
+
+    def run() -> None:
+        try:
+            time.sleep(max(0.0, delay_ms / 1000.0))
+            if STATE.get("scanning"):
+                diagnostic_emit(
+                    "INFO",
+                    "response_cache_warm_skipped",
+                    force=True,
+                    reason="scanning",
+                    scheduled_gen=gen,
+                    current_gen=int(STATE.get("lib_gen") or 0),
+                )
+                return
+            current_gen = int(STATE.get("lib_gen") or 0)
+            if current_gen != gen or id(STATE.get("videos")) != videos_id:
+                diagnostic_emit(
+                    "INFO",
+                    "response_cache_warm_skipped",
+                    force=True,
+                    reason="stale_snapshot",
+                    scheduled_gen=gen,
+                    current_gen=current_gen,
+                    videos_identity_changed=id(STATE.get("videos")) != videos_id,
+                )
+                return
+            warm_response_caches()
+        except Exception as exc:
+            diagnostic_error(
+                "response_cache_warm_thread_failed",
+                exc,
+                scheduled_gen=gen,
+            )
+
+    try:
+        threading.Thread(target=run, daemon=True, name="vg-warm-l1").start()
+    except Exception as exc:
+        diagnostic_error("response_cache_warm_thread_start_failed", exc, lib_gen=gen)
+
+
+def warm_response_caches() -> None:
+    """Pre-fill L1 list/tree responses for the default first page and category tags."""
+    global _warm_generation, _warming
+    gen = int(STATE.get("lib_gen") or 0)
+    if gen <= 0 or STATE.get("scanning"):
+        diagnostic_emit(
+            "INFO",
+            "response_cache_warm_skipped",
+            force=diagnostic_full_logging_enabled(),
+            reason="invalid_generation" if gen <= 0 else "scanning",
+            lib_gen=gen,
+        )
+        return
+    with _warm_lock:
+        if _warming or _warm_generation == (gen, id(STATE.get("videos"))):
+            diagnostic_emit(
+                "INFO",
+                "response_cache_warm_skipped",
+                force=True,
+                reason="already_running" if _warming else "already_warm",
+                lib_gen=gen,
+            )
+            return
+        _warming = True
+    started = time.perf_counter()
+    warmed = 0
+    try:
+        categories = []
+        facets = STATE.get("facets") or {}
+        for row in facets.get("categories") or []:
+            name = str(row.get("id") or row.get("name") or "").strip()
+            if name and name not in ("__root__", "__all__"):
+                categories.append(name)
+        for key in (STATE.get("by_category") or {}):
+            name = str(key or "").strip()
+            if name and name not in categories and name not in ("__root__", "__all__"):
+                categories.append(name)
+        queries = [
+            f"/api/tree?gen={gen}",
+            f"/api/videos?sort=mtime_desc&view=flat&gen={gen}&offset=0&limit=20",
+        ]
+        from urllib.parse import quote
+        for name in categories[:12]:
+            queries.append(
+                f"/api/videos?sort=mtime_desc&view=flat&gen={gen}&offset=0&limit=20"
+                f"&category={quote(name)}"
+            )
+        diagnostic_emit(
+            "INFO",
+            "response_cache_warm_begin",
+            force=True,
+            lib_gen=gen,
+            queries=len(queries),
+            categories=len(categories[:12]),
+        )
+        client = app.test_client()
+        for path in queries:
+            try:
+                response = client.get(path)
+                if response.status_code != 200:
+                    diagnostic_emit(
+                        "WARN",
+                        "response_cache_warm_request_bad_status",
+                        force=True,
+                        path=path,
+                        status=response.status_code,
+                        lib_gen=gen,
+                    )
+                    continue
+                warmed += 1
+            except Exception as exc:
+                diagnostic_error("response_cache_warm_request_failed", exc, path=path)
+        _warm_generation = (gen, id(STATE.get("videos")))
+        diagnostic_perf(
+            "response_cache_warm",
+            (time.perf_counter() - started) * 1000.0,
+            force=True,
+            queries=warmed,
+            requested_queries=len(queries),
+            failed_queries=len(queries) - warmed,
+            categories=len(categories[:12]),
+            lib_gen=gen,
+        )
+    except Exception as exc:
+        diagnostic_error("response_cache_warm_failed", exc)
+    finally:
+        with _warm_lock:
+            _warming = False
 
 
 def _serialized(lock: threading.RLock):
@@ -389,7 +593,26 @@ def _start_request_diagnostics():
     g._diag_started = time.perf_counter()
     g._diag_request_id = diagnostic_request_id()
     g._diag_operation_id = _operation_id()
+    diagnostic_ensure_stall_watchdog()
+    diagnostic_begin_request_trace(
+        g._diag_request_id,
+        method=request.method,
+        path=request.path or "",
+        operation_id=g._diag_operation_id,
+    )
     return None
+
+
+@app.teardown_request
+def _end_request_diagnostics(exc):
+    rid = getattr(g, "_diag_request_id", "")
+    if not rid:
+        return
+    # after_request already ended most traces; this catches aborts/exceptions.
+    if getattr(g, "_diag_trace_ended", False):
+        return
+    diagnostic_end_request_trace(rid, status=None)
+    g._diag_trace_ended = True
 
 
 @app.before_request
@@ -448,8 +671,32 @@ def _serve_cached_videos_response():
     cached = _cached_video_response(key)
     if cached is None:
         diagnostic_aggregate("api_videos_response_cache_miss")
+        _set_request_cache_layer(
+            "L3_server_query",
+            cache="response_miss",
+            offset=_off,
+            limit=_lim,
+        )
+        diagnostic_emit(
+            "INFO",
+            "api_videos_cache_resolution",
+            force=diagnostic_full_logging_enabled(),
+            request_id=getattr(g, "_diag_request_id", ""),
+            layer="L3_server_query",
+            offset=_off,
+            limit=_lim,
+            lib_gen=int(STATE.get("lib_gen") or 0),
+            response_cache_entries=len(_video_response_cache),
+            response_cache_bytes=_video_response_cache_bytes,
+        )
         return None
     diagnostic_aggregate("api_videos_response_cache_hit")
+    _set_request_cache_layer(
+        "L1_server_response_memory",
+        cache="response_hit",
+        offset=_off,
+        limit=_lim,
+    )
     body, status, mimetype = cached
     try:
         sample = json.loads(body) if body else {}
@@ -468,7 +715,7 @@ def _serve_cached_videos_response():
         (res_offset is not None and res_offset != _off)
         or (_off == 0 and res_types_len == 0)
     )
-    emit_force = bool(mismatch or _off == 0 or _lim >= 60)
+    emit_force = bool(mismatch or diagnostic_full_logging_enabled())
     emit_level = "WARN" if mismatch else "INFO"
     diagnostic_emit(
         emit_level,
@@ -486,6 +733,16 @@ def _serve_cached_videos_response():
         offset_match=(res_offset is None or res_offset == _off),
         zero_types_ok=(not _off == 0 or res_types_len > 0),
         cached_body_bytes=len(body),
+    )
+    diagnostic_emit(
+        "INFO",
+        "api_videos_cache_resolution",
+        force=diagnostic_full_logging_enabled(),
+        request_id=getattr(g, "_diag_request_id", ""),
+        layer="L1_server_response_memory",
+        offset=_off,
+        limit=_lim,
+        response_rows=len(sample.get("videos") or []) if isinstance(sample.get("videos"), list) else -1,
     )
     return Response(body, status=status, mimetype=mimetype)
 
@@ -526,9 +783,34 @@ def _log_request_diagnostics(resp):
     path = request.path or ""
     rid = getattr(g, "_diag_request_id", "")
     operation_id = getattr(g, "_diag_operation_id", "")
+    diagnostic_end_request_trace(rid, status=resp.status_code)
+    g._diag_trace_ended = True
     resp.headers["X-VG-Request-ID"] = rid
     if operation_id:
         resp.headers["X-VG-Operation-ID"] = operation_id
+    cache_layer = getattr(g, "_vg_cache_layer", "")
+    cache_fields = getattr(g, "_vg_cache_fields", {}) or {}
+    if cache_layer:
+        resp.headers["X-VG-Cache-Layer"] = str(cache_layer)
+        expected_deferred_thumb = resp.status_code == 503 and path.startswith("/thumb/")
+        diagnostic_emit(
+            "INFO",
+            "http_cache_resolution",
+            force=(
+                diagnostic_full_logging_enabled()
+                or elapsed_ms >= 200.0
+                or (resp.status_code >= 400 and not expected_deferred_thumb)
+            ),
+            request_id=rid,
+            operation_id=operation_id,
+            method=request.method,
+            path=path,
+            status=resp.status_code,
+            layer=cache_layer,
+            cache_control=resp.headers.get("Cache-Control", ""),
+            elapsed_ms=f"{elapsed_ms:.1f}",
+            **cache_fields,
+        )
     deferred_thumb = resp.status_code == 503 and path.startswith("/thumb/")
     quiet_404 = resp.status_code == 404 and path in ("/favicon.ico", "/robots.txt")
     hot_path = (
@@ -594,12 +876,72 @@ def _log_request_diagnostics(resp):
 
 
 @app.after_request
-def _api_no_store(resp):
-    """局域网 IP 下浏览器常缓存 GET /api/*；本机 127.0.0.1 往往不缓存，会造成「左边对右边数量错」。"""
-    if (request.path or "").startswith("/api/"):
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
+def _api_cache_policy(resp):
+    """Apply a short, generation-aware browser cache to stable list/tree data.
+
+    The frontend adds ``gen=<lib_gen>`` to these GET URLs.  A matching
+    generation is safe to cache briefly while the library is stable; scans and
+    updates remain ``no-store``.  The generation is also included in the ETag
+    so an expired browser entry can be revalidated without sending the body.
+    """
+    path = request.path or ""
+    if not path.startswith("/api/"):
+        return resp
+
+    cacheable_path = path in ("/api/videos", "/api/tree") and request.method == "GET"
+    current_gen = int(STATE.get("lib_gen") or 0)
+    requested_gen = request.args.get("gen", "").strip()
+    try:
+        generation_match = bool(requested_gen) and int(requested_gen) == current_gen
+    except ValueError:
+        generation_match = False
+    stable = not bool(STATE.get("scanning")) and not bool(STATE.get("updating"))
+    if cacheable_path and stable and generation_match and resp.status_code == 304:
+        resp.headers["Cache-Control"] = (
+            f"private, max-age={_API_BROWSER_CACHE_MAX_AGE}, must-revalidate"
+        )
+        resp.headers["X-VG-Cache-Policy"] = "private-short-generation"
+        resp.headers.pop("Pragma", None)
+        resp.headers.pop("Expires", None)
+        browser_cache_enabled = True
+    else:
+        browser_cache_enabled = cacheable_path and stable and generation_match and resp.status_code == 200
+
+        if browser_cache_enabled:
+            body = resp.get_data()
+            digest = hashlib.sha1(body).hexdigest()[:16]
+            resp.set_etag(f"vg-{current_gen}-{digest}")
+            resp.headers["Cache-Control"] = (
+                f"private, max-age={_API_BROWSER_CACHE_MAX_AGE}, must-revalidate"
+            )
+            resp.headers["X-VG-Cache-Policy"] = "private-short-generation"
+            resp.headers.pop("Pragma", None)
+            resp.headers.pop("Expires", None)
+            if request.if_none_match and request.if_none_match.contains(resp.get_etag()[0]):
+                resp.status_code = 304
+                resp.set_data(b"")
+        else:
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+            if cacheable_path:
+                resp.headers["X-VG-Cache-Policy"] = "no-store-generation-mismatch-or-busy"
+
+    # Include the policy in the existing request-level cache-resolution line.
+    try:
+        cache_fields = getattr(g, "_vg_cache_fields", {}) or {}
+        cache_fields.update(
+            {
+                "browser_cache": "enabled" if browser_cache_enabled else "disabled",
+                "cache_generation": current_gen,
+                "requested_generation": requested_gen or "missing",
+                "library_stable": stable,
+                "etag_revalidated": resp.status_code == 304,
+            }
+        )
+        g._vg_cache_fields = cache_fields
+    except (AttributeError, RuntimeError):
+        pass
     return resp
 
 
@@ -629,7 +971,12 @@ def index():
             except OSError:
                 d["active"] = False
         payload = json.dumps(
-            {"drives": drives, "current": current, "scanning": STATE["scanning"]},
+            {
+                "drives": drives,
+                "current": current,
+                "scanning": STATE["scanning"],
+                "full_logging": diagnostic_full_logging_enabled(),
+            },
             ensure_ascii=False,
         )
     except Exception as e:
@@ -647,6 +994,11 @@ def index():
         f"扫描中={STATE.get('scanning')}, 耗时={_page_serve_ms:.1f}ms"
     )
     resp = Response(html, mimetype="text/html; charset=utf-8")
+    _set_request_cache_layer(
+        "L3_template_html",
+        cache="no_store",
+        source="templates/index.html",
+    )
     # Prevent browser from caching the HTML — ensures JS changes are
     # picked up immediately on refresh without Ctrl+Shift+R.
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -655,20 +1007,22 @@ def index():
     return resp
 
 
-@app.route("/api/client-log", methods=["POST"])
-def api_client_log():
-    """Receive ordered browser actions/errors so one operation can be traced end-to-end."""
-    ingest_started = time.perf_counter()
-    data = request.get_json(silent=True)
+_CLIENT_LOG_CORE_EVENTS = {
+    "refresh_render_completed",
+    "load_more_done",
+}
+
+
+def _ingest_client_action(data: object) -> tuple[str, int] | None:
+    """Validate and emit one browser event; return an HTTP error when rejected."""
     if not isinstance(data, dict):
         diagnostic_emit(
             "WARN",
             "client_log_rejected",
             force=True,
             reason="invalid_json_object",
-            elapsed_ms=f"{(time.perf_counter() - ingest_started) * 1000.0:.1f}",
         )
-        return jsonify({"ok": False, "msg": "日志格式错误"}), 400
+        return "日志格式错误", 400
     event = str(data.get("event") or "").strip()[:80]
     if not event or not re.fullmatch(r"[A-Za-z0-9_.:-]+", event):
         diagnostic_emit(
@@ -676,10 +1030,16 @@ def api_client_log():
             "client_log_rejected",
             force=True,
             reason="invalid_event_name",
-            elapsed_ms=f"{(time.perf_counter() - ingest_started) * 1000.0:.1f}",
             client_event=event,
         )
-        return jsonify({"ok": False, "msg": "事件名错误"}), 400
+        return "事件名错误", 400
+    level = str(data.get("level") or "INFO").upper()
+    if level not in {"INFO", "WARN", "ERROR"}:
+        level = "INFO"
+    full_logging = diagnostic_full_logging_enabled()
+    if level == "INFO" and not full_logging and event not in _CLIENT_LOG_CORE_EVENTS:
+        diagnostic_aggregate("client_log_suppressed")
+        return None
     raw_fields = data.get("fields")
     fields: dict[str, object] = {}
     # 布局诊断需要保留多行控件的完整矩形数据；普通客户端日志仍保持较小上限。
@@ -696,9 +1056,6 @@ def api_client_log():
             else:
                 fields[safe_key] = str(value).replace("\r", " ").replace("\n", " ")[:field_value_limit]
     operation_id = str(data.get("operation_id") or _operation_id()).strip()[:64]
-    level = str(data.get("level") or "INFO").upper()
-    if level not in {"INFO", "WARN", "ERROR"}:
-        level = "INFO"
     if event.startswith("player_") and event not in {
         "player_error",
         "player_play_rejected",
@@ -707,7 +1064,7 @@ def api_client_log():
         "player_source_set",
     }:
         diagnostic_aggregate("client_player_noise")
-        return jsonify({"ok": True})
+        return None
     # Client fields may reuse names already passed as kwargs (request_id, action).
     renamed = {
         "request_id": "related_request_id",
@@ -726,7 +1083,7 @@ def api_client_log():
     diagnostic_emit(
         level,
         "client_action",
-        force=True,
+        force=full_logging or level in {"WARN", "ERROR"} or event in _CLIENT_LOG_CORE_EVENTS,
         action=event,
         operation_id=operation_id,
         request_id=getattr(g, "_diag_request_id", ""),
@@ -734,24 +1091,56 @@ def api_client_log():
         page=str(data.get("page") or "")[:200],
         **fields,
     )
+    return None
+
+
+@app.route("/api/client-log", methods=["POST"])
+def api_client_log():
+    """Receive browser diagnostics; INFO events may arrive in bounded batches."""
+    ingest_started = time.perf_counter()
+    data = request.get_json(silent=True)
+    if isinstance(data, dict) and "events" in data:
+        raw_events = data.get("events")
+        if not isinstance(raw_events, list) or not raw_events or len(raw_events) > 32:
+            diagnostic_emit(
+                "WARN",
+                "client_log_batch_rejected",
+                force=True,
+                reason="invalid_batch",
+                batch_count=len(raw_events) if isinstance(raw_events, list) else -1,
+            )
+            return jsonify({"ok": False, "msg": "日志批次格式错误"}), 400
+        events = raw_events
+    else:
+        events = [data]
+
+    for item in events:
+        rejected = _ingest_client_action(item)
+        if rejected is not None:
+            msg, status = rejected
+            return jsonify({"ok": False, "msg": msg}), status
     diagnostic_perf(
         "client_log_ingest",
         (time.perf_counter() - ingest_started) * 1000.0,
-        client_event=event,
-        client_level=level,
-        field_count=len(fields),
+        batch_count=len(events),
+        client_event=(
+            str(events[0].get("event") or "")[:80]
+            if len(events) == 1 and isinstance(events[0], dict)
+            else "batch"
+        ),
         full_logging=diagnostic_full_logging_enabled(),
     )
     return jsonify({"ok": True})
 
 
 def _tree_cache_key(lib: str) -> tuple:
+    # Scanning/updating only overlay status fields at serialize time; the
+    # heavy tree payload is keyed by catalog identity so a background
+    # count (updating True→False) does not rebuild the tree.
     return (
         int(STATE.get("lib_gen") or 0),
         id(STATE.get("videos")),
         (lib or "").strip().casefold(),
-        bool(STATE.get("scanning")),
-        bool(STATE.get("updating")),
     )
 
 
@@ -835,6 +1224,14 @@ def _build_tree_payload(lib: str) -> dict:
         elif tree_cache_stats.get("miss_reason"):
             emit_load_log("PERF", ev, force=True, from_build_tree=True, **tree_cache_stats)
 
+    if tree_cache_used:
+        _set_request_cache_layer(
+            "L2_disk_tree",
+            cache="tree_disk_hit",
+            lib=lib or "all",
+            cache_path=(tree_cache_stats or {}).get("cache_path", ""),
+        )
+
     # Prefer precomputed facets for the unified catalog; scoped views recompute.
     # Also reject cache when it disagrees with the folder tree (same video source).
     facets = STATE.get("facets") or {}
@@ -873,6 +1270,19 @@ def _build_tree_payload(lib: str) -> dict:
                     injected=facets_disk_used,
                     **fs,
                 )
+    if facets_disk_used and not tree_cache_used:
+        _set_request_cache_layer(
+            "L2_disk_facets",
+            cache="facets_disk_hit",
+            lib=lib or "all",
+            cache_path=(facets_disk_stats or {}).get("cache_path", ""),
+        )
+    elif not tree_cache_used and not facets_disk_used:
+        _set_request_cache_layer(
+            "L3_tree_rebuild",
+            cache="disk_miss_or_skipped",
+            lib=lib or "all",
+        )
     facets_started = time.perf_counter()
     if use_cached:
         types = facets.get("types") or []
@@ -1101,14 +1511,66 @@ def api_tree():
     lib = (request.args.get("lib") or "").strip()
     diagnostic_call("api_tree", lib=lib or "all")
     cache_key = _tree_cache_key(lib)
-    heavy = _cached_tree_payload(cache_key)
+    try:
+        heavy = _cached_tree_payload(cache_key)
+    except Exception as exc:
+        diagnostic_error(
+            "tree_payload_cache_read_failed",
+            exc,
+            request_id=getattr(g, "_diag_request_id", ""),
+            lib=lib or "all",
+            lib_gen=int(STATE.get("lib_gen") or 0),
+        )
+        raise
     cache_result = "hit" if heavy is not None else "miss"
+    diagnostic_emit(
+        "INFO",
+        "tree_payload_cache_resolution",
+        force=diagnostic_full_logging_enabled(),
+        request_id=getattr(g, "_diag_request_id", ""),
+        cache=cache_result,
+        lib=lib or "all",
+        lib_gen=int(STATE.get("lib_gen") or 0),
+        scanning=bool(STATE.get("scanning")),
+        updating=bool(STATE.get("updating")),
+        etag_supplied=bool(request.if_none_match),
+    )
+    if heavy is not None:
+        _set_request_cache_layer(
+            "L1_server_tree_memory",
+            cache="tree_payload_hit",
+            lib=lib or "all",
+        )
     if heavy is None:
-        heavy = _build_tree_payload(lib)
-        # Key already embeds scanning/updating/lib_gen/id(videos), so caching
-        # during a scan is safe: repeated requests with identical (lib + state)
-        # will reuse the payload instead of rebuilding for 3–10 seconds each.
-        _store_tree_payload(cache_key, heavy)
+        try:
+            heavy = _build_tree_payload(lib)
+            # Catalog identity is in the cache key; scanning/updating are overlaid
+            # at serialize time so a background count does not rebuild the tree.
+            _store_tree_payload(cache_key, heavy)
+        except Exception as exc:
+            diagnostic_error(
+                "tree_payload_build_or_store_failed",
+                exc,
+                request_id=getattr(g, "_diag_request_id", ""),
+                lib=lib or "all",
+                lib_gen=int(STATE.get("lib_gen") or 0),
+                scanning=bool(STATE.get("scanning")),
+                updating=bool(STATE.get("updating")),
+            )
+            raise
+
+    if not isinstance(heavy, dict) or "tree" not in heavy or "count" not in heavy:
+        diagnostic_emit(
+            "ERROR",
+            "tree_payload_invalid",
+            force=True,
+            request_id=getattr(g, "_diag_request_id", ""),
+            payload_type=type(heavy).__name__,
+            has_tree=isinstance(heavy, dict) and "tree" in heavy,
+            has_count=isinstance(heavy, dict) and "count" in heavy,
+            cache=cache_result,
+            lib=lib or "all",
+        )
 
     serialize_started = time.perf_counter()
     response = jsonify({
@@ -1135,7 +1597,7 @@ def api_tree():
     diagnostic_perf(
         "api_tree",
         (time.perf_counter() - started) * 1000.0,
-        force=True,
+        force=cache_result == "miss",
         request_id=getattr(g, "_diag_request_id", ""),
         lib=lib or "all",
         cache=cache_result,
@@ -1539,8 +2001,9 @@ def api_videos():
     setup_t0 = time.perf_counter()
     if sql_eligible:
         from vg.catalog_db import (
+            facets_from_rows,
+            load_catalog_facet_rows,
             merge_catalog_facets,
-            query_catalog_facets,
             query_catalog_page,
             query_catalogs_page,
         )
@@ -1558,44 +2021,42 @@ def api_videos():
             probe_ms = 0.0
             probe_count = 0
             has_children = False
+            facet_rowsets: list[list[dict]] = []
+            need_facet_rows = offset == 0 or bool(folder and not folder_all)
+            facet_load_started = time.perf_counter()
+            if need_facet_rows:
+                facet_rowsets = [
+                    load_catalog_facet_rows(cache, category=category, search=q_raw)
+                    for cache in sql_caches
+                ]
+                probe_count = len(facet_rowsets)
             if folder and not folder_all:
-                # ``query_catalog_facets`` here is a full SQLite scan over the
-                # catalog just to detect subfolders.  When sql_caches spans
-                # multiple disks this is called once per cache and can quietly
-                # dominate the request (observed: total 1.3s with only 94ms
-                # attributed across sql_ms/facets_ms/thumb_meta_ms/serialize_ms
-                # — the ~1.2s gap was this probe plus _catalog_caches_for_roots).
-                _probe_started = time.perf_counter()
-                for cache in sql_caches:
-                    probe = query_catalog_facets(
-                        cache,
-                        category=category,
-                        folder=folder,
-                        include_descendants=True,
-                        ext=ext,
-                        search=q_raw,
-                    )
-                    probe_count += 1
-                    if probe.get("subfolders"):
+                folder_n = folder.strip("/").replace("\\", "/")
+                prefix = folder_n + "/"
+                for rows in facet_rowsets:
+                    if any(
+                        (row.get("folder") or "").startswith(prefix)
+                        for row in rows
+                    ):
                         has_children = True
                         break
                 include_descendants = not has_children
-                probe_ms = (time.perf_counter() - _probe_started) * 1000.0
-                if probe_ms >= 100.0:
-                    diagnostic_emit(
-                        "WARN",
-                        "api_videos_sql_include_descendants_probe_slow",
-                        force=True,
-                        request_id=getattr(g, "_diag_request_id", ""),
-                        probe_ms=f"{probe_ms:.1f}",
-                        probes=probe_count,
-                        caches=len(sql_caches),
-                        folder=folder,
-                        category=category or "all",
-                        ext=ext,
-                        has_children=has_children,
-                        include_descendants=include_descendants,
-                    )
+            probe_ms = (time.perf_counter() - facet_load_started) * 1000.0
+            if probe_ms >= 100.0:
+                diagnostic_emit(
+                    "WARN",
+                    "api_videos_sql_include_descendants_probe_slow",
+                    force=True,
+                    request_id=getattr(g, "_diag_request_id", ""),
+                    probe_ms=f"{probe_ms:.1f}",
+                    probes=probe_count,
+                    caches=len(sql_caches),
+                    folder=folder,
+                    category=category or "all",
+                    ext=ext,
+                    has_children=has_children,
+                    include_descendants=include_descendants,
+                )
 
             # Total pre-sql setup time (parse + caches lookup + probe).
             setup_ms = (time.perf_counter() - setup_t0) * 1000.0
@@ -1660,42 +2121,54 @@ def api_videos():
             base_facet_ms = 0.0
             type_facet_ms = 0.0
             if offset == 0:
+                def _merge_from_rows(*, folder_value: str, ext_value: str, descendants: bool) -> dict:
+                    try:
+                        built = [
+                            facets_from_rows(
+                                rows,
+                                category=category,
+                                folder=folder_value,
+                                include_descendants=descendants,
+                                ext=ext_value,
+                            )
+                            for rows in facet_rowsets
+                        ]
+                    except Exception as exc:
+                        diagnostic_error(
+                            "api_videos_facets_derive_failed",
+                            exc,
+                            request_id=getattr(g, "_diag_request_id", ""),
+                            category=category or "all",
+                            folder=folder_value,
+                            ext=ext_value,
+                            caches=len(sql_caches),
+                            loaded_rows=sum(len(rows) for rows in facet_rowsets),
+                        )
+                        raise
+                    if not built:
+                        return {
+                            "genres": [],
+                            "themes": [],
+                            "backgrounds": [],
+                            "subfolders": [],
+                            "types": [],
+                        }
+                    return built[0] if len(built) == 1 else merge_catalog_facets(built)
+
                 base_facet_started = time.perf_counter()
-                facet_rows = [
-                    query_catalog_facets(
-                        cache,
-                        category=category,
-                        folder=folder,
-                        include_descendants=include_descendants,
-                        ext=ext,
-                        search=q_raw,
-                    )
-                    for cache in sql_caches
-                ]
-                facets = (
-                    facet_rows[0]
-                    if len(facet_rows) == 1
-                    else merge_catalog_facets(facet_rows)
+                facets = _merge_from_rows(
+                    folder_value=folder,
+                    ext_value=ext,
+                    descendants=include_descendants,
                 )
                 base_facet_ms = (time.perf_counter() - base_facet_started) * 1000.0
                 # 格式选项必须按当前频道/子类统计，不能沿用整盘 types；
                 # 查询格式选项时刻意不带当前 ext，保证仍可切换到其它格式。
                 type_facet_started = time.perf_counter()
-                type_facet_rows = [
-                    query_catalog_facets(
-                        cache,
-                        category=category,
-                        folder=folder,
-                        include_descendants=include_descendants,
-                        ext="",
-                        search=q_raw,
-                    )
-                    for cache in sql_caches
-                ]
-                type_facets = (
-                    type_facet_rows[0]
-                    if len(type_facet_rows) == 1
-                    else merge_catalog_facets(type_facet_rows)
+                type_facets = _merge_from_rows(
+                    folder_value=folder,
+                    ext_value="",
+                    descendants=include_descendants,
                 )
                 facets["types"] = type_facets.get("types") or []
                 type_facet_ms = (time.perf_counter() - type_facet_started) * 1000.0
@@ -1721,22 +2194,10 @@ def api_videos():
                             acc = f"{acc}/{part}"
                             prefixes.append(acc)
                 for level_index, prefix in enumerate(prefixes):
-                    level_facets = [
-                        query_catalog_facets(
-                            cache,
-                            category=category,
-                            folder=prefix,
-                            include_descendants=True,
-                            # 子类导航不随格式标签消失，始终按当前频道目录统计。
-                            ext="",
-                            search=q_raw,
-                        )
-                        for cache in sql_caches
-                    ]
-                    level_merged = (
-                        level_facets[0]
-                        if len(level_facets) == 1
-                        else merge_catalog_facets(level_facets)
+                    level_merged = _merge_from_rows(
+                        folder_value=prefix,
+                        ext_value="",
+                        descendants=True,
                     )
                     items = level_merged.get("subfolders") or []
                     if not items:
@@ -1752,6 +2213,36 @@ def api_videos():
                         "items": items,
                     })
                 level_facet_ms = (time.perf_counter() - level_facet_started) * 1000.0
+            if offset == 0:
+                loaded_facet_rows = sum(len(rows) for rows in facet_rowsets)
+                diagnostic_perf(
+                    "api_videos_facets_single_pass",
+                    probe_ms + facets_ms + level_facet_ms,
+                    force=False,
+                    request_id=getattr(g, "_diag_request_id", ""),
+                    caches=len(sql_caches),
+                    sqlite_queries=len(facet_rowsets),
+                    loaded_rows=loaded_facet_rows,
+                    result_rows=total,
+                    load_ms=f"{probe_ms:.1f}",
+                    derive_ms=f"{(facets_ms + level_facet_ms):.1f}",
+                    category=category or "all",
+                    folder=folder,
+                    ext=ext,
+                    levels=len(levels),
+                )
+                if total > 0 and loaded_facet_rows == 0:
+                    diagnostic_emit(
+                        "WARN",
+                        "api_videos_facets_empty_for_nonempty_result",
+                        force=True,
+                        request_id=getattr(g, "_diag_request_id", ""),
+                        result_rows=total,
+                        caches=len(sql_caches),
+                        category=category or "all",
+                        folder=folder,
+                        ext=ext,
+                    )
             serialize_started = time.perf_counter()
             response = jsonify({
                 "videos": slim,
@@ -2224,6 +2715,11 @@ def thumb(vid: str):
     }
 
     def _deferred_placeholder():
+        _set_request_cache_layer(
+            "L3_thumb_placeholder",
+            cache="missing_or_generation_queued",
+            video_id=vid,
+        )
         return Response(
             placeholder,
             status=503,
@@ -2288,6 +2784,20 @@ def thumb(vid: str):
         if item and ffmpeg and cache:
             src = _video_file_for_thumb(item)
             out = thumb_path(cache, file_id)
+            if thumbnail_failure_is_current(item):
+                diagnostic_aggregate("thumbnail_generation_skipped_persisted_fail")
+                diagnostic_emit_rate_limited(
+                    "INFO",
+                    "thumbnail_generation_skipped_persisted_fail",
+                    key=f"{prefer_root}|{file_id}",
+                    interval=30.0,
+                    force=True,
+                    video_id=vid,
+                    root=prefer_root,
+                    reason=item.get("thumb_failed_reason") or "persisted_failure",
+                )
+                diagnostic_aggregate("thumbnail_placeholder")
+                return _deferred_placeholder()
             # Metadata probing marks audio-only/corrupt containers as ``bad``.
             # They cannot produce a video frame, so queueing ffmpeg here only
             # repeats a 300-500ms failure for every thumbnail retry (and floods
@@ -2309,8 +2819,32 @@ def thumb(vid: str):
                 def generate_requested_thumb() -> bool:
                     ok = make_thumbnail(ffmpeg, src, out, background=True)
                     if not ok:
+                        mark_thumbnail_failure(
+                            item,
+                            reason=item.get("bad_reason") or "thumbnail_generation_failed",
+                        )
+                        try:
+                            save_library_item(item)
+                            diagnostic_emit_rate_limited(
+                                "INFO",
+                                "thumbnail_failure_marker_saved",
+                                key=f"{cache}|{file_id}",
+                                interval=30.0,
+                                force=True,
+                                video_id=file_id,
+                                cache=cache,
+                                reason=item.get("thumb_failed_reason"),
+                            )
+                        except Exception as exc:
+                            diagnostic_error(
+                                "thumbnail_failure_marker_save_failed",
+                                exc,
+                                video_id=file_id,
+                                cache=cache,
+                            )
                         return False
                     thumb_cache_invalidate(file_id, cache)
+                    clear_thumbnail_failure(item)
                     item["has_thumb"] = True
                     item["thumb_v"] = thumb_version(cache, file_id)
                     try:
@@ -2377,6 +2911,21 @@ def thumb(vid: str):
         if item and ffmpeg:
             src = _video_file_for_thumb(item)
             out = thumb_path(cache, file_id)
+            if thumbnail_failure_is_current(item):
+                diagnostic_aggregate("thumbnail_generation_skipped_persisted_fail")
+                diagnostic_emit_rate_limited(
+                    "INFO",
+                    "thumbnail_generation_skipped_persisted_fail",
+                    key=f"{prefer_root}|{file_id}",
+                    interval=30.0,
+                    force=True,
+                    video_id=vid,
+                    root=prefer_root,
+                    reason=item.get("thumb_failed_reason") or "persisted_failure",
+                )
+                if defer:
+                    return _deferred_placeholder()
+                return jsonify({"ok": False, "msg": "该视频缩略图此前生成失败，已跳过重复尝试"}), 503
             bad_reason = str(item.get("bad_reason") or "").casefold()
             if item.get("bad") and ("无视频流" in bad_reason or "no video" in bad_reason):
                 diagnostic_aggregate("thumbnail_generation_skipped_no_video_stream")
@@ -2385,8 +2934,32 @@ def thumb(vid: str):
                 def generate_requested_thumb() -> bool:
                     ok = make_thumbnail(ffmpeg, src, out, background=True)
                     if not ok:
+                        mark_thumbnail_failure(
+                            item,
+                            reason=item.get("bad_reason") or "thumbnail_generation_failed",
+                        )
+                        try:
+                            save_library_item(item)
+                            diagnostic_emit_rate_limited(
+                                "INFO",
+                                "thumbnail_failure_marker_saved",
+                                key=f"{cache}|{file_id}",
+                                interval=30.0,
+                                force=True,
+                                video_id=file_id,
+                                cache=cache,
+                                reason=item.get("thumb_failed_reason"),
+                            )
+                        except Exception as exc:
+                            diagnostic_error(
+                                "thumbnail_failure_marker_save_failed",
+                                exc,
+                                video_id=file_id,
+                                cache=cache,
+                            )
                         return False
                     thumb_cache_invalidate(file_id, cache)
+                    clear_thumbnail_failure(item)
                     item["has_thumb"] = True
                     item["thumb_v"] = thumb_version(cache, file_id)
                     try:
@@ -2448,6 +3021,12 @@ def thumb(vid: str):
         ffmpeg_found=bool(STATE.get("ffmpeg")),
         root=prefer_root,
         operation_id=getattr(g, "_diag_operation_id", ""),
+    )
+    _set_request_cache_layer(
+        "L3_thumb_placeholder",
+        cache="missing_or_generation_unavailable",
+        video_id=vid,
+        file_id=file_id,
     )
     return Response(placeholder, mimetype="image/svg+xml", headers=placeholder_headers)
 
@@ -3160,6 +3739,7 @@ def api_thumb_set(vid: str):
         if not save_thumbnail_jpeg(out, raw):
             return jsonify({"ok": False, "msg": "写入失败"}), 500
         thumb_cache_invalidate(file_id)
+        clear_thumbnail_failure(item)
         item["has_thumb"] = True
         item["thumb_v"] = thumb_version(cache, file_id) or int(datetime.now().timestamp())
         save_library_item(item)
@@ -3179,8 +3759,30 @@ def api_thumb_set(vid: str):
     if not src:
         return jsonify({"ok": False, "msg": "无法定位视频文件"}), 404
     # 若传 current：用播放器当前时间（前端传入）
+    # This route is an explicit user retry; clear the persisted negative
+    # marker before forcing a new ffmpeg attempt.
+    clear_thumbnail_failure(item)
     ok = make_thumbnail(ffmpeg, src, out, seek=seek, force=True)
     if not ok:
+        mark_thumbnail_failure(item, reason="explicit_retry_failed")
+        try:
+            save_library_item(item)
+            diagnostic_emit(
+                "INFO",
+                "thumbnail_failure_marker_saved",
+                force=True,
+                video_id=file_id,
+                cache=cache,
+                reason="explicit_retry_failed",
+                explicit_retry=True,
+            )
+        except Exception as exc:
+            diagnostic_error(
+                "thumbnail_failure_marker_save_failed",
+                exc,
+                video_id=file_id,
+                cache=cache,
+            )
         return jsonify({"ok": False, "msg": "截帧失败"}), 500
     thumb_cache_invalidate(file_id)
     item["has_thumb"] = True

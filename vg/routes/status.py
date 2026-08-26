@@ -5,6 +5,7 @@ from __future__ import annotations
 from flask import jsonify
 
 from vg import state as runtime_state
+from vg.diagnostics import full_logging_enabled
 from vg.state import STATE
 from vg.thumb_jobs import pending_thumbnail_jobs
 
@@ -45,4 +46,5 @@ def register(app) -> None:
             "has_ffmpeg": bool(STATE.get("ffmpeg")),
             "root": str(STATE["root"]) if STATE.get("root") else "",
             "lan_share": bool(STATE.get("lan_share")),
+            "full_logging": full_logging_enabled(),
         })

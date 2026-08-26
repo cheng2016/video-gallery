@@ -73,7 +73,13 @@ def stamp_lib_meta(
 
 def _disk_item(item: dict, root_s: str, cache: Path) -> dict:
     """Return a canonical per-disk record from a possibly merged runtime item."""
-    return serialize_video_item(item, root=root_s, cache=cache)
+    out = serialize_video_item(item, root=root_s, cache=cache)
+    # Per-disk RAM archives are not persisted JSON responses. Keep the exact
+    # search cache restored from SQLite so unified startup does not immediately
+    # recompute pinyin/actor text when it merges the disk libraries.
+    if isinstance(item.get("_q"), str):
+        out["_q"] = item["_q"]
+    return out
 
 
 def item_belongs_to_root(item: dict, root: Path | str) -> bool:
@@ -95,7 +101,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
     cache = ensure_cache_dir(Path(root_s))
 
     # Live scan snapshot beats stale index while this root is being scanned.
-    with _libs_lock:
+    with _libs_guard("disk_libs_read_live"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         if not existing:
             for k, val in (STATE.get("disk_libs") or {}).items():
@@ -110,7 +116,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
 
     index_mtime = catalog_mtime(cache)
 
-    with _libs_lock:
+    with _libs_guard("disk_libs_read_cached"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         if (
             existing
@@ -120,7 +126,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
         ):
             return list(existing["by_id"].values())
 
-    videos = load_catalog_videos(cache, root_s)
+    videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
     if not videos:
         return None
     clean = [
@@ -155,7 +161,7 @@ def store_live_library(root: Path | str, videos: list[dict]) -> None:
             stamped["_folder_raw"] = (stamped.get("folder") or "").replace("\\", "/").strip("/")
         source_id = stamped.get("_thumb_id") or stamped["id"]
         by_id[source_id] = stamped
-    with _libs_lock:
+    with _libs_guard("disk_libs_store_live"):
         libs = STATE.setdefault("disk_libs", {})
         libs[root_s] = {
             "root": root_s,
@@ -219,7 +225,7 @@ def save_root_library(root: Path | str, videos: list[dict]) -> list[dict]:
         clean.append(_disk_item(item, root_s, cache))
 
     by_id = {v["id"]: v for v in clean if v.get("id")}
-    with _libs_lock:
+    with _libs_guard("disk_libs_save_index"):
         if not save_index(cache, Path(root_s), list(by_id.values())):
             raise OSError(f"保存片库索引失败: {cache}")
         _store_lib(root_s, cache, by_id)
@@ -275,7 +281,7 @@ def save_library_item(
         return False
     root_s = _norm_root_str(raw_root)
     cache = ensure_cache_dir(Path(root_s))
-    with _libs_lock:
+    with _libs_guard("disk_libs_upsert_one"):
         n = upsert_catalog_videos(
             cache,
             root_s,
@@ -342,7 +348,7 @@ def save_library_items(
     saved = 0
     for root_s, batch in groups.items():
         cache = ensure_cache_dir(Path(root_s))
-        with _libs_lock:
+        with _libs_guard("disk_libs_upsert_batch"):
             n = upsert_catalog_videos(
                 cache,
                 root_s,
@@ -431,7 +437,7 @@ def archive_current_library() -> None:
     if not groups:
         return
 
-    with _libs_lock:
+    with _libs_guard("disk_libs_merge_groups"):
         libs = STATE.setdefault("disk_libs", {})
         now = time.time()
         for root_s, by_id in groups.items():
@@ -587,7 +593,7 @@ def load_library_from_index(root: Path | str) -> bool:
             if existing.get("by_id"):
                 pass
     try:
-        videos = load_catalog_videos(cache, root_s)
+        videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
         clean = []
         for raw in videos:
             if not isinstance(raw, dict) or not raw.get("id"):
@@ -744,7 +750,7 @@ def find_in_disk_libs(vid: str, prefer_root: str | None = None) -> dict | None:
     prefer = _norm_root_str(prefer_root) if prefer_root else ""
     if prefer:
         ensure_library(prefer)
-    with _libs_lock:
+    with _libs_guard("disk_libs_lookup_by_id"):
         libs = STATE.get("disk_libs") or {}
         if prefer:
             lib = libs.get(prefer)

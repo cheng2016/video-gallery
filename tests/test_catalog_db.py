@@ -9,13 +9,18 @@ from pathlib import Path
 from vg import catalog_db
 from vg.catalog_db import (
     CATALOG_DB_NAME,
+    facets_from_rows,
     find_probe_donor,
+    load_catalog_facet_rows,
     load_catalog_videos,
+    catalog_mtime,
     query_catalog_facets,
     query_catalog_page,
     read_catalog_counts,
+    read_catalog_validation_time,
     save_catalog,
     upsert_catalog_videos,
+    write_catalog_validation_time,
 )
 
 
@@ -76,6 +81,18 @@ class CatalogDbTests(unittest.TestCase):
         count, folders = read_catalog_counts(cache)
         self.assertEqual(count, 1)
         self.assertEqual(folders, {"": 1})
+
+    def test_validation_marker_does_not_touch_catalog_mtime(self) -> None:
+        root = self.base / "validation-lib"
+        cache = self.base / "validation-cache"
+        root.mkdir()
+        self.assertTrue(save_catalog(cache, root, [self._item(vid="v" * 16, rel="a.mp4")]))
+        before = catalog_mtime(cache)
+        marker_value = 1234567890.125
+        self.assertTrue(write_catalog_validation_time(cache, marker_value))
+        self.assertAlmostEqual(read_catalog_validation_time(cache), marker_value, places=5)
+        self.assertEqual(catalog_mtime(cache), before)
+        self.assertTrue((cache / catalog_db.CATALOG_VALIDATION_MARKER_NAME).is_file())
 
     def test_upsert_updates_probe_fields_without_losing_other_rows(self) -> None:
         root = self.base / "lib"
@@ -191,6 +208,31 @@ class CatalogDbTests(unittest.TestCase):
             {row["id"]: row["count"] for row in facets["genres"]},
             {"动作": 250, "剧情": 250},
         )
+
+    def test_facet_rows_support_ext_and_type_views_without_requery(self) -> None:
+        root = self.base / "library3"
+        cache = self.base / "cache3"
+        root.mkdir()
+        rows = [
+            self._item(vid="a" * 16, rel="电影/a.mp4", size=1),
+            self._item(vid="b" * 16, rel="电影/b.mkv", size=2),
+        ]
+        rows[0]["ext"] = ".mp4"
+        rows[0]["category"] = "电影"
+        rows[0]["folder"] = "电影"
+        rows[0]["genres"] = ["动作"]
+        rows[1]["ext"] = ".mkv"
+        rows[1]["category"] = "电影"
+        rows[1]["folder"] = "电影"
+        rows[1]["genres"] = ["剧情"]
+        self.assertTrue(save_catalog(cache, root, rows))
+        loaded = load_catalog_facet_rows(cache, category="电影")
+        self.assertEqual(len(loaded), 2)
+        with_ext = facets_from_rows(loaded, category="电影", folder="电影", ext=".mp4")
+        without_ext = facets_from_rows(loaded, category="电影", folder="电影", ext="")
+        self.assertEqual({row["id"] for row in with_ext["genres"]}, {"动作"})
+        self.assertEqual({row["id"] for row in without_ext["types"]}, {".mp4", ".mkv"})
+        self.assertEqual(query_catalog_facets(cache, category="电影", folder="电影", ext=".mp4")["genres"], with_ext["genres"])
 
 
 if __name__ == "__main__":

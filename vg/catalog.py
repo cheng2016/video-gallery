@@ -46,14 +46,36 @@ def video_category(video: dict) -> str:
 
 def video_search_text(video: dict) -> str:
     """Return and cache the normalized search text for one video."""
+    signature = _search_cache_signature(video)
     cached = video.get("_q")
-    if cached is not None:
+    cached_signature = video.get("_q_sig")
+    if cached is not None and (cached_signature is None or cached_signature == signature):
+        video["_q_sig"] = signature
         return cached
     from vg.search import build_search_text
 
     text = build_search_text(video)
     video["_q"] = text
+    video["_q_sig"] = _search_cache_signature(video)
     return text
+
+
+def _search_cache_signature(video: dict) -> tuple:
+    """Fields that affect build_search_text; prevents stale warm-cache hits."""
+    def values(key: str) -> tuple[str, ...]:
+        value = video.get(key) or []
+        return tuple(str(item) for item in value) if isinstance(value, (list, tuple)) else (str(value),)
+
+    return (
+        str(video.get("name") or ""),
+        str(video.get("rel") or ""),
+        str(video.get("folder") or ""),
+        str(video.get("series_title") or ""),
+        values("genres"),
+        values("themes"),
+        values("backgrounds"),
+        values("actors"),
+    )
 
 
 def build_category_facets(counts: dict[str, int]) -> list[dict]:
@@ -135,6 +157,8 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
     """
     compute_started = time.perf_counter()
     duplicate_ms = series_ms = index_loop_ms = facets_build_ms = 0.0
+    search_cache_hits = 0
+    search_cache_misses = 0
     if heavy:
         stage_started = time.perf_counter()
         mark_duplicates(videos)
@@ -158,9 +182,11 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
         thumb_id = (video.get("_thumb_id") or vid or "").strip()
         if thumb_id:
             by_thumb_id[thumb_id] = video
-        if heavy:
-            video.pop("_q", None)
         ensure_video_taxonomy(video)
+        if isinstance(video.get("_q"), str):
+            search_cache_hits += 1
+        else:
+            search_cache_misses += 1
         video_search_text(video)
         category = video_category(video)
         by_category.setdefault(category, []).append(video)
@@ -203,6 +229,8 @@ def compute_catalog(videos: list[dict], *, heavy: bool = True) -> CatalogIndexes
             series_ms=series_ms,
             index_loop_ms=index_loop_ms,
             facets_build_ms=facets_build_ms,
+            search_cache_hits=search_cache_hits,
+            search_cache_misses=search_cache_misses,
         )
     except Exception:
         pass
@@ -250,10 +278,14 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
             save_facets_disk_cache,
         )
 
+        # The same signature used by the tree cache covers catalog mtimes,
+        # mounted roots, schema and count.  Avoid rewriting an unchanged
+        # facets payload on every restart; the detailed skip log makes cache
+        # reuse observable without adding write I/O to the hot path.
         save_stats = save_facets_disk_cache(
             facets,
             len(videos),
-            only_if_missing=False,
+            only_if_missing=True,
         )
         event = save_stats.pop("event", "facets_disk_cache_save")
         # "skip_reason" means nothing was written; treat as INFO so it does

@@ -236,6 +236,7 @@ def make_thumbnail(
     tmp = out.with_suffix(".tmp.jpg")
     attempts: list[str] = []
     no_video_stream = False
+    corrupted_input = False
     try:
         seeks = [seek]
         fallbacks = (1.0, 0.0) if background else (1.0, 0.0, 10.0, 30.0)
@@ -335,13 +336,31 @@ def make_thumbnail(
                         reason="invalid_input",
                     )
                     no_video_stream = True
+                    corrupted_input = True
                     break
             except subprocess.TimeoutExpired as exc:
                 attempts.append(f"seek={ss}:timeout={exc.timeout}s")
             except Exception as exc:
                 attempts.append(f"seek={ss}:exception={type(exc).__name__}:{exc}")
                 continue
-        if not no_video_stream:
+        if corrupted_input:
+            # Keep the specific source-corruption event above, and also emit
+            # the generic failure event expected by aggregate log analysis.
+            # Audio-only files intentionally remain source_no_video_stream
+            # only, because that is a valid non-video container diagnosis.
+            emit(
+                "WARN",
+                "thumbnail_generation_failed",
+                force=True,
+                video=video,
+                output=out,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
+                attempts=" || ".join(attempts),
+                reason="invalid_input",
+                background=background,
+                burst=burst,
+            )
+        elif not no_video_stream:
             emit(
                 "WARN",
                 "thumbnail_generation_failed",

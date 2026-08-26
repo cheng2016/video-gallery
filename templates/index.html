@@ -1611,9 +1611,12 @@
   <script>
   (function(){
     function _sendLog(ev, fields, lvl) {
+      var level = String(lvl || "INFO").toUpperCase();
+      var full = !!(window.__BOOT_DRIVES__ && window.__BOOT_DRIVES__.full_logging);
+      if (level !== "ERROR" && level !== "WARN" && !full) return;
       try {
         var blob = new Blob(
-          [JSON.stringify({event:ev, level:lvl||"INFO", fields:fields||{}})],
+          [JSON.stringify({event:ev, level:level, fields:fields||{}})],
           {type:"application/json"}
         );
         navigator.sendBeacon("/api/client-log", blob);
@@ -1692,6 +1695,9 @@
       _lastExtKey: "",           // renderExtTags 输入指纹
       _lastSortHtml: "",         // renderSortTags 输出 HTML 缓存
       _lastSortKey: "",          // renderSortTags 输入指纹
+      _lastScanning: false,       // API browser-cache safety gate
+      _updating: false,
+      _fullLogging: !!(window.__BOOT_DRIVES__ && window.__BOOT_DRIVES__.full_logging),
     };
 
     const CHANNEL_ICO = {
@@ -1731,15 +1737,85 @@
     const CLIENT_SESSION_ID =
       (Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
     let lastClientLogFailureAt = 0;
+    let clientLogQueue = [];
+    let clientLogFlushTimer = 0;
+    const CLIENT_LOG_BATCH_MAX = 24;
+    const CLIENT_LOG_FLUSH_MS = 80;
+    const CLIENT_LOG_CORE_EVENTS = new Set([
+      "refresh_render_completed",
+      "load_more_done",
+    ]);
+    const CLIENT_LOG_LOOP_EVENTS = new Set([
+      "filter_layout",
+      "sticky_layout",
+      "scroll_tick",
+      "virtual_scroll_geometry",
+      "virtual_spacer_state",
+      "virtual_bottom_spacer_change",
+      "continue_layout",
+    ]);
+    const clientLogLastSent = new Map();
 
     function newOperationId(prefix) {
       return `${prefix || "op"}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     }
 
+    function postClientLogs(events) {
+      if (!events || !events.length) return;
+      const body = events.length === 1 ? events[0] : { events };
+      fetch("/api/client-log", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(events.length === 1 && events[0].operation_id
+            ? { "X-VG-Operation-ID": events[0].operation_id }
+            : {}),
+        },
+        body: JSON.stringify(body),
+        keepalive: true,
+      }).then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      }).catch((error) => {
+        const now = Date.now();
+        if (now - lastClientLogFailureAt >= 5000) {
+          lastClientLogFailureAt = now;
+          console.error("[video-gallery] client log upload failed", {
+            count: events.length,
+            error: String(error && (error.stack || error) || "unknown"),
+          });
+        }
+      });
+    }
+
+    function flushClientLogs() {
+      if (clientLogFlushTimer) {
+        clearTimeout(clientLogFlushTimer);
+        clientLogFlushTimer = 0;
+      }
+      if (!clientLogQueue.length) return;
+      const batch = clientLogQueue.splice(0, CLIENT_LOG_BATCH_MAX);
+      postClientLogs(batch);
+      if (clientLogQueue.length) {
+        clientLogFlushTimer = setTimeout(flushClientLogs, CLIENT_LOG_FLUSH_MS);
+      }
+    }
+
     function clientLog(event, fields, level, operationId) {
+      const eventName = String(event || "unknown");
+      const levelName = String(level || "INFO").toUpperCase();
+      const important = levelName === "ERROR" || levelName === "WARN";
+      if (!important && !state._fullLogging && !CLIENT_LOG_CORE_EVENTS.has(eventName)) {
+        return;
+      }
+      if (!important && CLIENT_LOG_LOOP_EVENTS.has(eventName)) {
+        const now = Date.now();
+        const previous = clientLogLastSent.get(eventName) || 0;
+        if (now - previous < 1000) return;
+        clientLogLastSent.set(eventName, now);
+      }
       const payload = {
-        event: String(event || "unknown"),
-        level: level || "INFO",
+        event: eventName,
+        level: levelName,
         operation_id: operationId || currentOperationId || lastUiOperationId || "",
         page: location.pathname + location.search,
         fields: {
@@ -1748,29 +1824,16 @@
         },
       };
       try {
-        fetch("/api/client-log", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(payload.operation_id ? { "X-VG-Operation-ID": payload.operation_id } : {}),
-          },
-          body: JSON.stringify(payload),
-          keepalive: true,
-        }).then((response) => {
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-        }).catch((error) => {
-          const now = Date.now();
-          // 日志接口异常不能递归再打日志；浏览器控制台保留一条可见错误，5 秒限流。
-          if (now - lastClientLogFailureAt >= 5000) {
-            lastClientLogFailureAt = now;
-            console.error("[video-gallery] client log upload failed", {
-              event: payload.event,
-              error: String(error && (error.stack || error) || "unknown"),
-            });
-          }
-        });
+        if (important) {
+          postClientLogs([payload]);
+          return;
+        }
+        clientLogQueue.push(payload);
+        if (clientLogQueue.length >= CLIENT_LOG_BATCH_MAX) {
+          flushClientLogs();
+        } else if (!clientLogFlushTimer) {
+          clientLogFlushTimer = setTimeout(flushClientLogs, CLIENT_LOG_FLUSH_MS);
+        }
       } catch (error) {
         console.error("[video-gallery] client log setup failed", {
           event: payload.event,
@@ -2293,12 +2356,15 @@
       const operationId = newOperationId("tree");
       const params = new URLSearchParams();
       if (state.lib) params.set("lib", state.lib);
-      params.set("op", operationId);
+      params.set("gen", String(state._libGen || 0));
+      const browserCacheMode = (state._lastScanning || state._updating) ? "no-store" : "default";
       clientLog("tree_load_requested", {
         lib: state.lib || "all",
+        cache_mode: browserCacheMode,
+        cache_generation: state._libGen || 0,
       }, "INFO", operationId);
       const r = await fetch("/api/tree" + (params.toString() ? ("?" + params) : ""), {
-        cache: "no-store",
+        cache: browserCacheMode,
         headers: { "X-VG-Operation-ID": operationId },
       });
       if (!r.ok) {
@@ -2312,12 +2378,17 @@
         throw new Error(err.msg || ("树接口失败 HTTP " + r.status));
       }
       const data = await r.json();
+      state._lastScanning = !!data.scanning;
+      state._updating = !!data.updating;
       clientLog("tree_load_completed", {
         elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
         request_id: r.headers.get("X-VG-Request-ID") || "",
         count: data.count || 0,
         roots: Array.isArray(data.roots) ? data.roots.length : 0,
         scanning: !!data.scanning,
+        updating: !!data.updating,
+        cache_layer: r.headers.get("X-VG-Cache-Layer") || "",
+        cache_policy: r.headers.get("X-VG-Cache-Policy") || "",
       }, "INFO", operationId);
       return data;
     }
@@ -2342,9 +2413,13 @@
       activeListControllers.clear();
     }
 
-    async function fetchVideos(offset) {
+    async function fetchVideos(offset, requestReason) {
       const started = clientNow();
       const operationId = newOperationId("page");
+      let terminalStatus = "pending";
+      let terminalError = "";
+      let responseRequestId = "";
+      const requestedOffset = offset == null ? state.offset : offset;
       const params = new URLSearchParams();
       if (state.category) params.set("category", state.category);
       if (state.folder) params.set("folder", state.folder);
@@ -2357,10 +2432,12 @@
       if (state.view) params.set("view", state.view);
       if (state.query) params.set("q", state.query);
       if (state.lib) params.set("lib", state.lib);
-      params.set("offset", String(offset == null ? state.offset : offset));
+      params.set("gen", String(state._libGen || 0));
+      params.set("offset", String(requestedOffset));
       params.set("limit", String(state.pageSize));
-      params.set("op", operationId);
+      const browserCacheMode = (state._lastScanning || state._updating) ? "no-store" : "default";
       clientLog("page_load_requested", {
+        request_reason: requestReason || "unspecified",
         offset: offset == null ? state.offset : offset,
         limit: state.pageSize,
         lib: state.lib || "all",
@@ -2370,12 +2447,14 @@
         view: state.view || "",
         sort: state.sort || "",
         query_length: (state.query || "").length,
+        cache_mode: browserCacheMode,
+        cache_generation: state._libGen || 0,
       }, "INFO", operationId);
       const controller = new AbortController();
       activeListControllers.add(controller);
       try {
         const r = await fetch("/api/videos?" + params, {
-          cache: "no-store",
+          cache: browserCacheMode,
           signal: controller.signal,
           headers: { "X-VG-Operation-ID": operationId },
         });
@@ -2384,25 +2463,33 @@
           throw new Error(err.msg || ("列表接口失败 HTTP " + r.status));
         }
         const data = await r.json();
+        responseRequestId = r.headers.get("X-VG-Request-ID") || "";
+        terminalStatus = "completed";
         clientLog("page_load_completed", {
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          request_id: r.headers.get("X-VG-Request-ID") || "",
+          request_id: responseRequestId,
           offset: data.offset || 0,
           rows: Array.isArray(data.videos) ? data.videos.length : 0,
           total: data.count || 0,
           has_more: !!data.has_more,
           ext: state.ext || "",
+          cache_layer: r.headers.get("X-VG-Cache-Layer") || "",
+          cache_policy: r.headers.get("X-VG-Cache-Policy") || "",
         }, "INFO", operationId);
         return data;
       } catch (e) {
         // 切换频道/筛选时主动取消旧请求，不算失败
         if (controller.signal.aborted || isAbortError(e)) {
+          terminalStatus = "aborted";
+          terminalError = String(e && (e.reason || e.message || e) || "aborted");
           clientLog("page_load_aborted", {
             elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
             reason: controller.signal.aborted ? "channel-switch" : String(e),
           }, "INFO", operationId);
           return null;
         }
+        terminalStatus = "failed";
+        terminalError = String(e && (e.stack || e) || "unknown");
         clientLog("page_load_failed", {
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
           reason: String(e),
@@ -2414,6 +2501,16 @@
         // 「等待 facets」标记：避免请求异常后 tree_nav 永远被压制不渲染。
         const wasFirstPage = offset == null || Number(offset) === 0;
         if (wasFirstPage) state._firstPageVideoPending = false;
+        clientLog("page_load_finally", {
+          request_reason: requestReason || "unspecified",
+          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
+          status: terminalStatus,
+          requested_offset: requestedOffset,
+          response_request_id: responseRequestId,
+          first_page: wasFirstPage,
+          active_requests_after: activeListControllers.size,
+          error: terminalError,
+        }, terminalStatus === "failed" ? "ERROR" : "INFO", operationId);
       }
     }
 
@@ -2422,6 +2519,9 @@
       $("driveHint").textContent = "正在检测磁盘和媒体目录…";
 
       const apply = (data) => {
+        if (typeof data.full_logging === "boolean") {
+          state._fullLogging = data.full_logging;
+        }
         state.drives = data.drives || [];
         state.root = data.current || state.root;
         const n = state.drives.length;
@@ -2528,6 +2628,11 @@
         try {
           const r = await fetch("/api/status");
           const d = await r.json();
+          state._lastScanning = !!d.scanning;
+          state._updating = !!d.updating;
+          if (typeof d.full_logging === "boolean") {
+            state._fullLogging = d.full_logging;
+          }
           // A directory is already browsable while thumbnails/metadata run,
           // but polling must stay alive so a newly published disk generation
           // is painted instead of leaving the sidebar on the previous disk.
@@ -4740,6 +4845,7 @@
     }
 
     let refreshToken = 0;
+    let refreshScheduleSeq = 0;
 
     async function refresh(opts) {
       // Global throttle + merging for refresh() calls.  Multiple triggers
@@ -4755,6 +4861,7 @@
       const options = opts || {};
       const MIN_INTERVAL_MS = 1500;
       const nowTick = Date.now();
+      const callOperationId = newOperationId("refresh-call");
       if (typeof state._refreshPendingLock !== "boolean") state._refreshPendingLock = false;
       if (typeof state._lastFullRefresh !== "number") state._lastFullRefresh = 0;
 
@@ -4769,6 +4876,12 @@
         // must not be merged down to nav=false.
         const pending = state._refreshPending || null;
         const mergedOpts = pending ? pending.opts : {};
+        const scheduleSeq = ++refreshScheduleSeq;
+        const queuedCallIds = Array.isArray(mergedOpts._queued_call_ids)
+          ? mergedOpts._queued_call_ids.slice()
+          : [];
+        queuedCallIds.push(callOperationId);
+        mergedOpts._queued_call_ids = queuedCallIds.slice(-12);
         if (!mergedOpts.soft || options.soft === false) mergedOpts.soft = options.soft === false ? false : (mergedOpts.soft ?? options.soft);
         if (mergedOpts.nav || options.nav === true) mergedOpts.nav = true;
         else if (mergedOpts.nav === false || options.nav === false) mergedOpts.nav = false;
@@ -4776,20 +4889,121 @@
           + (options.soft ? "poll" : "ui");
         if (pending && pending.timeoutId) clearTimeout(pending.timeoutId);
         const wait = MIN_INTERVAL_MS - Math.max(0, nowTick - state._lastFullRefresh);
+        clientLog("refresh_queued", filterStateFields({
+          schedule_seq: scheduleSeq,
+          call_operation_id: callOperationId,
+          throttle_reason: state._refreshRunning === true
+            ? "refresh_running"
+            : (state._refreshPendingLock === true ? "pending_lock" : "cooldown"),
+          wait_ms: Math.max(50, Math.round(wait)),
+          pending_before: !!pending,
+          pending_merged: !!pending,
+          requested_soft: !!options.soft,
+          requested_nav: options.nav !== false,
+          merged_source: mergedOpts.merged_source || "",
+          queued_call_count: mergedOpts._queued_call_ids.length,
+          queued_call_ids: mergedOpts._queued_call_ids,
+        }), "INFO", callOperationId);
+        const timerScheduledAt = Date.now();
+        const timerId = `refresh-timer-${scheduleSeq}-${Math.random().toString(36).slice(2, 8)}`;
         const timeoutId = setTimeout(() => {
+          const dequeueOperationId = (mergedOpts._queued_call_ids || [callOperationId])[0] || callOperationId;
+          const timerFiredAt = Date.now();
+          clientLog("refresh_timer_fired", filterStateFields({
+            schedule_seq: scheduleSeq,
+            timer_id: timerId,
+            call_operation_id: callOperationId,
+            scheduled_wait_ms: Math.max(50, Math.round(wait)),
+            actual_wait_ms: Math.max(0, timerFiredAt - timerScheduledAt),
+            pending_exists: !!state._refreshPending,
+            pending_schedule_seq: state._refreshPending ? state._refreshPending.schedule_seq : 0,
+            queued_call_count: (mergedOpts._queued_call_ids || []).length,
+          }), "INFO", dequeueOperationId);
+          clientLog("refresh_dequeued", filterStateFields({
+            schedule_seq: scheduleSeq,
+            call_operation_id: callOperationId,
+            timer_id: timerId,
+            wait_ms: Math.max(0, Math.round(timerFiredAt - nowTick)),
+            merged_source: mergedOpts.merged_source || "",
+            queued_call_count: (mergedOpts._queued_call_ids || []).length,
+            queued_call_ids: mergedOpts._queued_call_ids || [],
+          }), "INFO", dequeueOperationId);
           state._refreshPending = null;
           // Re-enter the real function through the normal throttle gate
           // which should now be open.
-          refresh(mergedOpts);
+          try {
+            const dispatched = refresh({ ...mergedOpts, _dequeued_at: timerFiredAt });
+            if (dispatched && typeof dispatched.catch === "function") {
+              dispatched.catch((error) => {
+                clientLog("refresh_timer_dispatch_failed", filterStateFields({
+                  schedule_seq: scheduleSeq,
+                  timer_id: timerId,
+                  elapsed_ms: Math.max(0, Date.now() - timerFiredAt),
+                  error: String(error && (error.stack || error) || "unknown"),
+                }), "ERROR", dequeueOperationId);
+              });
+            }
+          } catch (error) {
+            clientLog("refresh_timer_dispatch_failed", filterStateFields({
+              schedule_seq: scheduleSeq,
+              timer_id: timerId,
+              elapsed_ms: Math.max(0, Date.now() - timerFiredAt),
+              error: String(error && (error.stack || error) || "unknown"),
+            }), "ERROR", dequeueOperationId);
+          }
         }, Math.max(50, wait));
-        state._refreshPending = { timeoutId, opts: mergedOpts };
+        state._refreshPending = {
+          timeoutId,
+          opts: mergedOpts,
+          schedule_seq: scheduleSeq,
+          timer_id: timerId,
+          scheduled_at: timerScheduledAt,
+          scheduled_wait_ms: Math.max(50, Math.round(wait)),
+          queued_call_ids: mergedOpts._queued_call_ids,
+        };
+        clientLog("refresh_timer_scheduled", filterStateFields({
+          schedule_seq: scheduleSeq,
+          timer_id: timerId,
+          scheduled_wait_ms: Math.max(50, Math.round(wait)),
+          queued_call_count: mergedOpts._queued_call_ids.length,
+          queued_call_ids: mergedOpts._queued_call_ids,
+        }), "INFO", callOperationId);
         return;
       }
       state._refreshRunning = true;
       state._refreshPendingLock = true;
+      const dispatchOperationId = options._dispatch_operation_id || newOperationId("refresh");
+      const dispatchOptions = { ...options, _dispatch_operation_id: dispatchOperationId };
+      clientLog("refresh_dispatched", filterStateFields({
+        call_operation_id: callOperationId,
+        dispatch_operation_id: dispatchOperationId,
+        queued_call_count: Array.isArray(options._queued_call_ids) ? options._queued_call_ids.length : 0,
+        queued_call_ids: Array.isArray(options._queued_call_ids) ? options._queued_call_ids : [],
+        merged_source: options.merged_source || "",
+        throttle_delay_ms: options._dequeued_at
+          ? Math.max(0, Date.now() - Number(options._dequeued_at))
+          : 0,
+      }), "INFO", dispatchOperationId);
+      const runStarted = clientNow();
+      let runError = "";
       try {
-        return await _refreshImpl(options);
+        return await _refreshImpl(dispatchOptions);
+      } catch (error) {
+        runError = String(error && (error.stack || error) || "unknown");
+        throw error;
       } finally {
+        clientLog("refresh_run_finally", filterStateFields({
+          elapsed_ms: Number(clientElapsedMs(runStarted).toFixed(1)),
+          dispatch_operation_id: dispatchOperationId,
+          refresh_token: refreshToken,
+          run_error: runError,
+          pending_after: !!state._refreshPending,
+          running_before_release: !!state._refreshRunning,
+          total: state.totalCount || 0,
+          loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+          offset: state.offset || 0,
+          has_more: !!state.hasMore,
+        }), runError ? "ERROR" : "INFO", dispatchOperationId);
         state._refreshRunning = false;
         state._lastFullRefresh = Date.now();
         // Release the pending lock on next microtask so a merged call that
@@ -4802,7 +5016,7 @@
       const refreshStarted = clientNow();
       const options = opts || {};
       const token = ++refreshToken;
-      const refreshOperationId = newOperationId("refresh");
+      const refreshOperationId = options._dispatch_operation_id || newOperationId("refresh");
       // Give immediate feedback while the previous request is being aborted
       // and the new filtered page is fetched.  The old cards remain visible
       // intentionally, but the count must not look frozen during a slow scan.
@@ -4817,6 +5031,18 @@
         soft: softRefresh,
         merged_source: options.merged_source || "",
       }), "INFO", refreshOperationId);
+      const refreshStage = (stage, extra, level) => {
+        clientLog("refresh_stage", filterStateFields({
+          stage,
+          elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+          ...(extra || {}),
+        }), level || "INFO", refreshOperationId);
+      };
+      refreshStage("begin", {
+        token,
+        need_nav_cache: !!state.navCache,
+        current_offset: state.offset || 0,
+      });
       // soft (polling) refresh preserves the user's current scroll/page.
       // Explicit user-initiated refresh always resets to the first page.
       const currentOffset = state.offset || 0;
@@ -4841,6 +5067,8 @@
 
       let treeData = state.navCache;
       if (needNav) {
+        const treeStarted = clientNow();
+        refreshStage("fetch_tree_start", { need_nav: true });
         try {
           treeData = await fetchTree();
         } catch (e) {
@@ -4853,6 +5081,12 @@
           alert(String(e.message || e));
           return;
         }
+        refreshStage("fetch_tree_done", {
+          need_nav: true,
+          stage_elapsed_ms: Number(clientElapsedMs(treeStarted).toFixed(1)),
+          tree_count: treeData && treeData.count || 0,
+          tree_categories: treeData && Array.isArray(treeData.categories) ? treeData.categories.length : 0,
+        });
         if (token !== refreshToken) {
           clientLog("refresh_superseded", filterStateFields({
             elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
@@ -4863,7 +5097,12 @@
           return;
         }
         rememberNav(treeData);
+        const navRenderStarted = clientNow();
         await applyNavChrome(treeData);
+        refreshStage("nav_render_done", {
+          stage_elapsed_ms: Number(clientElapsedMs(navRenderStarted).toFixed(1)),
+          tree_count: treeData && treeData.count || 0,
+        });
         if (token !== refreshToken) {
           clientLog("refresh_superseded", filterStateFields({
             elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
@@ -4877,6 +5116,10 @@
         syncNavFromCache();
         treeData = state.navCache || treeData || {};
         lastScanning = !!treeData.scanning;
+        refreshStage("nav_cache_reused", {
+          tree_count: treeData && treeData.count || 0,
+          tree_categories: treeData && Array.isArray(treeData.categories) ? treeData.categories.length : 0,
+        });
       }
       if (state.folder && state.folder === state.category) {
         clientLog("refresh_state_normalized", filterStateFields({ reason: "folder_equals_category" }), "WARN", refreshOperationId);
@@ -4899,8 +5142,14 @@
       // the grid from jumping back to offset 0 every time the scan ticker
       // emits a new generation.
       const fetchOffset = (softRefresh && hadScrolled) ? currentOffset : 0;
+      const videosStarted = clientNow();
+      refreshStage("fetch_videos_start", {
+        requested_offset: fetchOffset,
+        page_size: state.pageSize || 0,
+        soft: softRefresh,
+      });
       try {
-        data = await fetchVideos(fetchOffset);
+        data = await fetchVideos(fetchOffset, "refresh_primary");
       } catch (e) {
         if (isAbortError(e) || token !== refreshToken) {
           clientLog("refresh_aborted", filterStateFields({
@@ -4921,6 +5170,13 @@
         alert(String(e.message || e));
         return;
       }
+      refreshStage("fetch_videos_done", {
+        requested_offset: fetchOffset,
+        stage_elapsed_ms: Number(clientElapsedMs(videosStarted).toFixed(1)),
+        rows: data && Array.isArray(data.videos) ? data.videos.length : 0,
+        total: data && data.count || 0,
+        has_more: !!(data && data.has_more),
+      });
       if (!data || token !== refreshToken) {
         clientLog("refresh_superseded", filterStateFields({
           elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
@@ -4934,16 +5190,27 @@
       const genreBefore = state.genre;
       const themeBefore = state.theme;
       const backgroundBefore = state.background;
+      const facetRenderStarted = clientNow();
+      refreshStage("facet_render_start", {
+        rows: Array.isArray(data.videos) ? data.videos.length : 0,
+        genres: Array.isArray(data.genres) ? data.genres.length : 0,
+        themes: Array.isArray(data.themes) ? data.themes.length : 0,
+        backgrounds: Array.isArray(data.backgrounds) ? data.backgrounds.length : 0,
+        types: Array.isArray(data.types) ? data.types.length : 0,
+      });
       renderGenreTags(data.genres || []);
       renderThemeTags(data.themes || []);
       renderBackgroundTags(data.backgrounds || []);
       if (Array.isArray(data.types)) renderExtTags(data.types, "video_facets");
+      refreshStage("facet_render_done", {
+        stage_elapsed_ms: Number(clientElapsedMs(facetRenderStarted).toFixed(1)),
+      });
       if (
         (genreBefore && !state.genre) ||
         (themeBefore && !state.theme) ||
         (backgroundBefore && !state.background)
       ) {
-        data = await fetchVideos(0);
+        data = await fetchVideos(0, "refresh_taxonomy_retry");
         if (!data || token !== refreshToken) return;
         renderGenreTags(data.genres || []);
         renderThemeTags(data.themes || []);
@@ -5033,7 +5300,7 @@
         state.theme = "";
         state.background = "";
         saveUiPrefs();
-        data = await fetchVideos(0);
+        data = await fetchVideos(0, "refresh_filter_reset");
         if (!data || token !== refreshToken) return;
         state.totalCount = data.count || 0;
         state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
@@ -5070,7 +5337,7 @@
           state.theme = "";
           state.background = "";
           saveUiPrefs();
-          data = await fetchVideos(0);
+          data = await fetchVideos(0, "refresh_mount_reset");
           if (!data || token !== refreshToken) return;
           state.totalCount = data.count || 0;
           state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
@@ -5087,22 +5354,64 @@
           }), "WARN", refreshOperationId);
         }
       }
+      const subfolderRenderStarted = clientNow();
+      refreshStage("subfolder_render_start", {
+        level_count: Array.isArray(data.subfolder_levels) ? data.subfolder_levels.length : 0,
+      });
       renderSubTags(data.subfolder_levels || []);
+      refreshStage("subfolder_render_done", {
+        stage_elapsed_ms: Number(clientElapsedMs(subfolderRenderStarted).toFixed(1)),
+        dom_rows: $("subFolderRows")?.querySelectorAll(".filter-row").length || 0,
+        dom_tags: $("subFolderRows")?.querySelectorAll("[data-folder]").length || 0,
+      });
       clientLog("refresh_end", filterStateFields({
         elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
         token,
         total: state.totalCount,
         rendered_sub_rows: $("subFolderRows")?.querySelectorAll(".filter-row").length || 0,
         rendered_sub_tags: $("subFolderRows")?.querySelectorAll("[data-folder]").length || 0,
+        render_grid_pending: true,
       }), "INFO", refreshOperationId);
       renderCrumb();
+      const renderStartedAt = clientNow();
+      const renderBeforeLoaded = state.loadedVideos ? state.loadedVideos.length : 0;
+      const renderBeforeScrollTop = $("contentScroll") ? $("contentScroll").scrollTop : 0;
+      let refreshRenderMode = "flat";
+      refreshStage("grid_render_start", {
+        input_rows: Array.isArray(data.videos) ? data.videos.length : 0,
+        loaded_before: renderBeforeLoaded,
+        preserve_loaded_buffer: !!preserveLoadedBuffer,
+      });
       if (!preserveLoadedBuffer) {
+        refreshRenderMode = state.virtualEnabled ? "virtual_replace" : "flat";
         renderGrid(data.videos || [], lastScanning, false);
       } else if (state.virtualEnabled) {
+        refreshRenderMode = "virtual_preserved";
         // Recompute spacers for a changed total while retaining all loaded
         // cards and the user's current scroll position.
         renderVirtualGrid();
       }
+      refreshStage("grid_render_done", {
+        stage_elapsed_ms: Number(clientElapsedMs(renderStartedAt).toFixed(1)),
+        mode: refreshRenderMode,
+        loaded_after: state.loadedVideos ? state.loadedVideos.length : 0,
+        grid_card_count: $("grid") ? $("grid").querySelectorAll(".card").length : 0,
+      });
+      clientLog("refresh_render_completed", filterStateFields({
+        elapsed_ms: Number(clientElapsedMs(refreshStarted).toFixed(1)),
+        render_ms: Number(clientElapsedMs(renderStartedAt).toFixed(1)),
+        token,
+        mode: refreshRenderMode,
+        input_rows: Array.isArray(data.videos) ? data.videos.length : 0,
+        loaded_before: renderBeforeLoaded,
+        loaded_after: state.loadedVideos ? state.loadedVideos.length : 0,
+        total: state.totalCount || 0,
+        has_more: !!state.hasMore,
+        offset: state.offset || 0,
+        scroll_top_before: Math.round(renderBeforeScrollTop),
+        scroll_top_after: $("contentScroll") ? Math.round($("contentScroll").scrollTop) : 0,
+        grid_card_count: $("grid") ? $("grid").querySelectorAll(".card").length : 0,
+      }), "INFO", refreshOperationId);
       const libTip = state.lib
         ? ((state.mountedRoots.find((r) => sameLibPath(r.path, state.lib)) || {}).label || state.lib)
         : (state.multi ? "全部目录" : "");
@@ -5162,7 +5471,7 @@
           scroll_height: beforeHeight,
           client_height: root ? root.clientHeight : 0,
         }, "INFO");
-        const data = await fetchVideos(state.offset);
+        const data = await fetchVideos(state.offset, "load_more");
         if (!data) {
           // fetchVideos already logged page_load_aborted on cancel; just mark.
           loadMoreAbortCount += 1;
@@ -6949,6 +7258,7 @@
           alert(data.msg || "保存失败");
           return;
         }
+        state._fullLogging = !!data.full_logging;
         $("privacyModal").classList.remove("open");
         alert(data.msg || "已保存");
         try { await refresh(); } catch (_) {}

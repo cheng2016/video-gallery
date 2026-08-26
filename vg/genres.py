@@ -82,5 +82,7 @@ def ensure_video_genres(v: dict) -> list[str]:
     genres = detect_genres(v.get("rel") or "", v.get("name") or "")
     v["genres"] = genres
     v["genres_ver"] = GENRES_VERSION
+    v.pop("_q", None)
+    v.pop("_q_sig", None)
     return genres
 

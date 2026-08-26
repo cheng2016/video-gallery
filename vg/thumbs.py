@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 
 from vg.cache import list_thumb_ids, thumb_file_ready, thumb_path
@@ -172,10 +173,61 @@ def reuse_existing_thumb(item: dict, cache: Path, sources: dict[str, Path] | Non
     return False
 
 
+def thumbnail_failure_is_current(item: dict) -> bool:
+    """Whether a persisted thumbnail failure still matches this source file."""
+    if not item.get("thumb_failed"):
+        return False
+    try:
+        saved_size = int(item.get("thumb_failed_size"))
+        current_size = int(item.get("size") or 0)
+    except (TypeError, ValueError):
+        saved_size = current_size = 0
+    try:
+        saved_mtime = float(item.get("thumb_failed_mtime"))
+        current_mtime = float(item.get("mtime") or 0)
+    except (TypeError, ValueError):
+        saved_mtime = current_mtime = 0.0
+    # Legacy markers without source metadata remain conservative skips.
+    if not item.get("thumb_failed_size") and not item.get("thumb_failed_mtime"):
+        return True
+    return saved_size == current_size and abs(saved_mtime - current_mtime) < 1.0
+
+
+def mark_thumbnail_failure(item: dict, *, reason: str = "generation_failed") -> None:
+    """Persist a source-specific negative thumbnail result on the item."""
+    item["thumb_failed"] = True
+    item["thumb_failed_reason"] = str(reason or "generation_failed")[:120]
+    item["thumb_failed_at"] = time.time()
+    item["thumb_failed_size"] = int(item.get("size") or 0)
+    try:
+        item["thumb_failed_mtime"] = float(item.get("mtime") or 0)
+    except (TypeError, ValueError):
+        item["thumb_failed_mtime"] = 0.0
+    item["has_thumb"] = False
+    item["thumb_v"] = 0
+
+
+def clear_thumbnail_failure(item: dict) -> bool:
+    """Clear a negative marker after success or an explicit user retry."""
+    changed = False
+    for key in (
+        "thumb_failed",
+        "thumb_failed_reason",
+        "thumb_failed_at",
+        "thumb_failed_size",
+        "thumb_failed_mtime",
+    ):
+        if key in item:
+            item.pop(key, None)
+            changed = True
+    return changed
+
+
 def missing_thumb_items(videos: list[dict], cache: Path | None) -> list[dict]:
     """Videos whose cache dir has no .vgt. Does not walk the video disk."""
     have = list_thumb_ids(cache)
     missing: list[dict] = []
+    skipped_failed = 0
     for video in videos:
         vid = (video.get("id") or "").strip()
         if not vid:
@@ -183,7 +235,23 @@ def missing_thumb_items(videos: list[dict], cache: Path | None) -> list[dict]:
         if vid in have:
             video["has_thumb"] = True
             continue
+        if thumbnail_failure_is_current(video):
+            skipped_failed += 1
+            video["has_thumb"] = False
+            video["thumb_v"] = 0
+            continue
         missing.append(video)
+    if skipped_failed:
+        from vg.diagnostics import aggregate, emit
+
+        aggregate("thumbnail_generation_skipped_persisted_fail", skipped_failed)
+        emit(
+            "INFO",
+            "thumbnail_generation_skipped_persisted_fail",
+            force=True,
+            skipped=skipped_failed,
+            candidates=len(videos),
+        )
     return missing
 
 

@@ -85,6 +85,11 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn('clientLog("player_error"', html)
         self.assertIn('clientLog("hls_error"', html)
         self.assertIn("function beginPlaybackOperation(", html)
+        self.assertIn("CLIENT_LOG_CORE_EVENTS", html)
+        self.assertIn("CLIENT_LOG_LOOP_EVENTS", html)
+        self.assertIn("clientLogQueue", html)
+        self.assertIn("events.length === 1 ? events[0] : { events }", html)
+        self.assertIn("!state._fullLogging", html)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,15 @@ from vg.schema import INDEX_SCHEMA_VERSION, serialize_video_item
 from vg.util import _clear_path_attrs_windows, log
 
 CATALOG_DB_NAME = "catalog.sqlite"
-CATALOG_DB_SCHEMA = 2
+# Keep the folder-validation TTL marker outside ``catalog.sqlite``.  Updating
+# a SQLite meta row changes the DB mtime, which is part of the unified tree
+# cache signature and forced an otherwise unchanged tree cache to be rewritten
+# on the next restart.
+CATALOG_VALIDATION_MARKER_NAME = "catalog_validation.marker"
+# Search text now uses the same pinyin/actor-aware builder as the in-memory
+# query path.  Bump the DB schema so old rows are rebuilt once instead of
+# restoring the narrower legacy SQL search string as ``_q``.
+CATALOG_DB_SCHEMA = 3
 
 _db_locks_guard = threading.Lock()
 _db_locks: dict[str, threading.RLock] = {}
@@ -27,6 +35,12 @@ def catalog_db_path(cache: Path | None) -> Path | None:
     if not cache:
         return None
     return Path(cache) / CATALOG_DB_NAME
+
+
+def _catalog_validation_marker_path(cache: Path | None) -> Path | None:
+    if not cache:
+        return None
+    return Path(cache) / CATALOG_VALIDATION_MARKER_NAME
 
 
 def _lock_for(cache: Path) -> threading.RLock:
@@ -115,15 +129,26 @@ def _query_columns(item: dict, root_s: str = "") -> tuple:
     except (TypeError, ValueError):
         duration = 0.0
     name = str(item.get("name") or Path(item.get("filename") or "").stem or "")
-    search_parts = [
-        name,
-        str(item.get("filename") or ""),
-        str(item.get("rel") or ""),
-        " ".join(str(x) for x in (item.get("genres") or [])),
-        " ".join(str(x) for x in (item.get("themes") or [])),
-        " ".join(str(x) for x in (item.get("backgrounds") or [])),
-        " ".join(str(x) for x in (item.get("actors") or [])),
-    ]
+    # Keep the indexed SQL text byte-for-byte compatible with the Python
+    # search cache.  This lets cold-start catalog loads restore ``_q``
+    # without paying pinyin/actor extraction for every video again.
+    try:
+        from vg.search import build_search_text
+
+        search_text = build_search_text(item)
+    except Exception:
+        # Catalog persistence must remain available even when an optional
+        # search dependency is unavailable; retain the legacy fallback.
+        search_parts = [
+            name,
+            str(item.get("filename") or ""),
+            str(item.get("rel") or ""),
+            " ".join(str(x) for x in (item.get("genres") or [])),
+            " ".join(str(x) for x in (item.get("themes") or [])),
+            " ".join(str(x) for x in (item.get("backgrounds") or [])),
+            " ".join(str(x) for x in (item.get("actors") or [])),
+        ]
+        search_text = " ".join(search_parts).casefold()
     def tokens(values) -> str:
         return "|" + "|".join(str(x).strip() for x in (values or []) if str(x).strip()) + "|"
 
@@ -136,7 +161,7 @@ def _query_columns(item: dict, root_s: str = "") -> tuple:
         duration,
         str(item.get("kind") or ""),
         name,
-        " ".join(search_parts).casefold(),
+        search_text,
         tokens(item.get("genres")),
         tokens(item.get("themes")),
         tokens(item.get("backgrounds")),
@@ -396,7 +421,97 @@ def read_catalog_counts(cache: Path) -> tuple[int | None, dict[str, int] | None]
             return None, None
 
 
-def load_catalog_videos(cache: Path, root: Path | str | None = None) -> list[dict]:
+def read_catalog_validation_time(cache: Path) -> float:
+    """Return the last completed background folder-count validation timestamp."""
+    if not catalog_exists(cache):
+        return 0.0
+    marker = _catalog_validation_marker_path(cache)
+    if marker is not None:
+        try:
+            raw_marker = marker.read_text(encoding="ascii").strip()
+            if raw_marker:
+                return float(raw_marker)
+        except (OSError, TypeError, ValueError):
+            pass
+    with _db_guard(cache, "catalog_read_validation_time"):
+        try:
+            conn = _connect(cache)
+            try:
+                raw = _meta_get(conn, "last_validation_at", "0") or "0"
+                return float(raw)
+            finally:
+                conn.close()
+        except (sqlite3.Error, TypeError, ValueError):
+            return 0.0
+
+
+def clear_catalog_validation_time(cache: Path) -> bool:
+    """Drop the background-validation cooldown marker (e.g. before force rescan)."""
+    marker = _catalog_validation_marker_path(cache)
+    cleared = False
+    if marker is not None:
+        try:
+            if marker.exists():
+                marker.unlink()
+            cleared = True
+        except OSError:
+            cleared = False
+    with _db_guard(cache, "catalog_clear_validation_time"):
+        try:
+            conn = _connect(cache)
+            try:
+                _ensure_schema(conn)
+                _meta_set(conn, "last_validation_at", "0")
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return cleared
+    return cleared
+
+
+def write_catalog_validation_time(cache: Path, timestamp: float | None = None) -> bool:
+    """Persist a successful validation marker without touching catalog mtime.
+
+    The marker intentionally lives beside SQLite.  A validation-only update
+    must not invalidate the unified tree/facets cache, whose signature uses
+    ``catalog.sqlite`` mtime to detect real catalog changes.  The SQLite meta
+    value remains as a read fallback for catalogs created before this marker
+    was introduced.
+    """
+    value = float(timestamp if timestamp is not None else time.time())
+    marker = _catalog_validation_marker_path(cache)
+    if marker is None:
+        return False
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_suffix(marker.suffix + ".tmp")
+        tmp.write_text(f"{value:.6f}\n", encoding="ascii")
+        tmp.replace(marker)
+        return True
+    except (OSError, TypeError, ValueError):
+        # Fall back to the legacy SQLite meta field if the sidecar cannot be
+        # created (read-only or unusual cache location).
+        pass
+    with _db_guard(cache, "catalog_write_validation_time"):
+        try:
+            conn = _connect(cache)
+            try:
+                _meta_set(conn, "last_validation_at", f"{value:.6f}")
+                return True
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            return False
+
+
+def load_catalog_videos(
+    cache: Path,
+    root: Path | str | None = None,
+    *,
+    restore_search_cache: bool = False,
+) -> list[dict]:
     """Load all video rows from one cache catalog."""
     if not catalog_exists(cache):
         return []
@@ -424,11 +539,23 @@ def load_catalog_videos(cache: Path, root: Path | str | None = None) -> list[dic
                                 requested_root=want,
                                 action="return_rows_for_caller_filter",
                             )
-                rows = conn.execute("SELECT data FROM videos").fetchall()
+                rows = conn.execute(
+                    "SELECT data, search_text FROM videos"
+                ).fetchall()
                 out: list[dict] = []
+                restored_search_text = 0
                 for row in rows:
                     item = _decode_row(row)
                     if item and item.get("id"):
+                        # ``_q`` is runtime-only, but the indexed search_text
+                        # column is already the canonical value used by SQL.
+                        # Restoring it avoids rebuilding pinyin/normalization
+                        # for every row on each cold start.  Taxonomy/genre
+                        # version changes still invalidate it in their helpers.
+                        search_text = str(row["search_text"] or "")
+                        if restore_search_cache and search_text:
+                            item["_q"] = search_text
+                            restored_search_text += 1
                         out.append(item)
                 perf(
                     "catalog_load_all",
@@ -437,6 +564,8 @@ def load_catalog_videos(cache: Path, root: Path | str | None = None) -> list[dic
                     cache=cache,
                     rows=len(out),
                     requested_root=root,
+                    search_text_restored=restored_search_text,
+                    search_text_missing=max(0, len(out) - restored_search_text),
                 )
                 return out
             finally:
@@ -446,10 +575,14 @@ def load_catalog_videos(cache: Path, root: Path | str | None = None) -> list[dic
             return []
 
 
-def load_catalog_by_rel(cache: Path) -> dict[str, dict]:
+def load_catalog_by_rel(
+    cache: Path,
+    *,
+    restore_search_cache: bool = False,
+) -> dict[str, dict]:
     """rel → row for incremental scan reuse (skip ts_set)."""
     out: dict[str, dict] = {}
-    for item in load_catalog_videos(cache):
+    for item in load_catalog_videos(cache, restore_search_cache=restore_search_cache):
         if item.get("kind") == "ts_set":
             continue
         rel = _norm_rel(item.get("rel"))
@@ -676,64 +809,51 @@ def merge_catalog_facets(facets: list[dict]) -> dict:
     return out
 
 
-def query_catalog_facets(
+def _empty_facets() -> dict:
+    return {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
+
+
+def load_catalog_facet_rows(
     cache: Path,
     *,
     category: str = "",
-    folder: str = "",
-    include_descendants: bool = True,
-    ext: str = "",
     search: str = "",
-) -> dict:
-    """Read narrow indexed columns for first-page facets, never full JSON blobs."""
+) -> list[dict]:
+    """Load facet columns once per disk. Callers derive type/level/ext views in memory."""
     if not catalog_exists(cache):
-        return {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
+        from vg.diagnostics import emit_rate_limited
+
+        emit_rate_limited(
+            "WARN",
+            "facet_catalog_missing",
+            key=str(cache),
+            interval=60.0,
+            force=True,
+            cache=cache,
+            category=_norm_rel(category) or "all",
+        )
+        return []
     clauses: list[str] = []
     params: list[object] = []
     category_n = _norm_rel(category)
-    folder_n = _norm_rel(folder)
     if category_n == "__root__":
         clauses.append("category=''")
     elif category_n:
         clauses.append("category=?")
         params.append(category_n)
-    if folder_n:
-        if include_descendants:
-            clauses.append("(folder=? OR folder LIKE ?)")
-            params.extend((folder_n, folder_n + "/%"))
-        else:
-            clauses.append("folder=?")
-            params.append(folder_n)
-    if ext:
-        ext_n = ext if ext.startswith(".") else "." + ext
-        clauses.append("ext=?")
-        params.append(ext_n.lower())
     if search:
         clauses.append("search_text LIKE ?")
         params.append("%" + search.casefold() + "%")
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-
-    def count_tokens(rows, key: str) -> list[dict]:
-        counts: dict[str, int] = {}
-        for row in rows:
-            for value in str(row[key] or "").strip("|").split("|"):
-                if value:
-                    counts[value] = counts.get(value, 0) + 1
-        return [
-            {"id": value, "name": value, "count": count}
-            for value, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
-        ]
-
     started = time.perf_counter()
-    query_started = time.perf_counter()
     from vg.diagnostics import timed_lock
 
     with timed_lock(_lock_for(cache), "sqlite_query_facets", cache=cache):
         try:
             conn = _connect(cache)
             try:
-                rows = conn.execute(
-                    f"SELECT folder, ext, genres_text, themes_text, backgrounds_text "
+                fetched = conn.execute(
+                    "SELECT folder, ext, genres_text, themes_text, backgrounds_text "
                     f"FROM videos{where}",
                     params,
                 ).fetchall()
@@ -743,13 +863,88 @@ def query_catalog_facets(
             from vg.diagnostics import error
 
             error("sqlite_facets_failed", exc, cache=cache)
-            return {"genres": [], "themes": [], "backgrounds": [], "subfolders": [], "types": []}
-    query_ms = (time.perf_counter() - query_started) * 1000.0
-    build_started = time.perf_counter()
+            return []
+    try:
+        rows = [
+            {
+                "folder": _norm_rel(row["folder"]),
+                "ext": str(row["ext"] or "").strip().lower(),
+                "genres_text": row["genres_text"],
+                "themes_text": row["themes_text"],
+                "backgrounds_text": row["backgrounds_text"],
+            }
+            for row in fetched
+        ]
+    except Exception as exc:
+        from vg.diagnostics import error
+
+        error(
+            "facet_rows_decode_failed",
+            exc,
+            cache=cache,
+            fetched_rows=len(fetched),
+            category=category_n or "all",
+        )
+        raise
+    from vg.diagnostics import perf
+
+    perf(
+        "sqlite_query_facets",
+        (time.perf_counter() - started) * 1000.0,
+        cache=cache,
+        source_rows=len(rows),
+        category=category_n or "all",
+        search=bool(search),
+        query_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
+        build_ms="0.0",
+    )
+    return rows
+
+
+def facets_from_rows(
+    rows: list[dict],
+    *,
+    category: str = "",
+    folder: str = "",
+    include_descendants: bool = True,
+    ext: str = "",
+) -> dict:
+    """Build one facet payload from already-loaded rows (no extra SQLite)."""
+    category_n = _norm_rel(category)
+    folder_n = _norm_rel(folder)
+    ext_n = ""
+    if ext:
+        ext_n = ext if str(ext).startswith(".") else "." + str(ext)
+        ext_n = ext_n.lower()
+
+    scoped: list[dict] = []
+    for row in rows:
+        folder_value = row.get("folder") or ""
+        if folder_n:
+            if include_descendants:
+                if folder_value != folder_n and not folder_value.startswith(folder_n + "/"):
+                    continue
+            elif folder_value != folder_n:
+                continue
+        if ext_n and row.get("ext") != ext_n:
+            continue
+        scoped.append(row)
+
+    def count_tokens(key: str) -> list[dict]:
+        counts: dict[str, int] = {}
+        for row in scoped:
+            for value in str(row.get(key) or "").strip("|").split("|"):
+                if value:
+                    counts[value] = counts.get(value, 0) + 1
+        return [
+            {"id": value, "name": value, "count": count}
+            for value, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        ]
+
     prefix = folder_n or category_n
     sub_counts: dict[str, int] = {}
-    for row in rows:
-        value = _norm_rel(row["folder"])
+    for row in scoped:
+        value = row.get("folder") or ""
         if prefix:
             if value == prefix or not value.startswith(prefix + "/"):
                 continue
@@ -765,40 +960,49 @@ def query_catalog_facets(
         for path, count in sorted(sub_counts.items(), key=lambda pair: (-pair[1], pair[0]))
     ]
     type_counts: dict[str, int] = {}
-    for row in rows:
-        ext_value = str(row["ext"] or "").strip().lower()
+    for row in scoped:
+        ext_value = str(row.get("ext") or "").strip().lower()
         if ext_value:
             type_counts[ext_value] = type_counts.get(ext_value, 0) + 1
     types = [
-        {"id": ext_value, "ext": ext_value, "label": ext_value.lstrip("."), "name": ext_value.lstrip("."), "count": count}
+        {
+            "id": ext_value,
+            "ext": ext_value,
+            "label": ext_value.lstrip("."),
+            "name": ext_value.lstrip("."),
+            "count": count,
+        }
         for ext_value, count in sorted(type_counts.items(), key=lambda pair: (-pair[1], pair[0]))
     ]
-    payload = {
-        "genres": count_tokens(rows, "genres_text"),
-        "themes": count_tokens(rows, "themes_text"),
-        "backgrounds": count_tokens(rows, "backgrounds_text"),
+    return {
+        "genres": count_tokens("genres_text"),
+        "themes": count_tokens("themes_text"),
+        "backgrounds": count_tokens("backgrounds_text"),
         "subfolders": subfolders,
         "types": types,
     }
-    from vg.diagnostics import perf
 
-    perf(
-        "sqlite_query_facets",
-        (time.perf_counter() - started) * 1000.0,
-        cache=cache,
-        source_rows=len(rows),
-        genres=len(payload["genres"]),
-        themes=len(payload["themes"]),
-        backgrounds=len(payload["backgrounds"]),
-        subfolders=len(payload["subfolders"]),
-        types=len(payload["types"]),
-        category=category_n or "all",
-        folder=folder_n,
-        search=bool(search),
-        query_ms=f"{query_ms:.1f}",
-        build_ms=f"{(time.perf_counter() - build_started) * 1000.0:.1f}",
+
+def query_catalog_facets(
+    cache: Path,
+    *,
+    category: str = "",
+    folder: str = "",
+    include_descendants: bool = True,
+    ext: str = "",
+    search: str = "",
+) -> dict:
+    """Read narrow indexed columns for first-page facets, never full JSON blobs."""
+    if not catalog_exists(cache):
+        return _empty_facets()
+    rows = load_catalog_facet_rows(cache, category=category, search=search)
+    return facets_from_rows(
+        rows,
+        category=category,
+        folder=folder,
+        include_descendants=include_descendants,
+        ext=ext,
     )
-    return payload
 
 
 def checkpoint_catalog(cache: Path, *, truncate: bool = True) -> bool:

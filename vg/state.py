@@ -36,6 +36,8 @@ STATE: dict = {
     "scan_live": None,  # 扫描中途已发现条目（不覆盖其它盘 STATE）
 }
 _scan_lock = threading.Lock()
+_scan_lock_holder = ""
+_scan_lock_since = 0.0
 _convert_lock = threading.Lock()
 _meta_lock = threading.Lock()
 _meta_running = False
@@ -52,6 +54,51 @@ _video_query_cache: OrderedDict[tuple, tuple] = OrderedDict()
 _video_query_cache_lock = threading.RLock()
 VIDEO_QUERY_CACHE_MAX = 32
 VIDEO_QUERY_CACHE_MAX_ITEMS = 100_000
+
+
+def try_acquire_scan_lock(holder: str) -> bool:
+    """Non-blocking scan lock acquire with holder label for diagnostics."""
+    global _scan_lock_holder, _scan_lock_since
+    import time
+
+    if not _scan_lock.acquire(blocking=False):
+        return False
+    _scan_lock_holder = str(holder or "unknown")
+    _scan_lock_since = time.perf_counter()
+    try:
+        from vg.diagnostics import mark_lock_held
+
+        mark_lock_held("scan_lock", thread=threading.current_thread().name, holder=_scan_lock_holder)
+    except Exception:
+        pass
+    return True
+
+
+def release_scan_lock() -> None:
+    global _scan_lock_holder, _scan_lock_since
+    _scan_lock_holder = ""
+    _scan_lock_since = 0.0
+    try:
+        from vg.diagnostics import mark_lock_released
+
+        mark_lock_released("scan_lock")
+    except Exception:
+        pass
+    _scan_lock.release()
+
+
+def scan_lock_status() -> dict:
+    """Snapshot of who holds the scan lock (best-effort, unlocked read)."""
+    import time
+
+    holder = _scan_lock_holder
+    since = _scan_lock_since
+    held_ms = ((time.perf_counter() - since) * 1000.0) if holder and since else 0.0
+    return {
+        "held": bool(holder),
+        "holder": holder or "",
+        "held_ms": round(held_ms, 1),
+    }
 
 
 def _runtime_root_key(root) -> str:

@@ -80,6 +80,7 @@ class RouteContractTests(unittest.TestCase):
         payload = status.get_json()
         self.assertEqual(payload.get("app"), "video-gallery")
         self.assertIn("scanning", payload)
+        self.assertIn("full_logging", payload)
 
         share = self.client.get("/api/share")
         self.assertEqual(share.status_code, 200)
@@ -127,6 +128,50 @@ class RouteContractTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
+
+    def test_client_log_batch_keeps_errors_and_core_summary(self) -> None:
+        from unittest import mock
+
+        with mock.patch.object(web, "diagnostic_emit") as emit:
+            response = self.client.post(
+                "/api/client-log",
+                json={
+                    "events": [
+                        {
+                            "event": "refresh_render_completed",
+                            "level": "INFO",
+                            "fields": {"elapsed_ms": 80},
+                        },
+                        {
+                            "event": "player_error",
+                            "level": "ERROR",
+                            "fields": {"error_code": 4},
+                        },
+                    ],
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        actions = [
+            call for call in emit.call_args_list
+            if len(call.args) > 1 and call.args[1] == "client_action"
+        ]
+        self.assertEqual(len(actions), 2)
+
+    def test_nonessential_info_client_log_is_suppressed_without_full_logging(self) -> None:
+        from unittest import mock
+        from vg import diagnostics
+
+        diagnostics.set_full_logging(False)
+        with mock.patch.object(web, "diagnostic_emit") as emit:
+            response = self.client.post(
+                "/api/client-log",
+                json={"event": "filter_layout", "level": "INFO", "fields": {"height": 20}},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(any(
+            len(call.args) > 1 and call.args[1] == "client_action"
+            for call in emit.call_args_list
+        ))
 
     def test_scan_route_delegates_mounting_to_background_scan(self) -> None:
         old_scanning = STATE.get("scanning")

@@ -690,6 +690,18 @@ def publish_unified_library(
     only media metadata changed.
     """
     publish_started = time.perf_counter()
+    from vg.diagnostics import emit as _pub_emit
+
+    _pub_emit(
+        "INFO",
+        "publish_unified_library_begin",
+        force=True,
+        reason=reason,
+        heavy=heavy,
+        refresh_tree=refresh_tree,
+        thread=threading.current_thread().name,
+        roots=len(get_mounted_roots()),
+    )
     roots = get_mounted_roots()
     if not roots:
         return len(STATE.get("videos") or [])
@@ -902,8 +914,15 @@ def publish_unified_library(
         all_tree = STATE.get("tree") or {}
         merged_count = len(merged)
         warm_stats_list: list[dict] = []
+        # The cache signature includes the mounted roots, catalog mtimes and
+        # video count.  A valid existing payload therefore represents the
+        # exact tree for this publish and does not need to be rewritten.  The
+        # old unconditional write added ~80-115 ms to every warm restart and
+        # needlessly changed the cache file mtime.  Keep the write on cache
+        # misses/signature changes, while emitting the skip reason below so a
+        # future regression is visible in startup logs.
         if refresh_tree and all_tree and merged_count:
-            st = save_tree_disk_cache("", all_tree, merged_count, only_if_missing=False)
+            st = save_tree_disk_cache("", all_tree, merged_count, only_if_missing=True)
             warm_stats_list.append(st)
         # (b) per lib (take unique libs from merged videos to cover only the
         # disks that actually contributed videos this publish)
@@ -935,7 +954,7 @@ def publish_unified_library(
                 per_lib_tree = None
             if per_lib_tree:
                 st = save_tree_disk_cache(
-                    lib_s, per_lib_tree, len(scoped_vids), only_if_missing=False
+                    lib_s, per_lib_tree, len(scoped_vids), only_if_missing=True
                 )
                 warm_stats_list.append(st)
         overall_ms = (_cache_t.perf_counter() - _warm_started) * 1000.0

@@ -15,7 +15,7 @@ from vg.scan import (
     count_video_files_by_folder,
     load_or_scan,
 )
-from vg.state import STATE
+from vg.state import STATE, release_scan_lock, scan_lock_status, try_acquire_scan_lock
 from vg.thumbs import link_or_copy_thumb, reuse_existing_thumb
 
 
@@ -46,7 +46,7 @@ class CacheTrustTests(unittest.TestCase):
         self.cache.mkdir()
         self._old = {
             key: STATE.get(key)
-            for key in ("videos", "root", "cache_dir", "tree", "by_id", "scanning", "lib_gen")
+            for key in ("videos", "root", "cache_dir", "tree", "by_id", "scanning", "lib_gen", "updating")
         }
 
     def tearDown(self) -> None:
@@ -101,6 +101,49 @@ class CacheTrustTests(unittest.TestCase):
             _bg_count_then_maybe_scan(self.root, do_thumbs=True)
         scan.assert_not_called()
         fill.assert_called_once()
+        self.assertFalse(STATE.get("updating"))
+
+    def test_matching_folder_counts_keep_library_stable_during_count(self) -> None:
+        item = {
+            "id": "aaaaaaaaaaaaaaaa",
+            "name": "clip",
+            "filename": "clip.mp4",
+            "rel": "clip.mp4",
+            "folder": "",
+            "ext": ".mp4",
+            "size": 10,
+            "has_thumb": True,
+        }
+        save_index(self.cache, self.root, [item], file_count=1, folder_counts={"": 1})
+        STATE["videos"] = [item]
+        STATE["root"] = self.root
+        STATE["updating"] = False
+        seen_updating: list[bool] = []
+        lock_free_during_count: list[bool] = []
+
+        def counting(_root):
+            seen_updating.append(bool(STATE.get("updating")))
+            # Background validation must not hold the global scan lock while
+            # counting — otherwise Scan on another drive looks hung.
+            status = scan_lock_status()
+            lock_free_during_count.append(not status.get("held"))
+            acquired = try_acquire_scan_lock("test_other_disk_scan")
+            if acquired:
+                release_scan_lock()
+            lock_free_during_count.append(acquired)
+            return {"": 1}
+
+        with (
+            mock.patch("vg.scan.ensure_cache_dir", return_value=self.cache),
+            mock.patch("vg.scan.count_video_files_by_folder", side_effect=counting),
+            mock.patch("vg.scan.scan_videos") as scan,
+            mock.patch("vg.scan.fill_thumbs_for_videos"),
+        ):
+            _bg_count_then_maybe_scan(self.root, do_thumbs=True)
+        scan.assert_not_called()
+        self.assertEqual(seen_updating, [False])
+        self.assertEqual(lock_free_during_count, [True, True])
+        self.assertFalse(STATE.get("updating"))
 
     def test_changed_folder_runs_targeted_scan(self) -> None:
         item = {
@@ -135,6 +178,42 @@ class CacheTrustTests(unittest.TestCase):
         self.assertEqual(kwargs["only_folders"], {"movies"})
         self.assertFalse(kwargs["burst_thumbs"])
         fill.assert_not_called()
+
+    def test_changed_folder_marks_updating_only_during_scan(self) -> None:
+        item = {
+            "id": "bbbbbbbbbbbbbbbb",
+            "name": "clip",
+            "filename": "clip.mp4",
+            "rel": "movies/clip.mp4",
+            "folder": "movies",
+            "ext": ".mp4",
+            "size": 10,
+        }
+        save_index(
+            self.cache,
+            self.root,
+            [item],
+            file_count=2,
+            folder_counts={"": 1, "movies": 1},
+        )
+        STATE["root"] = self.root
+        during_scan: list[bool] = []
+
+        def scanning(*_args, **_kwargs):
+            during_scan.append(bool(STATE.get("updating")))
+
+        with (
+            mock.patch("vg.scan.ensure_cache_dir", return_value=self.cache),
+            mock.patch(
+                "vg.scan.count_video_files_by_folder",
+                return_value={"": 1, "movies": 3},
+            ),
+            mock.patch("vg.scan.scan_videos", side_effect=scanning),
+            mock.patch("vg.scan.fill_thumbs_for_videos"),
+        ):
+            _bg_count_then_maybe_scan(self.root, do_thumbs=True)
+        self.assertEqual(during_scan, [True])
+        self.assertFalse(STATE.get("updating"))
 
 
 class ThumbReuseTests(unittest.TestCase):

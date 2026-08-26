@@ -183,6 +183,18 @@ def _open_when_ready(url: str, port: int, timeout: float = 8.0) -> None:
 
 def main():
     bootlog.step("main_begin")
+    # Keep one compact, machine-readable timing record for every real startup.
+    # The individual PERF lines remain useful for drill-down, while this
+    # snapshot makes cross-run comparisons possible without reconstructing
+    # timings from second-resolution STEP timestamps.
+    startup_main_started = time.perf_counter()
+    startup_restore_ms = 0.0
+    startup_scan_ms = 0.0
+    startup_restore_videos = 0
+    startup_loaded_roots = 0
+    startup_cache_preloaded = False
+    startup_cache_missing_roots: list[str] = []
+    startup_port_mode = "unknown"
     if _is_frozen():
         try:
             from multiprocessing import freeze_support
@@ -239,6 +251,11 @@ def main():
     preferred = int(args.port) if args.port is not None else DEFAULT_PORT
     port_locked = args.port is not None
     chosen, mode = choose_listen_port(host, preferred, locked=port_locked)
+    startup_port_mode = mode
+    bootlog.step(
+        "port_selected",
+        f"preferred={preferred} chosen={chosen} mode={mode} locked={port_locked} pid={os.getpid()}",
+    )
     if mode == "occupied":
         alt = (
             f"VideoGallery.exe --port {preferred + 1}"
@@ -373,9 +390,22 @@ def main():
             loaded_roots = {}
             for m in valid:
                 loaded_roots[m] = bool(ensure_library(m))
+            startup_loaded_roots = sum(1 for loaded in loaded_roots.values() if loaded)
+            startup_cache_missing_roots = [
+                m for m, loaded in loaded_roots.items() if not loaded
+            ]
+            bootlog.write(
+                "[DIAG] startup_cache_restore "
+                f"roots={len(valid)} loaded={startup_loaded_roots} "
+                f"missing={len(startup_cache_missing_roots)} "
+                f"missing_roots={startup_cache_missing_roots!r} pid={os.getpid()}"
+            )
             # Publish all cached disks before the background scan starts. The
             # first page therefore already contains the full restored library.
+            restore_started = time.perf_counter()
             restored_count = publish_unified_library(reason="startup_restore")
+            startup_restore_ms = (time.perf_counter() - restore_started) * 1000.0
+            startup_restore_videos = restored_count
             bootlog.step(
                 "restore_unified_library",
                 f"roots={len(valid)} videos={restored_count}",
@@ -387,8 +417,10 @@ def main():
             bootlog.step(
                 "start_scan_cache_mode",
                 f"root={root_s} preloaded={root_cache_preloaded} "
-                f"loaded_roots={sum(1 for loaded in loaded_roots.values() if loaded)}",
+                f"loaded_roots={startup_loaded_roots}",
             )
+            startup_cache_preloaded = root_cache_preloaded
+            scan_started = time.perf_counter()
             ok, msg = start_scan(
                 root,
                 do_thumbs=not args.no_thumbs,
@@ -397,7 +429,9 @@ def main():
                 reuse_preloaded_cache=root_cache_preloaded,
             )
         else:
+            scan_started = time.perf_counter()
             ok, msg = start_scan(root, do_thumbs=not args.no_thumbs, force=args.rescan, replace_mounts=True)
+        startup_scan_ms = (time.perf_counter() - scan_started) * 1000.0
         bootlog.step("start_scan_done", f"ok={ok} msg={msg!r}")
         if not ok:
             print(f"提示: {msg}")
@@ -406,25 +440,74 @@ def main():
         fail("扫描视频时出错", f"{type(e).__name__}: {e}")
 
     url = f"http://127.0.0.1:{args.port}"
+    post_scan_started = time.perf_counter()
     print(f"\n本地视频库已启动 → {url}")
     print(f"监听: {args.host}:{args.port}（局域网开关可在网页即时切换，无需重启）")
     if STATE.get("lan_share"):
         print("局域网分享：已开启。同一 WiFi 下可用：")
         try:
+            from vg.diagnostics import perf as diag_perf
             from vg.drives import list_lan_ipv4
             from vg.lan import ensure_firewall_allow
-            for ip in list_lan_ipv4():
+
+            lan_started = time.perf_counter()
+            lan_ips = list_lan_ipv4()
+            for ip in lan_ips:
                 print(f"  http://{ip}:{args.port}")
+            diag_perf(
+                "startup_lan_list",
+                (time.perf_counter() - lan_started) * 1000.0,
+                force=True,
+                ips=len(lan_ips),
+            )
+            fw_started = time.perf_counter()
             ok, msg = ensure_firewall_allow(int(args.port))
+            diag_perf(
+                "startup_firewall_allow",
+                (time.perf_counter() - fw_started) * 1000.0,
+                force=True,
+                ok=ok,
+                port=int(args.port),
+            )
             if msg:
                 print(msg)
             if not ok:
                 print("若手机/电视打不开，请按上方提示手动放行防火墙。")
-        except Exception:
-            pass
+        except Exception as exc:
+            try:
+                from vg.diagnostics import error as diag_error
+
+                diag_error("startup_lan_firewall_failed", exc)
+            except Exception:
+                pass
     else:
         print("局域网分享：关闭（仅本机）。网页点「局域网」可立即开启。")
     print("浏览器打开上述地址即可浏览。按 Ctrl+C 停止。\n")
+    try:
+        from vg.diagnostics import perf as diag_perf
+
+        post_scan_to_ready_ms = (time.perf_counter() - post_scan_started) * 1000.0
+        diag_perf(
+            "startup_post_scan_to_ready",
+            post_scan_to_ready_ms,
+            force=True,
+            lan_share=bool(STATE.get("lan_share")),
+        )
+    except Exception:
+        post_scan_to_ready_ms = 0.0
+        pass
+    startup_total_ms = (time.perf_counter() - startup_main_started) * 1000.0
+    bootlog.write(
+        "[PERF] startup_summary "
+        f"main_to_ready_ms={startup_total_ms:.1f} "
+        f"restore_ms={startup_restore_ms:.1f} scan_ms={startup_scan_ms:.1f} "
+        f"post_scan_to_ready_ms={post_scan_to_ready_ms:.1f} "
+        f"restored_videos={startup_restore_videos} loaded_roots={startup_loaded_roots} "
+        f"cache_preloaded={startup_cache_preloaded} "
+        f"cache_missing={len(startup_cache_missing_roots)} "
+        f"port_mode={startup_port_mode} port={args.port} lan={bool(STATE.get('lan_share'))} "
+        f"pid={os.getpid()}"
+    )
     bootlog.step("ready", url)
 
     if not args.no_open:
@@ -495,6 +578,12 @@ def _run_server(host: str, port: int) -> None:
     if serve is not None:
         log(f"[服务] waitress 监听 http://{host}:{port}")
         bootlog.step("waitress_serve")
+        try:
+            from vg.diagnostics import ensure_stall_watchdog
+
+            ensure_stall_watchdog()
+        except Exception:
+            pass
         serve(app, host=host, port=port, threads=16)
         return
     # 回退：本机自用，隐藏 Flask 开发服务器横幅
@@ -507,6 +596,12 @@ def _run_server(host: str, port: int) -> None:
         pass
     log(f"[服务] Flask 回退监听 http://{host}:{port}")
     bootlog.step("flask_serve")
+    try:
+        from vg.diagnostics import ensure_stall_watchdog
+
+        ensure_stall_watchdog()
+    except Exception:
+        pass
     app.run(host=host, port=port, debug=False, threaded=True)
 
 

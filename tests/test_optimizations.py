@@ -199,9 +199,64 @@ class TreePayloadCacheTests(unittest.TestCase):
                 STATE["lib_gen"] += 1
                 self.assertEqual(client.get("/api/tree").status_code, 200)
                 self.assertEqual(builds, 2)
+                STATE["updating"] = True
+                self.assertEqual(client.get("/api/tree").status_code, 200)
+                self.assertEqual(builds, 2)
         finally:
             for key, value in old.items():
                 STATE[key] = value
+            web._tree_payload_cache.clear()
+
+
+class ResponseCacheWarmTests(unittest.TestCase):
+    def test_warmup_is_disabled_in_tests_by_default(self) -> None:
+        from vg import web
+
+        self.assertFalse(web._warm_enabled)
+        before = len(web._video_response_cache)
+        web.schedule_response_cache_warm()
+        self.assertEqual(len(web._video_response_cache), before)
+
+    def test_warm_response_caches_fills_default_list_query(self) -> None:
+        from vg import web
+
+        item = {
+            "id": "v1",
+            "name": "video",
+            "filename": "video.mp4",
+            "rel": "video.mp4",
+            "folder": "",
+            "ext": ".mp4",
+            "size": 100,
+            "mtime": 1,
+        }
+        old = {
+            key: STATE.get(key)
+            for key in ("videos", "root", "mounted_roots", "lan_share", "lib_gen", "facets", "scanning")
+        }
+        old_enabled = web._warm_enabled
+        old_gen = web._warm_generation
+        web._video_response_cache.clear()
+        STATE.update({
+            "videos": [item],
+            "root": None,
+            "mounted_roots": [],
+            "lan_share": False,
+            "lib_gen": 11,
+            "facets": {"categories": [{"id": "电影", "name": "电影", "count": 1}]},
+            "scanning": False,
+        })
+        try:
+            web._warm_enabled = True
+            web._warm_generation = None
+            web.warm_response_caches()
+            self.assertGreater(len(web._video_response_cache), 0)
+        finally:
+            web._warm_enabled = old_enabled
+            web._warm_generation = old_gen
+            for key, value in old.items():
+                STATE[key] = value
+            web._video_response_cache.clear()
             web._tree_payload_cache.clear()
 
 

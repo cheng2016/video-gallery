@@ -49,6 +49,11 @@ class VideoItem(TypedDict, total=False):
     thumb: str
     has_thumb: bool
     thumb_v: int
+    thumb_failed: bool
+    thumb_failed_reason: str
+    thumb_failed_at: float
+    thumb_failed_size: int
+    thumb_failed_mtime: float
     probe_ver: int
     probe_duration_done: bool
     probe_audio_done: bool
@@ -77,6 +82,7 @@ class VideoItem(TypedDict, total=False):
 # This is the single source of truth for fields that must never enter the catalog.
 RUNTIME_ONLY_FIELDS = frozenset({
     "_q",
+    "_q_sig",
     "_thumb_id",
     "_lib_label",
     "lib_label",
