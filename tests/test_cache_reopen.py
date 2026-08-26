@@ -36,6 +36,31 @@ class FolderCountTests(unittest.TestCase):
         live = {"": 1, "movies": 4}
         self.assertEqual(changed_folder_keys(stored, live), {"movies", "old"})
 
+    def test_parallel_count_matches_serial_on_users_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "clip.mp4").write_bytes(b"x")
+            (root / "Drivers").mkdir()
+            (root / "Drivers" / "show.mp4").write_bytes(b"x")
+            users = root / "Users"
+            users.mkdir()
+            (users / "readme.mp4").write_bytes(b"x")
+            for name in ("alice", "bob", "public"):
+                folder = users / name / "Videos"
+                folder.mkdir(parents=True)
+                (folder / f"{name}.mp4").write_bytes(b"x")
+            with mock.patch("vg.scan.os.cpu_count", return_value=1):
+                serial = count_video_files_by_folder(root, emit_diagnostics=False)
+            with mock.patch("vg.scan.os.cpu_count", return_value=8):
+                parallel = count_video_files_by_folder(root, emit_diagnostics=False)
+            self.assertEqual(serial, parallel)
+            self.assertEqual(serial.get(""), 1)
+            self.assertEqual(serial.get("Drivers"), 1)
+            self.assertEqual(serial.get("Users"), 1)
+            self.assertEqual(serial.get("Users/alice/Videos"), 1)
+            self.assertEqual(serial.get("Users/bob/Videos"), 1)
+            self.assertEqual(serial.get("Users/public/Videos"), 1)
+
 
 class CacheTrustTests(unittest.TestCase):
     def setUp(self) -> None:

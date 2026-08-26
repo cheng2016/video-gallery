@@ -75,3 +75,58 @@ class ScanWalkParallelTests(unittest.TestCase):
         with mock.patch("vg.scan.os.cpu_count", return_value=8):
             scan_videos(self.root, do_thumbs=False, incremental=False, quiet=True)
         self.assertEqual(self._names(), {"alpha", "beta", "gamma", "alice", "bob", "show"})
+
+    def test_expand_splits_beyond_depth_two(self) -> None:
+        users = self.root / "Users"
+        users.mkdir()
+        for user in ("alice", "bob"):
+            profile = users / user
+            profile.mkdir()
+            for name in (
+                "Documents",
+                "Downloads",
+                "Desktop",
+                "AppData",
+                "Videos",
+                "Music",
+                "Pictures",
+                "Favorites",
+            ):
+                (profile / name).mkdir()
+            for i in range(10):
+                (profile / "Documents" / f"proj{i}").mkdir()
+        shallow, leaves = expand_scan_walk_jobs(
+            self.root,
+            ["Users"],
+            target_jobs=8,
+        )
+        labels = {name for name, _path in leaves}
+        self.assertTrue(
+            any("/Documents/" in name for name in labels),
+            labels,
+        )
+        shallow_capped, leaves_capped = expand_scan_walk_jobs(
+            self.root,
+            ["Users"],
+            target_jobs=8,
+            max_depth=2,
+        )
+        capped_labels = {name for name, _path in leaves_capped}
+        self.assertFalse(
+            any("/Documents/" in name for name in capped_labels),
+            capped_labels,
+        )
+        self.assertTrue(shallow or shallow_capped)
+
+    def test_steal_walk_finds_videos_in_deep_fat_tree(self) -> None:
+        work = self.root / "work" / "layer1" / "layer2"
+        work.mkdir(parents=True)
+        expected = {"alpha", "beta", "gamma"}
+        for i in range(8):
+            folder = work / f"bucket{i}"
+            folder.mkdir()
+            (folder / f"clip{i}.mp4").write_bytes(b"x" * 200_000)
+            expected.add(f"clip{i}")
+        with mock.patch("vg.scan.os.cpu_count", return_value=8):
+            scan_videos(self.root, do_thumbs=False, incremental=False, quiet=True)
+        self.assertEqual(self._names(), expected)

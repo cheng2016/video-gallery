@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -96,6 +97,9 @@ def _same_root(a: str | Path | None, b: str | Path | None) -> bool:
 
 SCAN_WALK_JOB_CAP = 64
 SCAN_WALK_SPLIT_MIN_CHILDREN = 8
+# Fuse only — initial expand keeps splitting fat nodes until job_cap / balance,
+# instead of stopping at depth 2.
+SCAN_WALK_SPLIT_MAX_DEPTH = 32
 
 
 def _scan_walk_child_dirs(path: Path) -> list[str]:
@@ -121,35 +125,200 @@ def _scan_walk_child_dirs(path: Path) -> list[str]:
     return kids
 
 
+def _is_linkish_dir(path: Path) -> bool:
+    try:
+        return path.is_symlink() or (
+            hasattr(path, "is_junction") and path.is_junction()
+        )
+    except OSError:
+        return True
+
+
+def _scandir_files_and_dirs(
+    path: Path,
+    on_walk_error=None,
+) -> tuple[list[str], list[Path]]:
+    files: list[str] = []
+    dirs: list[Path] = []
+    try:
+        with os.scandir(path) as it:
+            for ent in it:
+                name = ent.name
+                try:
+                    if ent.is_dir(follow_symlinks=False):
+                        if should_skip_dir(name):
+                            continue
+                        child = Path(ent.path)
+                        if _is_linkish_dir(child):
+                            continue
+                        dirs.append(child)
+                    elif ent.is_file(follow_symlinks=False):
+                        files.append(name)
+                except OSError:
+                    continue
+    except OSError as err:
+        if on_walk_error is not None:
+            on_walk_error(err)
+        return files, dirs
+    dirs.sort(key=lambda p: p.name.casefold())
+    return files, dirs
+
+
+class _DirStealQueue:
+    """Shared directory queue with idle wait so workers can steal subtrees."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._items: deque[Path] = deque()
+        self._busy = 0
+        self._waiting = 0
+
+    def seed(self, paths: list[Path]) -> None:
+        with self._cond:
+            self._items.extend(paths)
+
+    def queued(self) -> int:
+        with self._cond:
+            return len(self._items)
+
+    def waiting(self) -> int:
+        with self._cond:
+            return self._waiting
+
+    def push_many(self, paths: list[Path]) -> int:
+        if not paths:
+            return 0
+        with self._cond:
+            self._items.extend(paths)
+            self._cond.notify(len(paths))
+        return len(paths)
+
+    def take(self) -> Path | None:
+        with self._cond:
+            while True:
+                if self._items:
+                    self._busy += 1
+                    return self._items.popleft()
+                if self._busy <= 0:
+                    return None
+                self._waiting += 1
+                try:
+                    self._cond.wait(timeout=0.25)
+                finally:
+                    self._waiting -= 1
+
+    def done_one(self) -> None:
+        with self._cond:
+            self._busy -= 1
+            if self._busy <= 0 and not self._items:
+                self._cond.notify_all()
+
+
+def _run_stolen_directory_walk(
+    seeds: list[Path],
+    *,
+    workers: int,
+    visit,
+    on_walk_error=None,
+    on_heartbeat=None,
+    on_steal=None,
+) -> int:
+    """Walk ``seeds`` with work stealing. ``visit(dirpath, filenames)`` per dir.
+
+    When a directory has 2+ children and the global queue is hungry, siblings
+    are pushed for idle workers. Returns how many subtrees were stolen.
+    """
+    workers = max(1, int(workers or 1))
+    steal_count = 0
+    steal_lock = threading.Lock()
+    q = _DirStealQueue()
+    q.seed([Path(p) for p in seeds if p])
+
+    def consume() -> None:
+        nonlocal steal_count
+        local_dirs = 0
+        while True:
+            start = q.take()
+            if start is None:
+                return
+            try:
+                stack = [Path(start)]
+                while stack:
+                    dirpath = stack.pop()
+                    filenames, child_dirs = _scandir_files_and_dirs(
+                        dirpath,
+                        on_walk_error,
+                    )
+                    visit(dirpath, filenames)
+                    local_dirs += 1
+                    if on_heartbeat is not None and local_dirs % 256 == 0:
+                        on_heartbeat(dirpath)
+                    if not child_dirs:
+                        continue
+                    queued = q.queued()
+                    idle = q.waiting()
+                    can_steal = (
+                        workers > 1
+                        and len(child_dirs) >= 2
+                        and queued < SCAN_WALK_JOB_CAP
+                        and (idle > 0 or queued < workers)
+                    )
+                    if can_steal:
+                        stolen, keep = child_dirs[:-1], child_dirs[-1]
+                        n = q.push_many(stolen)
+                        if n:
+                            with steal_lock:
+                                steal_count += n
+                            if on_steal is not None:
+                                on_steal(dirpath, n)
+                        stack.append(keep)
+                    else:
+                        stack.extend(reversed(child_dirs))
+                    if local_dirs % 128 == 0:
+                        time.sleep(0)
+            finally:
+                q.done_one()
+
+    if workers <= 1:
+        consume()
+        return steal_count
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(consume) for _ in range(workers)]
+        for fut in as_completed(futs):
+            fut.result()
+    return steal_count
+
+
 def expand_scan_walk_jobs(
     root: Path,
     top_kept: list[str],
     *,
     target_jobs: int,
-    max_depth: int = 2,
+    max_depth: int = SCAN_WALK_SPLIT_MAX_DEPTH,
     split_min_children: int = SCAN_WALK_SPLIT_MIN_CHILDREN,
     job_cap: int = SCAN_WALK_JOB_CAP,
 ) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]]]:
     """Split fat trees so a C:\\Users-shaped disk can fill the worker pool.
 
     Top-level fan-out is useless when one child owns almost every directory.
-    Expand the fattest remaining job one extra level (up to ``max_depth``)
-    until there is enough work, or until a still-huge folder (``Users``,
-    a user profile, ``my_home``) can be split even after the pool is full.
+    Keep expanding the fattest remaining job (by immediate child count) until
+    there are enough tasks, ``job_cap`` is hit, or nothing left is worth
+    splitting. Depth is only a fuse, not a strategy.
 
     Returns ``(shallow_parents, leaf_jobs)``. Shallow parents are walked
-    without descending; leaves are full ``os.walk`` subtrees.
+    without descending; leaves are stolen-walk subtrees.
     """
     leaves: list[dict] = [
         {"label": name, "path": root / name, "depth": 0} for name in top_kept
     ]
     shallow: list[tuple[str, Path]] = []
     target_jobs = max(2, int(target_jobs or 2))
+    depth_fuse = max(1, int(max_depth or SCAN_WALK_SPLIT_MAX_DEPTH))
     while leaves:
         best_i = -1
         best_kids: list[str] = []
         for i, job in enumerate(leaves):
-            if int(job["depth"]) >= max_depth:
+            if int(job["depth"]) >= depth_fuse:
                 continue
             kids = _scan_walk_child_dirs(job["path"])
             if len(kids) > len(best_kids):
@@ -460,25 +629,46 @@ def start_scan(
     return True, f"开始{mode} {root}"
 
 
-def count_video_files_by_folder(
+def _count_one_tree(
     root: Path,
-    emit_diagnostics: bool = True,
-) -> dict[str, int]:
-    """Cheap walk: count video/playlist filenames per directory (no size/fingerprint)."""
-    started = time.perf_counter()
-    counts: dict[str, int] = {}
+    start: Path,
+    *,
+    children: list[str] | None = None,
+    on_walk_error=None,
+) -> tuple[dict[str, int], int, int]:
+    """Count video filenames under ``start``. ``children=[]`` means this directory only."""
+    local_counts: dict[str, int] = {}
     directories = 0
     files_seen = 0
-
-    def on_walk_error(err: OSError) -> None:
-        if emit_diagnostics:
-            log(f"[计数] 跳过无权限目录: {err}")
-
-    last_heartbeat = started
-    for dirpath, dirnames, filenames in os.walk(root, onerror=on_walk_error):
+    try:
+        start_resolved = Path(start).resolve()
+    except OSError:
+        start_resolved = Path(start)
+    allowed = set(children) if children is not None else None
+    for dirpath, dirnames, filenames in os.walk(start, onerror=on_walk_error):
         directories += 1
         files_seen += len(filenames)
-        dirnames[:] = [d for d in dirnames if not should_skip_dir(d)]
+        kept: list[str] = []
+        for name in dirnames:
+            if should_skip_dir(name):
+                continue
+            child = Path(dirpath) / name
+            try:
+                if child.is_symlink() or (
+                    hasattr(child, "is_junction") and child.is_junction()
+                ):
+                    continue
+            except OSError:
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        if allowed is not None:
+            try:
+                at_start = Path(dirpath).resolve() == start_resolved
+            except OSError:
+                at_start = False
+            if at_start:
+                dirnames[:] = [d for d in dirnames if d in allowed]
         try:
             folder = folder_key(safe_rel(Path(dirpath), root))
         except (ValueError, OSError):
@@ -489,32 +679,156 @@ def count_video_files_by_folder(
             if ext in VIDEO_EXTS or ext in PLAYLIST_EXTS:
                 n += 1
         if n:
-            counts[folder] = n
-        # os.walk is I/O-heavy but its Python-side filename loop can still
-        # monopolize the GIL on a drive root. Yield periodically so waitress
-        # remains responsive while validation is in progress.
-        if directories % 128 == 0:
-            time.sleep(0)
-            if emit_diagnostics:
-                now = time.perf_counter()
-                if now - last_heartbeat >= 3.0:
-                    last_heartbeat = now
-                    try:
-                        from vg.diagnostics import emit as _count_hb
+            local_counts[folder] = local_counts.get(folder, 0) + n
+    return local_counts, directories, files_seen
 
-                        _count_hb(
-                            "INFO",
-                            "catalog_folder_count_heartbeat",
-                            force=True,
-                            root=root,
-                            directories=directories,
-                            files_seen=files_seen,
-                            video_folders=len(counts),
-                            video_files=sum(counts.values()),
-                            elapsed_ms=f"{(now - started) * 1000.0:.0f}",
-                        )
-                    except Exception:
-                        pass
+
+def count_video_files_by_folder(
+    root: Path,
+    emit_diagnostics: bool = True,
+) -> dict[str, int]:
+    """Cheap walk: count video/playlist filenames per directory (no size/fingerprint).
+
+    Drive-root validation uses the same top-level fan-out as a full scan so a
+    C:\\Users-shaped disk can fill a worker pool instead of one serial os.walk.
+    """
+    started = time.perf_counter()
+    root = Path(root)
+    counts: dict[str, int] = {}
+    directories = 0
+    files_seen = 0
+    walk_workers = 1
+    walk_mode = "serial"
+    job_n = 0
+
+    def on_walk_error(err: OSError) -> None:
+        if emit_diagnostics:
+            log(f"[计数] 跳过无权限目录: {err}")
+
+    def merge_tree(start: Path, *, children: list[str] | None = None) -> None:
+        nonlocal directories, files_seen
+        local, dirs_n, files_n = _count_one_tree(
+            root,
+            start,
+            children=children,
+            on_walk_error=on_walk_error,
+        )
+        directories += dirs_n
+        files_seen += files_n
+        for folder, n in local.items():
+            counts[folder] = counts.get(folder, 0) + n
+
+    top_kept: list[str] = []
+    try:
+        top_names = sorted(os.listdir(root))
+        top_kept = [
+            n for n in top_names if (root / n).is_dir() and not should_skip_dir(n)
+        ]
+    except OSError as err:
+        on_walk_error(err if isinstance(err, OSError) else OSError(err))
+
+    cpus = max(1, os.cpu_count() or 4)
+    max_workers = max(1, cpus - 2)
+    target_jobs = min(SCAN_WALK_JOB_CAP, max(max_workers, 8))
+    shallow_jobs, leaf_jobs = expand_scan_walk_jobs(
+        root,
+        top_kept,
+        target_jobs=target_jobs,
+    )
+    job_n = len(leaf_jobs)
+    if max_workers > 1 and top_kept:
+        walk_workers = max_workers
+    if walk_workers > 1:
+        walk_mode = "steal_expanded" if shallow_jobs else "steal"
+    steal_n = 0
+    if emit_diagnostics:
+        log(
+            f"[计数] 目录遍历 {walk_workers} 线程"
+            f"（顶层 {len(top_kept)} → 任务 {job_n}"
+            f"{'，拆分 ' + ','.join(n for n, _p in shallow_jobs[:4]) if shallow_jobs else ''}"
+            f"，逻辑核 {cpus}）"
+        )
+        try:
+            from vg.diagnostics import emit as _count_emit
+
+            _count_emit(
+                "INFO",
+                "catalog_folder_count_parallel",
+                force=True,
+                root=root,
+                workers=walk_workers,
+                top_dirs=len(top_kept),
+                jobs=job_n,
+                split_parents=",".join(name for name, _path in shallow_jobs[:12]),
+                cpus=cpus,
+                mode=walk_mode,
+            )
+        except Exception:
+            pass
+
+    heartbeat_lock = threading.Lock()
+    last_heartbeat = started
+    stats_lock = threading.Lock()
+
+    def count_visit(dirpath: Path, filenames: list[str]) -> None:
+        nonlocal directories, files_seen
+        with stats_lock:
+            directories += 1
+            files_seen += len(filenames)
+            try:
+                folder = folder_key(safe_rel(Path(dirpath), root))
+            except (ValueError, OSError):
+                return
+            n = 0
+            for name in filenames:
+                ext = Path(name).suffix.lower()
+                if ext in VIDEO_EXTS or ext in PLAYLIST_EXTS:
+                    n += 1
+            if n:
+                counts[folder] = counts.get(folder, 0) + n
+
+    def count_heartbeat(active: Path) -> None:
+        nonlocal last_heartbeat
+        if not emit_diagnostics:
+            return
+        now = time.perf_counter()
+        with heartbeat_lock:
+            if now - last_heartbeat < 3.0:
+                return
+            last_heartbeat = now
+        try:
+            from vg.diagnostics import emit as _count_hb
+
+            with stats_lock:
+                dirs_so_far = directories
+                files_so_far = sum(counts.values())
+            _count_hb(
+                "INFO",
+                "catalog_folder_count_heartbeat",
+                force=True,
+                root=root,
+                directories=dirs_so_far,
+                video_files=files_so_far,
+                workers=walk_workers,
+                active_subtree=str(active),
+                elapsed_ms=f"{(now - started) * 1000.0:.0f}",
+            )
+        except Exception:
+            pass
+
+    if walk_workers <= 1:
+        merge_tree(root)
+    else:
+        merge_tree(root, children=[])
+        for _label, parent in shallow_jobs:
+            merge_tree(parent, children=[])
+        steal_n = _run_stolen_directory_walk(
+            [path for _label, path in leaf_jobs],
+            workers=walk_workers,
+            visit=count_visit,
+            on_walk_error=on_walk_error,
+            on_heartbeat=count_heartbeat,
+        )
     try:
         if not emit_diagnostics:
             return counts
@@ -529,6 +843,10 @@ def count_video_files_by_folder(
             files_seen=files_seen,
             video_folders=len(counts),
             video_files=sum(counts.values()),
+            workers=walk_workers,
+            jobs=job_n,
+            steals=steal_n,
+            mode=walk_mode,
         )
     except Exception:
         pass
@@ -1748,17 +2066,24 @@ def scan_videos(
     else:
         walk_heartbeat_lock = threading.Lock()
         walk_last_heartbeat = time.perf_counter()
-        walk_subtree_done = 0
 
         def _walk_tree(start: Path, *, children: list[str] | None = None) -> None:
-            nonlocal walk_last_heartbeat, walk_subtree_done
+            nonlocal walk_last_heartbeat
             start_resolved = Path(start).resolve()
             local_dirs = 0
             for dirpath, dirnames, filenames in os.walk(start, onerror=on_walk_error):
                 count_scan("directories_scanned")
                 local_dirs += 1
                 _note_top_level(dirpath)
-                dirnames[:] = [d for d in dirnames if not should_skip_dir(d)]
+                kept: list[str] = []
+                for name in dirnames:
+                    if should_skip_dir(name):
+                        continue
+                    child = Path(dirpath) / name
+                    if _is_linkish_dir(child):
+                        continue
+                    kept.append(name)
+                dirnames[:] = kept
                 if children is not None:
                     try:
                         at_start = Path(dirpath).resolve() == start_resolved
@@ -1805,18 +2130,19 @@ def scan_videos(
 
         cpus = max(1, os.cpu_count() or 4)
         max_workers = max(1, cpus - 2)
-        target_jobs = min(SCAN_WALK_JOB_CAP, max(max_workers * 2, 8))
+        target_jobs = min(SCAN_WALK_JOB_CAP, max(max_workers, 8))
         shallow_jobs, leaf_jobs = expand_scan_walk_jobs(
             root,
             top_kept,
             target_jobs=target_jobs,
         )
         walk_workers = 1
-        if len(leaf_jobs) >= 2:
-            walk_workers = max(1, min(len(leaf_jobs), max_workers))
+        if max_workers > 1 and top_kept:
+            walk_workers = max_workers
         walk_mode = "serial"
         if walk_workers > 1:
-            walk_mode = "parallel_expanded" if shallow_jobs else "parallel"
+            walk_mode = "steal_expanded" if shallow_jobs else "steal"
+        steal_n = 0
         from vg.diagnostics import emit as _diag_emit
 
         _diag_emit(
@@ -1838,6 +2164,69 @@ def scan_videos(
             f"{'，拆分 ' + ','.join(n for n, _p in shallow_jobs[:4]) if shallow_jobs else ''}"
             f"，逻辑核 {cpus}）"
         )
+
+        def _scan_visit(dirpath: Path, filenames: list[str]) -> None:
+            count_scan("directories_scanned")
+            _note_top_level(dirpath)
+            for name in filenames:
+                ext = Path(name).suffix.lower()
+                if ext not in VIDEO_EXTS and ext not in PLAYLIST_EXTS:
+                    continue
+                count_scan("candidate_files")
+                full = Path(dirpath) / name
+                item = ingest_file(full, name, ext, count_folder=True)
+                if item:
+                    _note_top_level(dirpath, video=True)
+                    with walk_lock:
+                        found.append(item)
+                        note_found()
+
+        def _scan_heartbeat(active: Path) -> None:
+            nonlocal walk_last_heartbeat
+            now = time.perf_counter()
+            with walk_heartbeat_lock:
+                if now - walk_last_heartbeat < 3.0:
+                    return
+                walk_last_heartbeat = now
+                dirs_so_far = int(scan_counts.get("directories_scanned", 0) or 0)
+                found_n = len(found)
+                STATE["scan_progress"] = (
+                    f"遍历中… 已扫 {dirs_so_far} 目录，发现 {found_n} 个"
+                )
+            from vg.diagnostics import emit as _hb_emit
+
+            _hb_emit(
+                "INFO",
+                "scan_walk_heartbeat",
+                force=True,
+                root=root,
+                directories=dirs_so_far,
+                found=found_n,
+                workers=walk_workers,
+                active_subtree=str(active),
+                elapsed_ms=f"{(now - scan_started) * 1000.0:.0f}",
+            )
+
+        last_steal_log = [0.0]
+
+        def _scan_steal(parent: Path, n: int) -> None:
+            now = time.perf_counter()
+            if now - last_steal_log[0] < 3.0:
+                return
+            last_steal_log[0] = now
+            from vg.diagnostics import emit as _steal_emit
+
+            _steal_emit(
+                "INFO",
+                "scan_walk_steal",
+                force=True,
+                root=root,
+                parent=str(parent),
+                stolen=n,
+                queued_hint=n,
+                workers=walk_workers,
+            )
+
         if walk_workers <= 1:
             _walk_tree(root)
         else:
@@ -1856,30 +2245,14 @@ def scan_videos(
                 jobs=len(leaf_jobs),
                 thread=threading.current_thread().name,
             )
-            with ThreadPoolExecutor(max_workers=walk_workers) as pool:
-                futures = {
-                    pool.submit(_walk_tree, path): label for label, path in leaf_jobs
-                }
-                for future in as_completed(futures):
-                    name = futures[future]
-                    future.result()
-                    with walk_heartbeat_lock:
-                        walk_subtree_done += 1
-                        done_n = walk_subtree_done
-                    from vg.diagnostics import emit as _hb_emit
-
-                    _hb_emit(
-                        "INFO",
-                        "scan_walk_subtree_done",
-                        force=True,
-                        root=root,
-                        subtree=name,
-                        done=done_n,
-                        total=len(leaf_jobs),
-                        directories=int(scan_counts.get("directories_scanned", 0) or 0),
-                        found=len(found),
-                        elapsed_ms=f"{(time.perf_counter() - scan_started) * 1000.0:.0f}",
-                    )
+            steal_n = _run_stolen_directory_walk(
+                [path for _label, path in leaf_jobs],
+                workers=walk_workers,
+                visit=_scan_visit,
+                on_walk_error=on_walk_error,
+                on_heartbeat=_scan_heartbeat,
+                on_steal=_scan_steal,
+            )
             _pool_emit(
                 "INFO",
                 "scan_walk_pool_done",
@@ -1887,6 +2260,7 @@ def scan_videos(
                 root=root,
                 workers=walk_workers,
                 jobs=len(leaf_jobs),
+                steals=steal_n,
                 elapsed_ms=f"{(time.perf_counter() - pool_started) * 1000.0:.0f}",
                 directories=int(scan_counts.get("directories_scanned", 0) or 0),
                 found=len(found),
