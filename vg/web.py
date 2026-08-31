@@ -3743,6 +3743,17 @@ def api_thumb_set(vid: str):
         item["has_thumb"] = True
         item["thumb_v"] = thumb_version(cache, file_id) or int(datetime.now().timestamp())
         save_library_item(item)
+        diagnostic_emit(
+            "INFO",
+            "cover_set_ok",
+            force=True,
+            video_id=vid,
+            thumb_id=file_id,
+            thumb_v=item["thumb_v"],
+            mode="upload",
+            root=prefer_root or item.get("_lib_root") or item.get("root") or "",
+            operation_id=getattr(g, "_diag_operation_id", ""),
+        )
         return jsonify({"ok": True, "msg": "封面已更新", "thumb_v": item["thumb_v"], "thumb_id": file_id})
 
     data = request.get_json(silent=True) or {}
@@ -3789,6 +3800,18 @@ def api_thumb_set(vid: str):
     item["thumb_v"] = thumb_version(cache, file_id) or int(datetime.now().timestamp())
     item["thumb_seek"] = seek
     save_library_item(item)
+    diagnostic_emit(
+        "INFO",
+        "cover_set_ok",
+        force=True,
+        video_id=vid,
+        thumb_id=file_id,
+        thumb_v=item["thumb_v"],
+        mode="seek",
+        seek=f"{seek:.1f}",
+        root=prefer_root or item.get("_lib_root") or item.get("root") or "",
+        operation_id=getattr(g, "_diag_operation_id", ""),
+    )
     return jsonify({
         "ok": True,
         "msg": f"已截取 {seek:.1f}s 处画面为封面",

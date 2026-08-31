@@ -5219,7 +5219,6 @@
       }
       state.totalCount = data.count || 0;
       state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
-      state.hasMore = !!data.has_more;
       // A polling refresh intentionally requests the page at the current
       // offset so it can observe catalog changes without resetting the
       // user's scroll position.  That page is not the first page, so do not
@@ -5227,18 +5226,34 @@
       // batch length (doing so made 40 loaded cards suddenly become 20 and
       // caused the next request to duplicate an earlier page).
       const preserveLoadedBuffer = softRefresh && hadScrolled && fetchOffset > 0;
+      const pageHasMore = !!data.has_more;
       if (preserveLoadedBuffer) {
+        const loadedTotal =
+          (Number(state.loadedBaseOffset) || 0)
+          + (state.loadedVideos ? state.loadedVideos.length : 0);
+        // has_more on the page-at-current-offset only describes that page.
+        // With a preserved prefix of 40 cards, offset=40 returning the last
+        // 19 rows would falsely mark has_more=false and freeze load-more
+        // even though 40/59 are still incomplete.
+        const prevHasMore = !!state.hasMore;
+        state.hasMore = loadedTotal < state.totalCount;
+        state.offset = currentOffset;
         clientLog("refresh_loaded_buffer_preserved", filterStateFields({
           reason: "soft_refresh_scrolled",
           requested_offset: fetchOffset,
           returned_rows: Array.isArray(data.videos) ? data.videos.length : 0,
           loaded_before: state.loadedVideos ? state.loadedVideos.length : 0,
+          loaded_total: loadedTotal,
           offset_before: currentOffset,
           offset_after: currentOffset,
           total: data.count || 0,
+          page_has_more: pageHasMore,
+          has_more_before: prevHasMore,
+          has_more_after: !!state.hasMore,
         }), "INFO", refreshOperationId);
-        state.offset = currentOffset;
+        try { updateGridHint(); } catch (_) {}
       } else {
+        state.hasMore = pageHasMore;
         state.offset = (data.videos || []).length;
       }
       // 记忆的频道/子类若在当前盘无效，导致空列表时自动清空
@@ -5432,6 +5447,26 @@
     async function loadMore(trigger) {
       const callSeq = ++loadMoreCallCount;
       const triggerName = trigger || "unknown";
+      // Heal a stale hasMore=false left by soft refresh while preserving a
+      // partially loaded buffer (e.g. 40/59). Without this, the sentinel keeps
+      // firing but every attempt is skipped as no_more.
+      if (!state.hasMore && !loadingMore) {
+        const loadedTotal =
+          (Number(state.loadedBaseOffset) || 0)
+          + (state.loadedVideos ? state.loadedVideos.length : 0);
+        const total = Number(state.totalCount) || 0;
+        if (total > 0 && loadedTotal < total) {
+          state.hasMore = true;
+          try { updateGridHint(); } catch (_) {}
+          clientLog("load_more_has_more_repaired", {
+            seq: callSeq,
+            trigger: triggerName,
+            loaded_total: loadedTotal,
+            total,
+            offset: state.offset || 0,
+          }, "WARN");
+        }
+      }
       if (!state.hasMore || loadingMore) {
         clientLog("load_more_skipped", {
           elapsed_ms: 0,
@@ -7149,11 +7184,117 @@
         }
       });
     }
+
+    function applyCoverLocally(videoId, data, rootHint) {
+      // Cover updates must not call hard refresh(): that resets offset to 0 and
+      // jumps the scrolled list. Patch the visible card + in-memory row only.
+      const scroll = $("contentScroll");
+      const beforeTop = scroll ? Math.round(scroll.scrollTop) : 0;
+      const beforeHeight = scroll ? scroll.scrollHeight : 0;
+      const beforeOffset = state.offset || 0;
+      const beforeLoaded = state.loadedVideos ? state.loadedVideos.length : 0;
+      const thumbId = String((data && data.thumb_id) || videoId || "");
+      const thumbV = Number((data && data.thumb_v) || Date.now()) || Date.now();
+      const root = String(rootHint || (currentPlayMeta && currentPlayMeta.root) || "");
+      const url = thumbUrlFor(thumbId, thumbV, root);
+      let cardsHit = 0;
+      let imgsHit = 0;
+      let rowsHit = 0;
+      let continueHit = 0;
+
+      document.querySelectorAll("#grid .card").forEach((card) => {
+        const id = card.dataset.id || "";
+        const cover = card.dataset.cover || "";
+        if (id !== videoId && cover !== videoId && cover !== thumbId) return;
+        cardsHit += 1;
+        card.dataset.cover = thumbId;
+        card.dataset.hasThumb = "1";
+        const img = card.querySelector("img");
+        if (!img) return;
+        imgsHit += 1;
+        if (img.dataset.thumbUrl) thumbsLoaded.delete(img.dataset.thumbUrl);
+        requestThumbReload(img, url);
+      });
+
+      document.querySelectorAll("#continueBar .continue-chip").forEach((chip) => {
+        if ((chip.dataset.playId || "") !== videoId) return;
+        continueHit += 1;
+        const img = chip.querySelector("img");
+        if (!img) return;
+        if (img.dataset.thumbUrl) thumbsLoaded.delete(img.dataset.thumbUrl);
+        requestThumbReload(img, url);
+      });
+
+      if (Array.isArray(state.loadedVideos)) {
+        state.loadedVideos.forEach((row) => {
+          if (!row) return;
+          const id = String(row.id || "");
+          const coverId = String(row.thumb_id || row.cover_id || "");
+          if (id !== videoId && coverId !== videoId && coverId !== thumbId) return;
+          rowsHit += 1;
+          row.has_thumb = true;
+          row.thumb_v = thumbV;
+          if (thumbId) row.thumb_id = thumbId;
+        });
+      }
+
+      // Soft refresh used to stamp has_more from the page-at-offset response.
+      // If we are mid-list (loaded < total) but hasMore was wrongly cleared,
+      // heal it here so closing the player does not leave load-more dead.
+      const loadedTotal =
+        (Number(state.loadedBaseOffset) || 0)
+        + (state.loadedVideos ? state.loadedVideos.length : 0);
+      const total = Number(state.totalCount) || 0;
+      let hasMoreRepaired = false;
+      if (total > 0 && loadedTotal < total && !state.hasMore) {
+        state.hasMore = true;
+        hasMoreRepaired = true;
+        try { updateGridHint(); } catch (_) {}
+      }
+
+      const afterTop = scroll ? Math.round(scroll.scrollTop) : 0;
+      const afterHeight = scroll ? scroll.scrollHeight : 0;
+      clientLog("cover_local_applied", {
+        video_id: videoId,
+        thumb_id: thumbId,
+        thumb_v: thumbV,
+        root,
+        cards_hit: cardsHit,
+        imgs_hit: imgsHit,
+        loaded_rows_hit: rowsHit,
+        continue_hit: continueHit,
+        before_scroll_top: beforeTop,
+        after_scroll_top: afterTop,
+        scroll_delta_px: afterTop - beforeTop,
+        before_scroll_height: beforeHeight,
+        after_scroll_height: afterHeight,
+        before_offset: beforeOffset,
+        after_offset: state.offset || 0,
+        before_loaded: beforeLoaded,
+        after_loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+        loaded_total: loadedTotal,
+        total,
+        has_more: !!state.hasMore,
+        has_more_repaired: hasMoreRepaired,
+        modal_open: !!($("modal") && $("modal").classList.contains("open")),
+      }, cardsHit || rowsHit ? "INFO" : "WARN");
+      return { cardsHit, imgsHit, rowsHit, continueHit, beforeTop, afterTop, hasMoreRepaired };
+    }
+
     async function applyCoverSeek(seek) {
       if (!currentPlayId) return;
       $("modalInfo").textContent = "正在截取封面…";
+      const root = (currentPlayMeta && currentPlayMeta.root) || "";
+      const scroll = $("contentScroll");
+      clientLog("cover_seek_start", {
+        video_id: currentPlayId,
+        seek,
+        root,
+        scroll_top: scroll ? Math.round(scroll.scrollTop) : 0,
+        offset: state.offset || 0,
+        loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+      });
       try {
-        const root = (currentPlayMeta && currentPlayMeta.root) || "";
         const url = "/api/thumb/" + encodeURIComponent(currentPlayId) + (root ? ("?root=" + encodeURIComponent(root)) : "");
         const r = await fetch(url, {
           method: "POST",
@@ -7163,10 +7304,30 @@
         const data = await r.json();
         $("modalInfo").textContent = data.msg || (data.ok ? "封面已更新" : "失败");
         if (data.ok) {
-          try { await refresh(); } catch (_) {}
+          const local = applyCoverLocally(currentPlayId, data, root);
+          clientLog("cover_seek_done", {
+            video_id: currentPlayId,
+            seek,
+            thumb_v: data.thumb_v || 0,
+            thumb_id: data.thumb_id || "",
+            cards_hit: local.cardsHit,
+            scroll_top: local.afterTop,
+            refresh_skipped: true,
+          });
+        } else {
+          clientLog("cover_seek_failed", {
+            video_id: currentPlayId,
+            seek,
+            msg: data.msg || "",
+          }, "WARN");
         }
       } catch (e) {
         $("modalInfo").textContent = "换封面失败: " + e;
+        clientLog("cover_seek_failed", {
+          video_id: currentPlayId,
+          seek,
+          error: String(e && (e.stack || e) || "unknown"),
+        }, "ERROR");
       }
     }
     if ($("btnCoverSeek")) {
@@ -7192,13 +7353,42 @@
         const root = (currentPlayMeta && currentPlayMeta.root) || "";
         const url = "/api/thumb/" + encodeURIComponent(currentPlayId) + (root ? ("?root=" + encodeURIComponent(root)) : "");
         $("modalInfo").textContent = "正在上传封面…";
+        const scroll = $("contentScroll");
+        clientLog("cover_upload_start", {
+          video_id: currentPlayId,
+          root,
+          file_name: f.name || "",
+          file_size: f.size || 0,
+          scroll_top: scroll ? Math.round(scroll.scrollTop) : 0,
+          offset: state.offset || 0,
+          loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+        });
         try {
           const r = await fetch(url, { method: "POST", body: fd });
           const data = await r.json();
           $("modalInfo").textContent = data.msg || (data.ok ? "封面已更新" : "失败");
-          if (data.ok) try { await refresh(); } catch (_) {}
+          if (data.ok) {
+            const local = applyCoverLocally(currentPlayId, data, root);
+            clientLog("cover_upload_done", {
+              video_id: currentPlayId,
+              thumb_v: data.thumb_v || 0,
+              thumb_id: data.thumb_id || "",
+              cards_hit: local.cardsHit,
+              scroll_top: local.afterTop,
+              refresh_skipped: true,
+            });
+          } else {
+            clientLog("cover_upload_failed", {
+              video_id: currentPlayId,
+              msg: data.msg || "",
+            }, "WARN");
+          }
         } catch (e) {
           $("modalInfo").textContent = "上传失败: " + e;
+          clientLog("cover_upload_failed", {
+            video_id: currentPlayId,
+            error: String(e && (e.stack || e) || "unknown"),
+          }, "ERROR");
         }
         $("coverFile").value = "";
       });
