@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from flask import jsonify, request
 
+from vg.diagnostics import emit
 from vg.drives import load_prefs, save_prefs
 from vg.lan import ensure_firewall_allow
 from vg.lan_service import lan_urls
@@ -18,6 +19,7 @@ def register(app) -> None:
         if request.method == "POST":
             data = request.get_json(silent=True) or {}
             enabled = bool(data.get("lan"))
+            before = bool(STATE.get("lan_share"))
             STATE["lan_share"] = enabled
             save_prefs(lan_share=enabled)
             firewall_ok, firewall_msg = True, ""
@@ -25,6 +27,18 @@ def register(app) -> None:
                 firewall_ok, firewall_msg = ensure_firewall_allow(port)
             urls = lan_urls()
             lan_only = [url for url in urls if "127.0.0.1" not in url]
+            emit(
+                "INFO",
+                "lan_share_api",
+                force=True,
+                method="POST",
+                lan_before=before,
+                lan_after=enabled,
+                url_count=len(urls),
+                lan_url_count=len(lan_only),
+                firewall_ok=firewall_ok,
+                port=port,
+            )
             if enabled:
                 msg = "已开启局域网分享（立即生效）"
                 if lan_only:
@@ -48,12 +62,26 @@ def register(app) -> None:
             })
 
         prefs = load_prefs()
+        lan = bool(STATE.get("lan_share"))
+        pref_lan = bool(prefs.get("lan_share"))
+        urls = lan_urls()
+        emit(
+            "INFO",
+            "lan_share_api",
+            force=True,
+            method="GET",
+            lan=lan,
+            pref_lan=pref_lan,
+            url_count=len(urls),
+            lan_url_count=len([u for u in urls if "127.0.0.1" not in u]),
+            port=port,
+        )
         return jsonify({
             "ok": True,
-            "lan": bool(STATE.get("lan_share")),
-            "pref_lan": bool(prefs.get("lan_share")),
+            "lan": lan,
+            "pref_lan": pref_lan,
             "need_restart": False,
-            "urls": lan_urls(),
+            "urls": urls,
             "host": STATE.get("bind_host") or "0.0.0.0",
             "port": port,
         })

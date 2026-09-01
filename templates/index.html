@@ -1744,6 +1744,10 @@
     const CLIENT_LOG_CORE_EVENTS = new Set([
       "refresh_render_completed",
       "load_more_done",
+      // LAN share button regressions: always ship these even without full logging.
+      "lan_share_ui_sync",
+      "lan_share_boot",
+      "lan_share_click",
     ]);
     const CLIENT_LOG_LOOP_EVENTS = new Set([
       "filter_layout",
@@ -2351,13 +2355,16 @@
       setSidebarHidden(!document.body.classList.contains("sidebar-hidden"));
     }
 
-    async function fetchTree() {
+    async function fetchTree(opts) {
       const started = clientNow();
       const operationId = newOperationId("tree");
       const params = new URLSearchParams();
       if (state.lib) params.set("lib", state.lib);
       params.set("gen", String(state._libGen || 0));
-      const browserCacheMode = (state._lastScanning || state._updating) ? "no-store" : "default";
+      const forceNoStore = !!(opts && opts.cache === "no-store");
+      const browserCacheMode = forceNoStore
+        ? "no-store"
+        : ((state._lastScanning || state._updating) ? "no-store" : "default");
       clientLog("tree_load_requested", {
         lib: state.lib || "all",
         cache_mode: browserCacheMode,
@@ -2633,6 +2640,17 @@
           if (typeof d.full_logging === "boolean") {
             state._fullLogging = d.full_logging;
           }
+          if (typeof d.lan_share === "boolean") {
+            syncLanShareUi(d.lan_share, null, "poll");
+          } else {
+            clientLog("lan_share_ui_sync", {
+              source: "poll",
+              skipped: true,
+              reason: "lan_share_missing_in_status",
+              lan_share_typeof: typeof d.lan_share,
+              status_keys: Object.keys(d || {}).slice(0, 20),
+            }, "WARN");
+          }
           // A directory is already browsable while thumbnails/metadata run,
           // but polling must stay alive so a newly published disk generation
           // is painted instead of leaving the sidebar on the previous disk.
@@ -2715,6 +2733,10 @@
           lastScanProgress = d.scan_progress || lastScanProgress;
           driveTick += 1;
           if (driveTick % 6 === 0) await loadDrives();
+          if (typeof d.lan_share === "boolean") {
+            // Re-apply after soft refresh: cached /api/tree may briefly disagree.
+            syncLanShareUi(d.lan_share, null, "poll_end");
+          }
         } catch (e) {
           console.warn(e);
         } finally {
@@ -5099,6 +5121,20 @@
         rememberNav(treeData);
         const navRenderStarted = clientNow();
         await applyNavChrome(treeData);
+        // Page load / soft refresh go through refresh(), not refreshTree().
+        // Without this, a hard reload leaves lanBtn unstyled even when share is on.
+        if (typeof treeData.lan_share === "boolean") {
+          syncLanShareUi(treeData.lan_share, treeData.lan_urls, "refresh_tree");
+        } else {
+          clientLog("lan_share_ui_sync", {
+            source: "refresh_tree",
+            skipped: true,
+            reason: "lan_share_missing_in_tree",
+            lan_share_typeof: typeof treeData.lan_share,
+            has_lan_urls: Array.isArray(treeData.lan_urls),
+            tree_keys: Object.keys(treeData || {}).slice(0, 24),
+          }, "WARN");
+        }
         refreshStage("nav_render_done", {
           stage_elapsed_ms: Number(clientElapsedMs(navRenderStarted).toFixed(1)),
           tree_count: treeData && treeData.count || 0,
@@ -5116,6 +5152,16 @@
         syncNavFromCache();
         treeData = state.navCache || treeData || {};
         lastScanning = !!treeData.scanning;
+        if (typeof treeData.lan_share === "boolean") {
+          syncLanShareUi(treeData.lan_share, treeData.lan_urls, "refresh_nav_cache");
+        } else {
+          clientLog("lan_share_ui_sync", {
+            source: "refresh_nav_cache",
+            skipped: true,
+            reason: "lan_share_missing_in_nav_cache",
+            lan_share_typeof: typeof treeData.lan_share,
+          }, "WARN");
+        }
         refreshStage("nav_cache_reused", {
           tree_count: treeData && treeData.count || 0,
           tree_categories: treeData && Array.isArray(treeData.categories) ? treeData.categories.length : 0,
@@ -5582,8 +5628,54 @@
       }
     }
 
-    async function refreshTree() {
-      const data = await fetchTree();
+    function syncLanShareUi(enabled, urls, source) {
+      // Button highlight must follow /api/share immediately. refreshTree can
+      // briefly reuse a cached /api/tree body (max-age=6) that still has
+      // lan_share=false, which used to leave the top-bar button looking off.
+      const src = String(source || "unknown");
+      const on = !!enabled;
+      const btn = $("lanBtn");
+      const beforeState = !!state.lanShare;
+      const beforeDom = !!(btn && btn.classList.contains("primary"));
+      state.lanShare = on;
+      if (btn) {
+        btn.classList.toggle("primary", on);
+        btn.title = on
+          ? "局域网分享已开启：同一 WiFi 设备可访问；再点可复制地址或关闭"
+          : "允许同一 WiFi 下其它设备访问";
+      }
+      const afterDom = !!(btn && btn.classList.contains("primary"));
+      const lanUrls = (Array.isArray(urls) ? urls : [])
+        .map((u) => String(u || ""))
+        .filter((u) => u && !u.includes("127.0.0.1"));
+      const changed = beforeState !== on || beforeDom !== afterDom;
+      const mismatchBefore = beforeState !== beforeDom;
+      const mismatchAfter = on !== afterDom;
+      // Always log explicit user/boot/refresh sources. Poll only logs when the
+      // button actually flips or state/DOM disagree — otherwise logs drown.
+      const quietSource = src === "poll" || src === "poll_end";
+      if (!quietSource || changed || mismatchBefore || mismatchAfter || !btn) {
+        clientLog("lan_share_ui_sync", {
+          source: src,
+          requested: on,
+          state_before: beforeState,
+          state_after: on,
+          dom_before: beforeDom,
+          dom_after: afterDom,
+          btn_found: !!btn,
+          changed,
+          mismatch_before: mismatchBefore,
+          mismatch_after: mismatchAfter,
+          url_count: Array.isArray(urls) ? urls.length : 0,
+          lan_url_count: lanUrls.length,
+          lan_urls: lanUrls.slice(0, 3),
+        }, (mismatchAfter || !btn) ? "WARN" : (changed ? "INFO" : "INFO"));
+      }
+      return on;
+    }
+
+    async function refreshTree(opts) {
+      const data = await fetchTree(opts);
       rememberNav(data);
       await applyNavChrome(data);
       let status = "";
@@ -5607,18 +5699,22 @@
       if (data.exporting && data.export_msg) bits.push(data.export_msg);
       else if (data.export_ok === true && data.export_path) bits.push("静态站已导出");
       if (!data.has_ffmpeg) bits.push("无 ffmpeg");
-      let lanShort = "";
-      if (data.lan_share && data.lan_urls && data.lan_urls.length) {
-        const share = data.lan_urls.filter((u) => !u.includes("127.0.0.1")).slice(0, 2);
-        bits.push("局域网 " + share.join(" · "));
-        if ($("lanBtn")) $("lanBtn").classList.add("primary");
-      } else if ($("lanBtn")) {
-        $("lanBtn").classList.remove("primary");
+      const lanOn = syncLanShareUi(data.lan_share, data.lan_urls, "refresh_tree_api");
+      if (typeof data.lan_share !== "boolean") {
+        clientLog("lan_share_ui_sync", {
+          source: "refresh_tree_api",
+          skipped: true,
+          reason: "lan_share_missing_in_tree_api",
+          lan_share_typeof: typeof data.lan_share,
+        }, "WARN");
+      }
+      if (lanOn) {
+        const share = (data.lan_urls || []).filter((u) => !u.includes("127.0.0.1")).slice(0, 2);
+        bits.push(share.length ? ("局域网 " + share.join(" · ")) : "局域网已开");
       }
       const detail = bits.join(" · ");
       if (detail) status += (status ? " · " : "") + detail;
       state.hasFfmpeg = !!data.has_ffmpeg;
-      state.lanShare = !!data.lan_share;
       const statusEl = $("status");
       statusEl.textContent = status;
       statusEl.title = status;
@@ -6870,9 +6966,23 @@
     // —— 局域网分享 ——
     $("lanBtn").addEventListener("click", async () => {
       try {
-        const cur = await fetch("/api/share").then((r) => r.json());
+        clientLog("lan_share_click", {
+          stage: "click",
+          state_lan: !!state.lanShare,
+          dom_primary: !!($("lanBtn") && $("lanBtn").classList.contains("primary")),
+        });
+        const cur = await fetch("/api/share", { cache: "no-store" }).then((r) => r.json());
         const urls = (cur.urls || []).join("\n");
         const lanUrls = (cur.urls || []).filter((u) => !u.includes("127.0.0.1"));
+        clientLog("lan_share_click", {
+          stage: "share_get",
+          api_lan: !!cur.lan,
+          pref_lan: !!cur.pref_lan,
+          url_count: Array.isArray(cur.urls) ? cur.urls.length : 0,
+          lan_url_count: lanUrls.length,
+        });
+        // Keep the top-bar button in sync with the live share flag first.
+        syncLanShareUi(!!cur.lan, cur.urls, "click_get");
         if (cur.lan) {
           const action = confirm(
             "局域网分享已开启（即时生效）。\n\n地址：\n" + urls +
@@ -6894,8 +7004,27 @@
             body: JSON.stringify({ lan: false }),
           });
           const data = await r.json();
+          clientLog("lan_share_click", {
+            stage: "disable_done",
+            api_lan: !!data.lan,
+            ok: !!data.ok,
+          });
+          syncLanShareUi(!!data.lan, data.urls, "click_disable");
           alert(data.msg || "已关闭");
-          try { await refreshTree(); } catch (_) {}
+          // no-store: avoid cached tree body with stale lan_share wiping the button.
+          try {
+            await refreshTree({ cache: "no-store" });
+            clientLog("lan_share_click", {
+              stage: "after_refresh_tree_disable",
+              state_lan: !!state.lanShare,
+              dom_primary: !!($("lanBtn") && $("lanBtn").classList.contains("primary")),
+            });
+          } catch (e) {
+            clientLog("lan_share_click", {
+              stage: "refresh_tree_disable_failed",
+              error: String(e && (e.message || e) || "unknown").slice(0, 240),
+            }, "WARN");
+          }
           return;
         }
         if (!confirm("开启后，同一 WiFi 下的手机/电视可立刻用浏览器打开（无需重启）。\nWindows 会尝试自动放行防火墙；macOS 可能要求在系统设置中允许 Python 传入连接。继续？")) return;
@@ -6905,9 +7034,33 @@
           body: JSON.stringify({ lan: true }),
         });
         const data = await r.json();
+        clientLog("lan_share_click", {
+          stage: "enable_done",
+          api_lan: !!data.lan,
+          ok: !!data.ok,
+          url_count: Array.isArray(data.urls) ? data.urls.length : 0,
+        });
+        // Paint primary immediately from POST — do not wait on cached /api/tree.
+        syncLanShareUi(!!data.lan, data.urls, "click_enable");
         alert(data.msg || "已开启");
-        try { await refreshTree(); } catch (_) {}
+        try {
+          await refreshTree({ cache: "no-store" });
+          clientLog("lan_share_click", {
+            stage: "after_refresh_tree_enable",
+            state_lan: !!state.lanShare,
+            dom_primary: !!($("lanBtn") && $("lanBtn").classList.contains("primary")),
+          });
+        } catch (e) {
+          clientLog("lan_share_click", {
+            stage: "refresh_tree_enable_failed",
+            error: String(e && (e.message || e) || "unknown").slice(0, 240),
+          }, "WARN");
+        }
       } catch (err) {
+        clientLog("lan_share_click", {
+          stage: "failed",
+          error: String(err && (err.message || err) || "unknown").slice(0, 240),
+        }, "ERROR");
         alert("设置失败: " + err);
       }
     });
@@ -7542,6 +7695,30 @@
         : "未检测到磁盘或媒体目录，请检查硬盘是否已连接，或重启应用";
 
       await refresh();
+      // /api/tree may be browser-cached without the latest lan_share; /api/share is source of truth.
+      try {
+        clientLog("lan_share_boot", {
+          stage: "share_fetch_start",
+          state_lan: !!state.lanShare,
+          dom_primary: !!($("lanBtn") && $("lanBtn").classList.contains("primary")),
+        });
+        const share = await fetch("/api/share", { cache: "no-store" }).then((r) => r.json());
+        clientLog("lan_share_boot", {
+          stage: "share_fetch_done",
+          api_lan: !!share.lan,
+          pref_lan: !!share.pref_lan,
+          url_count: Array.isArray(share.urls) ? share.urls.length : 0,
+          lan_url_count: (share.urls || []).filter((u) => !String(u).includes("127.0.0.1")).length,
+          state_lan_before: !!state.lanShare,
+          dom_primary_before: !!($("lanBtn") && $("lanBtn").classList.contains("primary")),
+        });
+        syncLanShareUi(!!share.lan, share.urls, "boot_share");
+      } catch (err) {
+        clientLog("lan_share_boot", {
+          stage: "share_fetch_failed",
+          error: String(err && (err.message || err) || "unknown").slice(0, 240),
+        }, "ERROR");
+      }
       startPoll();
       const d = state.navCache || {};
       if (!d.scanning && n) {
