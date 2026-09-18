@@ -71,14 +71,134 @@ def probe_duration(ffmpeg: str, path: Path) -> float | None:
     return float(dur) if dur else None
 
 
+def parse_frame_rate(raw) -> float | None:
+    """Parse ffprobe r_frame_rate / avg_frame_rate strings like '60/1'."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text in ("0/0", "N/A", "nan"):
+        return None
+    try:
+        if "/" in text:
+            num_s, den_s = text.split("/", 1)
+            num, den = float(num_s), float(den_s)
+            if den == 0:
+                return None
+            value = num / den
+        else:
+            value = float(text)
+        if value <= 0 or value > 240:
+            return None
+        return value
+    except (TypeError, ValueError):
+        return None
+
+
+def is_2k_or_4k(width, height) -> bool:
+    """True for 1440p / 2K / 4K class resolutions (by width or height)."""
+    try:
+        w = int(width or 0)
+        h = int(height or 0)
+    except (TypeError, ValueError):
+        return False
+    return w >= 2560 or h >= 1440
+
+
+HIGH_FPS_CLASSES = (60, 90, 120)
+FPS_TARGET_PRESETS = (24, 25, 30, 48, 50, 60)
+_HIGH_FPS_TOLERANCE = 3.0
+
+
+def classify_high_fps(fps) -> int | None:
+    """Map 59.94/60, 90, 119.88/120 to a transcode class; else None."""
+    try:
+        value = float(fps)
+    except (TypeError, ValueError):
+        return None
+    for cls in HIGH_FPS_CLASSES:
+        if abs(value - cls) <= _HIGH_FPS_TOLERANCE:
+            return cls
+    return None
+
+
+def fps_can_halve_to_30(fps) -> bool:
+    """True when source is 60/90/120-class high fps (button eligible)."""
+    return classify_high_fps(fps) is not None
+
+
+def fps_target_choices(fps) -> list[int]:
+    """Lower-rate presets strictly below the source."""
+    try:
+        src = float(fps)
+    except (TypeError, ValueError):
+        return []
+    return [t for t in FPS_TARGET_PRESETS if t < src - 0.5]
+
+
+def normalize_target_fps(src_fps, target_fps, default: int = 30) -> int | None:
+    """Return a valid integer target strictly below source, or None."""
+    choices = fps_target_choices(src_fps)
+    try:
+        src = float(src_fps)
+    except (TypeError, ValueError):
+        return None
+    if target_fps is None or target_fps == "":
+        if default in choices:
+            return default
+        return choices[0] if choices else None
+    try:
+        target = int(round(float(target_fps)))
+    except (TypeError, ValueError):
+        return None
+    if target in choices:
+        return target
+    if 1 <= target < src - 0.5:
+        return target
+    return None
+
+
+def fps_gate_reason(
+    *,
+    width=None,
+    height=None,
+    fps=None,
+    has_ffmpeg: bool = True,
+    stream_like: bool = False,
+) -> str:
+    """Explain why fps30 is/isn't offered. Used by API payload + logs.
+
+    Media-specific reasons (resolution/fps) are checked before ``no_ffmpeg`` so
+    a 4K@30 file reports ``fps_too_low`` even when ffmpeg is missing — that is
+    the user-facing reason the button stays gray.
+    """
+    if stream_like:
+        return "stream_like"
+    if not (width or height):
+        return "no_video_meta"
+    if not is_2k_or_4k(width, height):
+        return "not_2k_or_4k"
+    if fps is None:
+        return "no_fps"
+    if not fps_can_halve_to_30(fps):
+        return "fps_too_low"
+    if not has_ffmpeg:
+        return "no_ffmpeg"
+    return "ok"
+
+
 def probe_media_info(
     ffmpeg: str,
     path: Path,
     *,
     include_duration: bool = True,
     include_audio: bool = True,
+    include_video_meta: bool = False,
 ) -> dict:
-    """ffprobe detection, limited to the metadata dimensions requested."""
+    """ffprobe detection, limited to the metadata dimensions requested.
+
+    ``include_video_meta`` (width/height/fps) is for on-demand playback use only;
+    bulk scan/probe paths must leave it False.
+    """
     from vg.diagnostics import emit, error
 
     started = time.perf_counter()
@@ -92,6 +212,7 @@ def probe_media_info(
             reason=reason,
             include_duration=include_duration,
             include_audio=include_audio,
+            include_video_meta=include_video_meta,
             elapsed_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
             **fields,
         )
@@ -103,9 +224,12 @@ def probe_media_info(
     if not ffprobe:
         return failed("未找到 ffprobe")
     try:
-        entries = ["stream=index,codec_type"]
-        if include_audio:
-            entries[0] += ",codec_name"
+        stream_fields = ["index", "codec_type"]
+        if include_audio or include_video_meta:
+            stream_fields.append("codec_name")
+        if include_video_meta:
+            stream_fields.extend(["width", "height", "r_frame_rate", "avg_frame_rate"])
+        entries = [f"stream={','.join(stream_fields)}"]
         if include_duration:
             entries.append("format=duration")
         cmd = [ffprobe, "-v", "error"]
@@ -133,11 +257,28 @@ def probe_media_info(
         streams = payload.get("streams") or []
         has_video = False
         audio_codec = ""
+        video_codec = ""
+        width = None
+        height = None
+        fps = None
         for s in streams:
             ctype = (s.get("codec_type") or "").lower()
             cname = (s.get("codec_name") or "").lower().strip()
             if ctype == "video":
                 has_video = True
+                if include_video_meta and not video_codec and cname:
+                    video_codec = cname
+                if include_video_meta and width is None:
+                    try:
+                        w = int(s.get("width") or 0)
+                        h = int(s.get("height") or 0)
+                    except (TypeError, ValueError):
+                        w, h = 0, 0
+                    if w > 0 and h > 0:
+                        width, height = w, h
+                    fps = parse_frame_rate(s.get("avg_frame_rate")) or parse_frame_rate(
+                        s.get("r_frame_rate")
+                    )
             elif ctype == "audio" and not audio_codec and cname:
                 audio_codec = cname
         if not has_video:
@@ -156,6 +297,20 @@ def probe_media_info(
             result["audio_hard"] = (
                 bool(audio_codec) and audio_codec not in BROWSER_FRIENDLY_AUDIO
             )
+        if include_video_meta:
+            if width is not None:
+                result["width"] = width
+            if height is not None:
+                result["height"] = height
+            if fps is not None:
+                result["fps"] = round(fps, 3)
+            result["video_codec"] = video_codec
+            result["probe_video_meta_done"] = True
+            log(
+                f"[帧率探测] ffprobe ok path={path.name} "
+                f"{width or 0}x{height or 0}@{result.get('fps')} "
+                f"vcodec={video_codec or '-'}"
+            )
         from vg.diagnostics import aggregate
 
         aggregate("media_probe_ok", (time.perf_counter() - started) * 1000.0)
@@ -169,6 +324,7 @@ def probe_media_info(
             path=path,
             include_duration=include_duration,
             include_audio=include_audio,
+            include_video_meta=include_video_meta,
         )
         return {"ok": False, "err": str(e)[:120]}
 
@@ -456,6 +612,7 @@ def _apply_probe_to_item(
     *,
     include_duration: bool = True,
     include_audio: bool = True,
+    include_video_meta: bool = False,
 ) -> None:
     item["probe_ver"] = PROBE_META_VER
     if include_duration:
@@ -476,9 +633,41 @@ def _apply_probe_to_item(
             item["audio_hard"] = bool(info.get("audio_hard")) if "audio_hard" in info else (
                 bool(ac) and ac not in BROWSER_FRIENDLY_AUDIO
             )
+        if include_video_meta:
+            if info.get("width"):
+                item["width"] = int(info["width"])
+            if info.get("height"):
+                item["height"] = int(info["height"])
+            if info.get("fps") is not None:
+                try:
+                    item["fps"] = float(info["fps"])
+                except (TypeError, ValueError):
+                    pass
+            if "video_codec" in info:
+                item["video_codec"] = str(info.get("video_codec") or "").strip().lower()
+            # Only mark done when we actually got resolution; otherwise allow retry.
+            if item.get("width") or item.get("height"):
+                item["probe_video_meta_done"] = True
+            else:
+                item.pop("probe_video_meta_done", None)
+                log(
+                    f"[帧率探测] 探测成功但无分辨率 "
+                    f"path={info.get('path') or item.get('rel')} "
+                    f"err=missing_width_height"
+                )
     else:
-        item["bad"] = True
-        item["bad_reason"] = info.get("err") or "无法读取"
+        # Video-meta-only probes must not mark the whole item bad: playback can
+        # still work, and this probe is optional / on-demand.
+        if include_duration or include_audio:
+            item["bad"] = True
+            item["bad_reason"] = info.get("err") or "无法读取"
+        if include_video_meta:
+            # Failed on-demand fps probe: do NOT stick "done", so next open retries.
+            item.pop("probe_video_meta_done", None)
+            log(
+                f"[帧率探测] 失败 vid={item.get('id') or ''} "
+                f"rel={item.get('rel') or ''} err={info.get('err') or 'unknown'}"
+            )
 
 
 def _item_probe_path(item: dict) -> Path | None:
@@ -491,6 +680,121 @@ def _item_probe_path(item: dict) -> Path | None:
     if rel:
         return resolve_item_rel(item, rel)
     return None
+
+
+_player_probe_lock = threading.Lock()
+_player_probe_inflight: set[str] = set()
+
+
+def _player_probe_key(vid: str, root: str | None) -> str:
+    return f"{(root or '').strip().casefold()}::{vid}"
+
+
+def wants_player_video_meta(item: dict, *, stream_like: bool) -> bool:
+    """True when player-open should (re)probe resolution/fps/video codec."""
+    if stream_like or not isinstance(item, dict):
+        return False
+    has_dims = bool(item.get("width") or item.get("height"))
+    has_codec = "video_codec" in item
+    return not (
+        bool(item.get("probe_video_meta_done")) and has_dims and has_codec
+    )
+
+
+def player_video_meta_pending(vid: str, root: str | None) -> bool:
+    with _player_probe_lock:
+        return _player_probe_key(vid, root) in _player_probe_inflight
+
+
+def schedule_player_video_meta_probe(vid: str, root: str | None, ffmpeg: str) -> bool:
+    """Start a daemon ffprobe for width/height/fps/video_codec. Never blocks."""
+    if not vid or not ffmpeg:
+        log(f"[帧率探测] 无法启动后台线程 vid={vid or '-'} ffmpeg={bool(ffmpeg)}")
+        return False
+    key = _player_probe_key(vid, root)
+    with _player_probe_lock:
+        if key in _player_probe_inflight:
+            log(f"[帧率探测] 后台已在跑，跳过重复入队 vid={vid} key={key}")
+            return False
+        _player_probe_inflight.add(key)
+    log(f"[帧率探测] 启动后台线程 vid={vid} root={root or ''} key={key}")
+    threading.Thread(
+        target=_player_video_meta_worker,
+        args=(vid, root, ffmpeg, key),
+        daemon=True,
+        name=f"probe-vmeta-{vid[:8]}",
+    ).start()
+    return True
+
+
+def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str) -> None:
+    from vg.catalog_repository import find_video_by_id
+    from vg.disk_libs import save_library_item
+
+    try:
+        item = find_video_by_id(vid, prefer_root=root)
+        if not item:
+            log(f"[帧率探测] 后台跳过：未找到视频 vid={vid}")
+            return
+        path = _item_probe_path(item)
+        log(
+            f"[帧率探测] 后台开始 vid={vid} path={path} "
+            f"exists={bool(path and path.is_file())}"
+        )
+        if not path or not path.is_file() or path.suffix.lower() == ".m3u8":
+            log(f"[帧率探测] 后台跳过：无实体文件 vid={vid} path={path}")
+            return
+        info = probe_media_info(
+            ffmpeg,
+            path,
+            include_duration=False,
+            include_audio=False,
+            include_video_meta=True,
+        )
+        _apply_probe_to_item(
+            item,
+            info,
+            include_duration=False,
+            include_audio=False,
+            include_video_meta=True,
+        )
+        saved = False
+        try:
+            saved = bool(save_library_item(item))
+        except Exception as exc:
+            log(f"[帧率探测] 后台写入片库失败 vid={vid}: {exc}")
+        log(
+            f"[帧率探测] 后台完成 vid={vid} ok={info.get('ok')} "
+            f"{item.get('width') or 0}x{item.get('height') or 0}@"
+            f"{item.get('fps')} vcodec={item.get('video_codec') or '-'} "
+            f"done={bool(item.get('probe_video_meta_done'))} "
+            f"err={info.get('err') or ''} saved={int(saved)}"
+        )
+        from vg.diagnostics import emit
+
+        emit(
+            "INFO",
+            "fps_video_meta_probed",
+            force=True,
+            video_id=vid,
+            ok=bool(info.get("ok")),
+            width=item.get("width") or 0,
+            height=item.get("height") or 0,
+            fps=item.get("fps"),
+            video_codec=item.get("video_codec") or "",
+            err=info.get("err") or "",
+            path=str(path),
+            background=True,
+            saved=saved,
+        )
+    except Exception as exc:
+        from vg.diagnostics import error as diag_error
+
+        diag_error("fps_video_meta_worker_failed", exc, video_id=vid, root=root or "")
+        log(f"[帧率探测] 后台异常 vid={vid}: {exc}")
+    finally:
+        with _player_probe_lock:
+            _player_probe_inflight.discard(key)
 
 
 def _duration_already_known(item: dict) -> bool:

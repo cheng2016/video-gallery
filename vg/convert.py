@@ -32,6 +32,9 @@ from vg.disk_libs import (
 from vg.genres import detect_genres
 from vg.media import (
     _apply_probe_to_item,
+    fps_can_halve_to_30,
+    is_2k_or_4k,
+    normalize_target_fps,
     make_thumbnail,
     probe_duration,
     probe_media_info,
@@ -69,6 +72,17 @@ def _unique_mp4_path(out_dir: Path, base_name: str) -> Path:
     return candidate
 
 
+def _unique_out_path(out_dir: Path, base_name: str, ext: str = ".mp4") -> Path:
+    stem = _sanitize_filename(base_name)
+    suffix = ext if ext.startswith(".") else f".{ext}"
+    candidate = out_dir / f"{stem}{suffix}"
+    n = 1
+    while candidate.exists():
+        candidate = out_dir / f"{stem}_{n}{suffix}"
+        n += 1
+    return candidate
+
+
 def _path_under_root(path: Path, root: Path | None = None) -> bool:
     use_root = root if root is not None else STATE.get("root")
     if not use_root or not path:
@@ -102,13 +116,17 @@ def _convert_job_public(job: dict) -> dict:
         "percent": int(job.get("percent") or 0),
         "out_path": job.get("out_path") or "",
         "added_id": job.get("added_id") or "",
+        "target_fps": int(job.get("target_fps") or 0) or None,
     }
 
 
 def list_convert_jobs(limit: int = 40) -> list[dict]:
     with _convert_lock:
-        jobs = list(STATE.get("convert_jobs") or {}.values())
-    jobs.sort(key=lambda j: j.get("created") or 0, reverse=True)
+        # Must parenthesize: `x or {}.values()` binds as `x or ({}.values())`,
+        # so a non-empty jobs dict would be listed as its string keys.
+        raw = list((STATE.get("convert_jobs") or {}).values())
+    jobs = [j for j in raw if isinstance(j, dict)]
+    jobs.sort(key=lambda j: float(j.get("created") or 0), reverse=True)
     return [_convert_job_public(j) for j in jobs[:limit]]
 
 
@@ -117,15 +135,28 @@ def enqueue_convert_job(
     kind: str = "mp4",
     name: str = "",
     root: str | None = None,
+    target_fps: int | None = None,
 ) -> tuple[bool, str, str]:
-    """Enqueue convert/fix-audio job. Returns (ok, msg, job_id)."""
+    """Enqueue convert/fix-audio/fps30 job. Returns (ok, msg, job_id)."""
     kind = (kind or "mp4").strip().lower()
-    if kind not in ("mp4", "fix_audio"):
+    if kind not in ("mp4", "fix_audio", "fps30"):
         return False, "未知任务类型", ""
+    stored_target = None
+    if kind == "fps30":
+        try:
+            stored_target = int(round(float(target_fps if target_fps is not None else 30)))
+        except (TypeError, ValueError):
+            stored_target = 30
+        if stored_target < 1 or stored_target > 119:
+            return False, "目标帧率无效（需 1–119）", ""
     try:
         root = str(Path(root).expanduser().resolve()) if root else None
     except OSError:
         root = str(root).strip() if root else None
+    log(
+        f"[转换队列] 入队请求 kind={kind} vid={vid} root={root or ''} "
+        f"name={name or ''} target_fps={stored_target or '-'}"
+    )
     with _convert_lock:
         for jid, job in STATE["convert_jobs"].items():
             job_root = job.get("root") or ""
@@ -133,10 +164,14 @@ def enqueue_convert_job(
                 job_root = str(Path(job_root).expanduser().resolve()) if job_root else ""
             except OSError:
                 job_root = str(job_root).strip()
+            same_target = True
+            if kind == "fps30":
+                same_target = int(job.get("target_fps") or 30) == stored_target
             if (
                 job.get("vid") == vid
                 and job_root.casefold() == (root or "").casefold()
                 and job.get("kind", "mp4") == kind
+                and same_target
                 and job.get("status") in ("queued", "running")
             ):
                 return True, "已有同类任务在队列中", jid
@@ -155,6 +190,7 @@ def enqueue_convert_job(
             "cancel": False,
             "proc": None,
             "created": time.time(),
+            "target_fps": stored_target,
         }
     pump_convert_queue()
     return True, "已加入转换队列", job_id
@@ -183,7 +219,12 @@ def pump_convert_queue() -> None:
         vid = job["vid"]
         root = job.get("root") or None
         kind = job.get("kind") or "mp4"
-        target = _fix_audio_worker if kind == "fix_audio" else _convert_worker
+        if kind == "fix_audio":
+            target = _fix_audio_worker
+        elif kind == "fps30":
+            target = _fps30_worker
+        else:
+            target = _convert_worker
         threading.Thread(
             target=_run_convert_job_wrapper,
             args=(target, jid, vid, root),
@@ -372,6 +413,10 @@ def _run_ffmpeg_attempts(
         cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "info"] + cmd_tail
         _convert_job_update(job_id, status="running", msg=f"正在{label}…", percent=0)
         log(f"[{log_tag}] {label}: {' '.join(cmd[:8])} … → {out_path.name}")
+        if duration_hint:
+            log(f"[{log_tag}] 将按时长 {duration_hint:.1f}s 上报进度（约每 10% 打一条日志）")
+        else:
+            log(f"[{log_tag}] 无总时长，将按已处理时间上报（无法显示百分比）")
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -388,6 +433,8 @@ def _run_ffmpeg_attempts(
                     job["proc"] = proc
             err_chunks: list[str] = []
             cancelled = False
+            last_logged_pct = -10
+            last_log_t = 0.0
             assert proc.stderr is not None
             for line in proc.stderr:
                 if _convert_job_cancelled(job_id):
@@ -398,9 +445,25 @@ def _run_ffmpeg_attempts(
                 if len(err_chunks) > 40:
                     err_chunks = err_chunks[-40:]
                 t = _parse_ffmpeg_time_seconds(line)
-                if t is not None and duration_hint and duration_hint > 0:
+                if t is None:
+                    continue
+                if duration_hint and duration_hint > 0:
                     pct = max(0, min(99, int(t * 100 / duration_hint)))
                     _convert_job_update(job_id, percent=pct, msg=f"正在{label}… {pct}%")
+                    if pct >= last_logged_pct + 10:
+                        last_logged_pct = pct
+                        log(f"[{log_tag}] 进度 {pct}% time={t:.1f}s/{duration_hint:.1f}s job={job_id}")
+                else:
+                    elapsed = int(t)
+                    if elapsed >= last_log_t + 15:
+                        last_log_t = elapsed
+                        mm, ss = divmod(elapsed, 60)
+                        _convert_job_update(
+                            job_id,
+                            percent=0,
+                            msg=f"正在{label}… 已处理 {mm}:{ss:02d}（时长未知）",
+                        )
+                        log(f"[{log_tag}] 进行中 已处理 {mm}:{ss:02d} job={job_id}（无总时长，无法算百分比）")
             code = proc.wait()
             with _convert_lock:
                 job = STATE["convert_jobs"].get(job_id)
@@ -631,6 +694,257 @@ def _convert_worker(job_id: str, vid: str, root: str | None = None) -> None:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _fps30_video_encode_args(video_codec: str | None) -> tuple[str, list[str]]:
+    """Pick video encoder to match source codec when possible.
+
+    Frame-rate change always requires re-encoding; stream copy cannot alter fps.
+    Prefer keeping HEVC→HEVC / H.264→H.264 so the output format does not surprise.
+    """
+    codec = (video_codec or "").strip().lower()
+    if codec in ("hevc", "h265", "hev1", "hvc1"):
+        return "H.265", [
+            "-c:v", "libx265", "-preset", "veryfast", "-crf", "22",
+            "-tag:v", "hvc1",
+        ]
+    if codec in ("av1", "av01"):
+        # libaom-av1 is very slow; fall back to H.264 for practical fps jobs.
+        return "H.264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+    return "H.264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+
+
+def _run_ffmpeg_fps30(
+    job_id: str,
+    ffmpeg: str,
+    src: Path,
+    out_path: Path,
+    duration_hint: float | None = None,
+    *,
+    video_codec: str | None = None,
+    target_fps: int = 30,
+) -> tuple[bool, str]:
+    """Re-encode video to target_fps; keep audio stream as-is when possible."""
+    try:
+        target_fps = int(target_fps)
+    except (TypeError, ValueError):
+        target_fps = 30
+    if target_fps < 1:
+        target_fps = 30
+    vf = f"fps={target_fps}"
+    v_label, v_args = _fps30_video_encode_args(video_codec)
+    log(
+        f"[帧率转码] 编码器选择 job={job_id} src_codec={video_codec or '-'} "
+        f"target={target_fps} → {v_label} ({' '.join(v_args)})"
+    )
+    input_args = ["-i", str(src)]
+    attempts = [
+        (
+            f"帧率转码({v_label}@{target_fps})",
+            input_args
+            + [
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", vf,
+                *v_args,
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                str(out_path),
+            ],
+        ),
+        (
+            f"帧率转码({v_label}@{target_fps}+音频重编码)",
+            input_args
+            + [
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", vf,
+                *v_args,
+                "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+                "-movflags", "+faststart",
+                str(out_path),
+            ],
+        ),
+    ]
+    # If HEVC encode fails (missing libx265), fall back to H.264 once.
+    if v_label == "H.265":
+        _, h264_args = _fps30_video_encode_args("h264")
+        attempts.append(
+            (
+                f"帧率转码(回退H.264@{target_fps})",
+                input_args
+                + [
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-vf", vf,
+                    *h264_args,
+                    "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+                    "-movflags", "+faststart",
+                    str(out_path),
+                ],
+            )
+        )
+    return _run_ffmpeg_attempts(job_id, ffmpeg, attempts, out_path, duration_hint, log_tag="帧率转码")
+
+
+def _fps30_worker(job_id: str, vid: str, root: str | None = None) -> None:
+    """High-fps 2K/4K → user-chosen lower fps. Separate from format convert / fix-audio."""
+    with _convert_lock:
+        requested = ((STATE.get("convert_jobs") or {}).get(job_id) or {}).get("target_fps")
+    log(f"[帧率转码] 开始 job={job_id} vid={vid} root={root or ''} target={requested or '-'}")
+    try:
+        item = find_video_by_id(vid, prefer_root=root)
+        if not item:
+            log(f"[帧率转码] 失败：未找到视频 job={job_id} vid={vid}")
+            _convert_job_update(job_id, status="error", msg="未找到视频", percent=0)
+            return
+        ffmpeg = STATE.get("ffmpeg")
+        if not ffmpeg:
+            log(f"[帧率转码] 失败：无 ffmpeg job={job_id}")
+            _convert_job_update(job_id, status="error", msg="未找到 ffmpeg", percent=0)
+            return
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+            return
+        kind = item.get("kind") or ""
+        if kind in ("m3u8", "ts_set") or (item.get("ext") or "").lower() == ".m3u8":
+            log(f"[帧率转码] 失败：流媒体 job={job_id} kind={kind}")
+            _convert_job_update(job_id, status="error", msg="流媒体请先转成文件后再做帧率转码", percent=0)
+            return
+        src = resolve_item_rel(item, item.get("rel") or "")
+        if not src or not src.is_file():
+            log(f"[帧率转码] 失败：源文件不存在 job={job_id} src={src}")
+            _convert_job_update(job_id, status="error", msg="源文件不存在", percent=0)
+            return
+        _convert_job_update(job_id, status="running", msg="正在检测分辨率/帧率…", percent=0)
+        info = probe_media_info(
+            ffmpeg,
+            src,
+            include_duration=True,
+            include_audio=False,
+            include_video_meta=True,
+        )
+        if not info.get("ok"):
+            log(f"[帧率转码] 探测失败 job={job_id} err={info.get('err')}")
+            _convert_job_update(job_id, status="error", msg=info.get("err") or "无法读取文件", percent=0)
+            return
+        _apply_probe_to_item(
+            item,
+            info,
+            include_duration=True,
+            include_audio=False,
+            include_video_meta=True,
+        )
+        width = info.get("width") or item.get("width")
+        height = info.get("height") or item.get("height")
+        fps = info.get("fps") if info.get("fps") is not None else item.get("fps")
+        video_codec = info.get("video_codec") or item.get("video_codec") or ""
+        log(
+            f"[帧率转码] 探测结果 job={job_id} "
+            f"{width}x{height}@{fps} vcodec={video_codec or '-'} src={src.name}"
+        )
+        if not is_2k_or_4k(width, height):
+            log(f"[帧率转码] 拒绝：非 2K/4K job={job_id} {width}x{height}")
+            _convert_job_update(
+                job_id,
+                status="error",
+                msg=f"仅支持 2K/4K（当前 {width or '?'}x{height or '?'}）",
+                percent=0,
+            )
+            return
+        if not fps_can_halve_to_30(fps):
+            log(f"[帧率转码] 拒绝：非 60/90/120 档 job={job_id} fps={fps}")
+            _convert_job_update(
+                job_id,
+                status="error",
+                msg=f"仅支持 60/90/120fps 源（当前 {fps or '?'} fps）",
+                percent=0,
+            )
+            return
+        target = normalize_target_fps(fps, requested, default=30)
+        if not target:
+            log(f"[帧率转码] 拒绝：目标帧率无效 job={job_id} src={fps} want={requested}")
+            _convert_job_update(
+                job_id,
+                status="error",
+                msg=f"目标帧率必须低于源帧率（源 {fps or '?'}）",
+                percent=0,
+            )
+            return
+        duration_hint = info.get("duration") or item.get("duration")
+        if duration_hint:
+            try:
+                duration_hint = float(duration_hint)
+            except (TypeError, ValueError):
+                duration_hint = None
+        if not duration_hint:
+            duration_hint = probe_duration(ffmpeg, src)
+        if duration_hint:
+            log(f"[帧率转码] 时长={duration_hint:.1f}s job={job_id}")
+        else:
+            log(f"[帧率转码] 警告：未探测到时长，进度只能显示已处理时间 job={job_id}")
+        out_dir = src.parent
+        item_root = root_for_item(item)
+        if not _path_under_root(out_dir, item_root):
+            log(f"[帧率转码] 拒绝：输出目录越界 job={job_id} out_dir={out_dir}")
+            _convert_job_update(job_id, status="error", msg="输出目录不在扫描根下", percent=0)
+            return
+        fps_label = int(round(float(fps))) if fps else 60
+        base_name = f"{src.stem}_{fps_label}to{target}fps"
+        out_path = _unique_out_path(out_dir, base_name, ".mp4")
+        if not _path_under_root(out_path, item_root):
+            log(f"[帧率转码] 拒绝：输出路径非法 job={job_id} out={out_path}")
+            _convert_job_update(job_id, status="error", msg="输出路径非法", percent=0)
+            return
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+            return
+        log(f"[帧率转码] 开始转码 job={job_id} {fps_label}→{target} out={out_path.name}")
+        _convert_job_update(
+            job_id,
+            status="running",
+            msg=f"开始帧率转码（{fps_label}→{target} fps）…",
+            percent=0,
+            out_path=str(out_path),
+        )
+        ok, msg = _run_ffmpeg_fps30(
+            job_id,
+            ffmpeg,
+            src,
+            out_path,
+            duration_hint,
+            video_codec=video_codec,
+            target_fps=target,
+        )
+        if ok:
+            added = _register_converted_mp4(out_path, item)
+            _convert_job_update(
+                job_id,
+                status="done",
+                msg=f"已生成 {target}fps 版本并加入片库：{out_path.name}",
+                percent=100,
+                out_path=str(out_path),
+                added_id=(added or {}).get("id") or "",
+            )
+            log(f"[帧率转码] 完成 job={job_id} {vid} → {out_path}")
+        elif msg == "已取消" or _convert_job_cancelled(job_id):
+            try:
+                out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            log(f"[帧率转码] 已取消 job={job_id}")
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+        else:
+            try:
+                if out_path.exists() and out_path.stat().st_size == 0:
+                    out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            log(f"[帧率转码] 转码失败 job={job_id} msg={msg[:200] if msg else ''}")
+            _convert_job_update(job_id, status="error", msg=msg[:500] or "帧率转码失败", percent=0)
+    except Exception as e:
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+        else:
+            _convert_job_update(job_id, status="error", msg=str(e), percent=0)
+        log(f"[帧率转码] 异常 job={job_id} vid={vid}: {e}")
 
 
 def _fix_audio_worker(job_id: str, vid: str, root: str | None = None) -> None:

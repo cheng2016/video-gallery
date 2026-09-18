@@ -869,6 +869,19 @@
       gap: 6px;
       margin-top: 4px;
     }
+    .queue-progress {
+      height: 6px;
+      border-radius: 99px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .queue-progress > i {
+      display: block;
+      height: 100%;
+      background: #3d8bfd;
+      width: 0;
+    }
     .media-row-check {
       margin-top: 4px;
       flex-shrink: 0;
@@ -1058,18 +1071,20 @@
     }
     .modal-close:hover { background: var(--danger); border-color: var(--danger); }
     .player-wrap {
-      flex: 1;
+      flex: 1 1 auto;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 0 20px 20px;
+      padding: 0 20px 12px;
       min-height: 0;
+      max-height: calc(100vh - 210px);
+      overflow: hidden;
     }
     .player-wrap video {
       max-width: 100%;
       max-height: 100%;
-      width: 100%;
-      height: 100%;
+      width: auto;
+      height: auto;
       background: #000;
       border-radius: 8px;
       outline: none;
@@ -1084,7 +1099,44 @@
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      padding: 0 20px 16px;
+      padding: 0 20px 12px;
+      flex-shrink: 0;
+      z-index: 2;
+      background: #0a0c10;
+    }
+    .modal-actions #btnFps30.fps-ready {
+      border-color: #3d8bfd;
+      color: #9ec1ff;
+      background: rgba(61, 139, 253, 0.16);
+    }
+    .modal-actions #btnFps30:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      border-color: var(--border);
+      color: var(--muted);
+      background: transparent;
+    }
+    .modal-actions .fps-target-wrap {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .modal-actions .fps-target-wrap.visible {
+      display: inline-flex;
+    }
+    .modal-actions #fpsTargetSelect,
+    .modal-actions #fpsTargetCustom {
+      background: #12161d;
+      color: var(--text, #e8edf4);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 0.8rem;
+    }
+    .modal-actions #fpsTargetCustom {
+      width: 4.6em;
     }
     .modal-actions .btn {
       font-size: 0.8rem;
@@ -1095,6 +1147,30 @@
       border-color: var(--accent);
       color: #041016;
       font-weight: 600;
+    }
+    .modal-fps-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 20px 16px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      flex-shrink: 0;
+      background: #0a0c10;
+    }
+    .modal-fps-actions.hidden { display: none; }
+    .modal-fps-actions .fps-label {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-right: 4px;
+    }
+    .modal-fps-actions .btn {
+      font-size: 0.8rem;
+      padding: 6px 12px;
+    }
+    .modal-fps-actions .btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
     .settings-modal {
       align-items: center;
@@ -1341,7 +1417,7 @@
     <div class="meta" id="countLabel">—</div>
     <div class="header-actions">
       <button class="btn" id="rescanBtn" title="增量扫描：复用未改动的条目，只处理新增/变更">重新扫描</button>
-      <button class="btn" id="queueBtn" title="转换队列：转 MP4 / 修复声音">转换队列</button>
+      <button class="btn" id="queueBtn" title="转换队列：转 MP4 / 修复声音 / 帧率转码">转换队列</button>
       <button class="btn" id="cleanupBtn" title="查看并清理重复 / 损坏文件">文件清理</button>
       <button class="btn" id="lanBtn" title="允许同一 WiFi 下其它设备访问">局域网共享</button>
       <button class="btn" id="historyBtn" title="最近播放 / 继续看 / 已看完">播放历史</button>
@@ -1439,12 +1515,23 @@
     <div class="modal-info" id="modalInfo"></div>
     <div class="modal-actions" id="modalActions">
       <button type="button" class="btn primary" id="btnLocalOpen" title="用系统默认播放器打开">系统播放器</button>
+      <button type="button" class="btn" id="btnFps30" title="仅降低帧率：60/90/120fps 的 2K/4K 转到自定义低帧率（不改封装格式流程）" style="display:none" disabled>60→30fps</button>
+      <label class="fps-target-wrap" id="fpsTargetWrap">
+        转到
+        <select id="fpsTargetSelect" title="目标帧率"></select>
+        <input type="number" id="fpsTargetCustom" min="1" max="119" step="1" placeholder="自定义" title="自定义目标帧率，留空则用左侧选项">
+        fps
+      </label>
+      <button type="button" class="btn" id="btnCancelFps30" title="取消正在进行的帧率转码" style="display:none">取消帧率转码</button>
       <button type="button" class="btn" id="btnFixAudio" title="视频直拷，音频转为 AAC（解决浏览器无声）" style="display:none">修复声音</button>
       <button type="button" class="btn" id="btnToMp4" title="用 ffmpeg 转为同目录 MP4" style="display:none">转成 MP4</button>
       <button type="button" class="btn" id="btnCancelMp4" title="取消正在进行的转换" style="display:none">取消转换</button>
       <button type="button" class="btn" id="btnCover" title="用当前画面或指定时间截帧换封面">换封面</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
       <button type="button" class="btn" id="btnReveal" title="在文件管理器中显示">打开位置</button>
+    </div>
+    <div class="modal-fps-actions hidden" id="modalFpsActions">
+      <span class="fps-label" id="fpsMetaLabel">帧率转码 · 2K/4K 打开后检测</span>
     </div>
     <div id="coverPanel" class="cover-panel" style="display:none">
       <label>截帧时间（秒） <input type="number" id="coverSeek" min="0" step="0.5" value="3" style="width:5em" /></label>
@@ -1744,6 +1831,9 @@
     const CLIENT_LOG_CORE_EVENTS = new Set([
       "refresh_render_completed",
       "load_more_done",
+      "player_opened",
+      "player_probe_poll",
+      "fps30_button_update",
       // LAN share button regressions: always ship these even without full logging.
       "lan_share_ui_sync",
       "lan_share_boot",
@@ -2206,6 +2296,155 @@
       return "/api/info/" + encodeURIComponent(id) + (query ? ("?" + query) : "");
     }
 
+    function playerExtraFromInfo(info, rootFallback) {
+      return {
+        path: info.path || "",
+        folder: info.folder || "",
+        root: info.root || rootFallback || state.root || "",
+        rel: info.rel || "",
+        browser_hard: !!info.browser_hard,
+        browser_ok: !!info.browser_ok,
+        audio_hard: !!info.audio_hard,
+        audio_codec: info.audio_codec || "",
+        video_codec: info.video_codec || "",
+        width: info.width || 0,
+        height: info.height || 0,
+        fps: info.fps || 0,
+        is_hires: !!info.is_hires,
+        can_fps30: !!info.can_fps30,
+        fps_gate: info.fps_gate || "",
+        fps_targets: Array.isArray(info.fps_targets) ? info.fps_targets : [],
+        fps_class: info.fps_class || 0,
+        has_ffmpeg: typeof info.has_ffmpeg === "boolean" ? info.has_ffmpeg : undefined,
+        probe_pending: !!info.probe_pending,
+      };
+    }
+
+    function stopProbePoll() {
+      if (probePollTimer) {
+        clearTimeout(probePollTimer);
+        probePollTimer = 0;
+      }
+    }
+
+    function formatVideoCodecLabel(codec) {
+      const raw = String(codec || "").trim().toLowerCase();
+      if (!raw) return "";
+      const map = {
+        hevc: "H.265（HEVC）",
+        h265: "H.265（HEVC）",
+        hev1: "H.265（HEVC）",
+        hvc1: "H.265（HEVC）",
+        h264: "H.264（AVC）",
+        avc: "H.264（AVC）",
+        avc1: "H.264（AVC）",
+        av1: "AV1",
+        av01: "AV1",
+        vp9: "VP9",
+        vp8: "VP8",
+        mpeg2video: "MPEG-2",
+        mpeg2: "MPEG-2",
+        mpeg1video: "MPEG-1",
+        mpeg4: "MPEG-4",
+        prores: "ProRes",
+        mjpeg: "MJPEG",
+      };
+      return map[raw] || raw.toUpperCase();
+    }
+
+    function probeLineFromMeta(meta) {
+      const w = Number((meta && meta.width) || 0);
+      const h = Number((meta && meta.height) || 0);
+      const fps = Number((meta && meta.fps) || 0);
+      const codec = formatVideoCodecLabel((meta && meta.video_codec) || "");
+      if (!(w || h || fps || codec)) return "";
+      let line = "探测: ";
+      line += (w || h) ? `${w || "?"}×${h || "?"}` : "?×?";
+      if (fps) line += ` · ${Math.round(fps)}fps`;
+      if (codec) line += ` · ${codec}`;
+      if (meta && meta.can_fps30) line += " · 可转低帧率";
+      return line;
+    }
+
+    function paintPlayerInfoTip() {
+      const infoEl = $("modalInfo");
+      if (!infoEl || !currentPlayMeta) return;
+      const bits = [];
+      if (currentPlayMeta.infoTip) bits.push(currentPlayMeta.infoTip);
+      const probe = probeLineFromMeta(currentPlayMeta);
+      if (probe) bits.push(probe);
+      if (currentPlayMeta.path) bits.push(currentPlayMeta.path);
+      infoEl.textContent = bits.join("\n");
+    }
+
+    function applyProbedInfo(info) {
+      if (!currentPlayMeta || !info) return;
+      currentPlayMeta.width = info.width || 0;
+      currentPlayMeta.height = info.height || 0;
+      currentPlayMeta.fps = info.fps || 0;
+      currentPlayMeta.video_codec = info.video_codec || "";
+      currentPlayMeta.is_hires = !!info.is_hires;
+      currentPlayMeta.can_fps30 = !!info.can_fps30;
+      currentPlayMeta.fps_gate = info.fps_gate || "";
+      currentPlayMeta.fps_targets = Array.isArray(info.fps_targets) ? info.fps_targets : [];
+      currentPlayMeta.fps_class = info.fps_class || 0;
+      currentPlayMeta.audio_hard = !!info.audio_hard;
+      currentPlayMeta.audio_codec = info.audio_codec || "";
+      if (typeof info.has_ffmpeg === "boolean") currentPlayMeta.has_ffmpeg = info.has_ffmpeg;
+      paintPlayerInfoTip();
+      updateFixAudioButton(info);
+      updateFps30Button({
+        ...(info || {}),
+        kind: currentPlayKind || "",
+        ext: (info && info.ext) || "",
+      });
+    }
+
+    function startProbePoll(id, root) {
+      stopProbePoll();
+      let n = 0;
+      const tick = async () => {
+        if (currentPlayId !== id) return;
+        n += 1;
+        try {
+          const info = await fetch(infoUrl(id, root, currentOperationId), {
+            headers: currentOperationId ? { "X-VG-Operation-ID": currentOperationId } : {},
+          }).then((r) => r.json());
+          if (currentPlayId !== id) return;
+          applyProbedInfo(info);
+          const pending = !!info.probe_pending;
+          clientLog("player_probe_poll", {
+            video_id: id,
+            attempt: n,
+            pending,
+            width: info.width || 0,
+            height: info.height || 0,
+            fps: info.fps || 0,
+            video_codec: info.video_codec || "",
+            probe_video_meta_done: !!info.probe_video_meta_done,
+          }, pending && n >= 20 ? "WARN" : "INFO");
+          if (pending && n < 40) {
+            probePollTimer = setTimeout(tick, 1200);
+          } else if (pending) {
+            clientLog("player_probe_timeout", {
+              video_id: id,
+              attempts: n,
+              width: info.width || 0,
+              height: info.height || 0,
+            }, "WARN");
+          }
+        } catch (err) {
+          clientLog("player_probe_poll", {
+            video_id: id,
+            attempt: n,
+            error: String(err),
+          }, "WARN");
+          if (currentPlayId === id && n < 8) probePollTimer = setTimeout(tick, 2000);
+        }
+      };
+      probePollTimer = setTimeout(tick, 700);
+    }
+
     async function openFromHistory(id, rootHint) {
       const row = getPlayRow(id) || {};
       const root = rootHint || row.root || "";
@@ -2240,16 +2479,7 @@
         info.ext,
         info.kind || "",
         info.seg_count || 0,
-        {
-          path: info.path || "",
-          folder: info.folder || "",
-          root: info.root || root || state.root || "",
-          rel: info.rel || "",
-          browser_hard: !!info.browser_hard,
-          browser_ok: !!info.browser_ok,
-          audio_hard: !!info.audio_hard,
-          audio_codec: info.audio_codec || "",
-        }
+        playerExtraFromInfo(info, root)
       );
     }
 
@@ -5743,7 +5973,10 @@
     let currentPlayKind = "";
     let convertPollTimer = 0;
     let currentConvertJobId = "";
+    let currentConvertVid = "";
+    let currentConvertKind = "";
     let playProgressTimer = 0;
+    let probePollTimer = 0;
 
     function playbackQuery(root) {
       const params = new URLSearchParams();
@@ -5873,7 +6106,9 @@
     function setConvertUi(converting) {
       const btn = $("btnToMp4");
       const fixBtn = $("btnFixAudio");
+      const fpsBtn = $("btnFps30");
       const cancel = $("btnCancelMp4");
+      const cancelFps = $("btnCancelFps30");
       if (btn) {
         btn.disabled = !!converting;
         if (!converting) btn.textContent = "转成 MP4";
@@ -5882,7 +6117,29 @@
         fixBtn.disabled = !!converting;
         if (!converting) fixBtn.textContent = "修复声音";
       }
-      if (cancel) cancel.style.display = converting ? "" : "none";
+      if (fpsBtn) {
+        if (converting) {
+          fpsBtn.disabled = true;
+          fpsBtn.classList.remove("fps-ready");
+        } else {
+          // Re-evaluate from current meta so we don't leave a contradictory gray "可转" state.
+          updateFps30Button({
+            width: (currentPlayMeta && currentPlayMeta.width) || 0,
+            height: (currentPlayMeta && currentPlayMeta.height) || 0,
+            fps: (currentPlayMeta && currentPlayMeta.fps) || 0,
+            is_hires: !!(currentPlayMeta && currentPlayMeta.is_hires),
+            can_fps30: !!(currentPlayMeta && currentPlayMeta.can_fps30),
+            fps_gate: (currentPlayMeta && currentPlayMeta.fps_gate) || "",
+            has_ffmpeg: typeof (currentPlayMeta && currentPlayMeta.has_ffmpeg) === "boolean"
+              ? currentPlayMeta.has_ffmpeg
+              : state.hasFfmpeg,
+            kind: currentPlayKind || "",
+          });
+        }
+      }
+      const isFps = !!(currentPlayMeta && currentPlayMeta.convertKind === "fps30");
+      if (cancel) cancel.style.display = converting && !isFps ? "" : "none";
+      if (cancelFps) cancelFps.style.display = converting && isFps ? "" : "none";
     }
 
     function updateToMp4Button(kind, ext) {
@@ -5913,6 +6170,189 @@
       }
     }
 
+    function isClientHires(w, h) {
+      return (Number(w) || 0) >= 2560 || (Number(h) || 0) >= 1440;
+    }
+
+    const FPS_TARGET_PRESETS = [24, 25, 30, 48, 50, 60];
+
+    function classifyHighFps(fps) {
+      const v = Number(fps);
+      if (!(v > 0)) return 0;
+      for (const cls of [60, 90, 120]) {
+        if (Math.abs(v - cls) <= 3) return cls;
+      }
+      return 0;
+    }
+
+    function fpsTargetChoices(fps, fromApi) {
+      if (Array.isArray(fromApi) && fromApi.length) {
+        return fromApi.map((n) => Number(n)).filter((n) => n >= 1);
+      }
+      const src = Number(fps);
+      if (!(src > 0)) return [24, 25, 30];
+      return FPS_TARGET_PRESETS.filter((t) => t < src - 0.5);
+    }
+
+    function selectedTargetFps(srcFps) {
+      const custom = $("fpsTargetCustom");
+      const sel = $("fpsTargetSelect");
+      const customVal = custom && custom.value !== "" ? Number(custom.value) : 0;
+      if (customVal >= 1 && customVal < (Number(srcFps) || 999) - 0.5) return Math.round(customVal);
+      const selVal = sel && sel.value ? Number(sel.value) : 0;
+      if (selVal >= 1) return Math.round(selVal);
+      const choices = fpsTargetChoices(srcFps);
+      return choices.indexOf(30) >= 0 ? 30 : (choices[0] || 30);
+    }
+
+    function fillFpsTargetSelect(fps, extra) {
+      const sel = $("fpsTargetSelect");
+      if (!sel) return;
+      const choices = fpsTargetChoices(fps, extra && extra.fps_targets);
+      const prev = sel.value;
+      sel.innerHTML = "";
+      choices.forEach((t) => {
+        const opt = document.createElement("option");
+        opt.value = String(t);
+        opt.textContent = String(t);
+        sel.appendChild(opt);
+      });
+      const prefer = Number(prev) || 30;
+      if (choices.indexOf(prefer) >= 0) sel.value = String(prefer);
+      else if (choices.indexOf(30) >= 0) sel.value = "30";
+      else if (choices.length) sel.value = String(choices[0]);
+    }
+
+    function updateFps30Button(extra) {
+      const wrap = $("modalFpsActions");
+      const btn = $("btnFps30");
+      const label = $("fpsMetaLabel");
+      const cancel = $("btnCancelFps30");
+      const targetWrap = $("fpsTargetWrap");
+      if (!wrap || !btn) {
+        clientLog("fps30_ui_missing", {
+          has_wrap: !!wrap,
+          has_btn: !!btn,
+        }, "WARN");
+        return;
+      }
+      // Prefer /api/info has_ffmpeg: status may not have arrived yet when player opens.
+      if (extra && typeof extra.has_ffmpeg === "boolean") {
+        state.hasFfmpeg = !!extra.has_ffmpeg;
+      }
+      const hasFfmpeg = !!state.hasFfmpeg;
+      const kind = (currentPlayKind || (extra && extra.kind) || "").toLowerCase();
+      const ext = String((extra && extra.ext) || "").toLowerCase();
+      const streamLike = kind === "m3u8" || kind === "ts_set" || ext === ".m3u8";
+      let w = Number((extra && extra.width) || (currentPlayMeta && currentPlayMeta.width) || 0);
+      let h = Number((extra && extra.height) || (currentPlayMeta && currentPlayMeta.height) || 0);
+      let fps = Number((extra && extra.fps) || (currentPlayMeta && currentPlayMeta.fps) || 0);
+      const video = $("player");
+      if (video && (video.videoWidth || video.videoHeight)) {
+        if (!w) w = video.videoWidth || 0;
+        if (!h) h = video.videoHeight || 0;
+      }
+      const apiCan = !!(extra && extra.can_fps30);
+      const apiHires = !!(extra && extra.is_hires);
+      const clientHires = isClientHires(w, h);
+      const hires = apiHires || clientHires;
+      const gate = (extra && extra.fps_gate) || "";
+      const fpsClass = Number((extra && extra.fps_class) || classifyHighFps(fps) || 0);
+      const busy = !!currentConvertJobId && currentPlayId === currentConvertVid;
+      const fpsBusy = busy && (currentConvertKind === "fps30" || (currentPlayMeta && currentPlayMeta.convertKind === "fps30"));
+      const eligible = !streamLike && (apiCan || (hasFfmpeg && hires && !!fpsClass));
+      const can = eligible && !busy;
+      // Hide whenever unusable; keep visible only while convertible or fps30 in progress.
+      const show = can || fpsBusy;
+      wrap.classList.toggle("hidden", !show);
+      btn.style.display = show ? "" : "none";
+      if (targetWrap) {
+        targetWrap.classList.toggle("visible", !!show && !fpsBusy);
+        const sel = $("fpsTargetSelect");
+        const custom = $("fpsTargetCustom");
+        if (sel) sel.disabled = !can;
+        if (custom) custom.disabled = !can;
+      }
+
+      clientLog("fps30_button_update", {
+        show,
+        can,
+        eligible,
+        busy,
+        fps_busy: fpsBusy,
+        hires,
+        api_can: apiCan,
+        api_hires: apiHires,
+        client_hires: clientHires,
+        has_ffmpeg: hasFfmpeg,
+        stream_like: streamLike,
+        width: w,
+        height: h,
+        fps,
+        fps_class: fpsClass,
+        gate: gate || "",
+        video_id: currentPlayId || "",
+        convert_job_id: currentConvertJobId || "",
+      }, "INFO");
+      try {
+        console.info("[fps30]", {
+          show, can, eligible, busy, fpsBusy, hires, hasFfmpeg, streamLike, w, h, fps, fpsClass, gate, apiCan,
+        });
+      } catch (_) {}
+      if (currentPlayMeta) {
+        currentPlayMeta.width = w;
+        currentPlayMeta.height = h;
+        currentPlayMeta.fps = fps;
+        currentPlayMeta.is_hires = hires;
+        currentPlayMeta.can_fps30 = eligible;
+        currentPlayMeta.fps_gate = eligible ? "ok" : (gate || "hidden");
+        currentPlayMeta.has_ffmpeg = hasFfmpeg;
+        currentPlayMeta.fps_class = fpsClass;
+        currentPlayMeta.fps_targets = fpsTargetChoices(fps, extra && extra.fps_targets);
+      }
+      if (!show) {
+        if (cancel) cancel.style.display = "none";
+        btn.disabled = true;
+        btn.classList.remove("fps-ready");
+        return;
+      }
+      fillFpsTargetSelect(fps, extra || (currentPlayMeta || {}));
+      const target = selectedTargetFps(fps);
+      const fpsShow = fps >= 1 ? Math.round(fps) : "?";
+      const res = (w && h) ? `${w}×${h}` : "检测中";
+      if (label) {
+        label.textContent = fpsBusy
+          ? `帧率转码 · ${res} · ${fpsShow}fps · 进行中`
+          : `帧率转码 · ${res} · ${fpsShow}fps · 可选目标帧率`;
+      }
+      if (!fpsBusy) btn.textContent = `${fpsShow}→${target}fps`;
+      btn.disabled = !can;
+      btn.classList.toggle("fps-ready", !!can);
+      btn.title = `仅降低帧率：把 ${res} ${fpsShow}fps 转为 ${target}fps（与转 MP4 / 修声音无关）`;
+      if (!busy && cancel) cancel.style.display = "none";
+    }
+
+    function bindFpsMetaFromVideo(video) {
+      if (!video) return;
+      const refresh = () => {
+        if (!currentPlayId) return;
+        updateFps30Button({
+          width: (currentPlayMeta && currentPlayMeta.width) || 0,
+          height: (currentPlayMeta && currentPlayMeta.height) || 0,
+          fps: (currentPlayMeta && currentPlayMeta.fps) || 0,
+          is_hires: !!(currentPlayMeta && currentPlayMeta.is_hires),
+          can_fps30: !!(currentPlayMeta && currentPlayMeta.can_fps30),
+          fps_gate: (currentPlayMeta && currentPlayMeta.fps_gate) || "",
+          has_ffmpeg: typeof (currentPlayMeta && currentPlayMeta.has_ffmpeg) === "boolean"
+            ? currentPlayMeta.has_ffmpeg
+            : state.hasFfmpeg,
+          kind: currentPlayKind || "",
+        });
+      };
+      video.addEventListener("loadedmetadata", refresh);
+      video.addEventListener("loadeddata", refresh);
+    }
+
     async function cancelConvertMp4() {
       if (!currentConvertJobId) return;
       try {
@@ -5927,49 +6367,92 @@
       }
     }
 
+    function convertPlayerAttached() {
+      return !!(
+        currentPlayId &&
+        currentConvertVid &&
+        currentPlayId === currentConvertVid &&
+        $("modal") &&
+        $("modal").classList.contains("open")
+      );
+    }
+
+    function finishConvertJobUi() {
+      currentConvertJobId = "";
+      currentConvertVid = "";
+      currentConvertKind = "";
+      if (currentPlayMeta) currentPlayMeta.convertKind = "";
+      setConvertUi(false);
+    }
+
     async function pollConvertJob(jobId, doneLabel) {
       stopConvertPoll();
       currentConvertJobId = jobId;
-      setConvertUi(true);
+      if (!currentConvertVid) currentConvertVid = currentPlayId || "";
+      if (convertPlayerAttached()) setConvertUi(true);
       const tick = async () => {
         try {
           const r = await fetch("/api/convert-mp4/job/" + encodeURIComponent(jobId));
           const data = await r.json();
+          const attached = convertPlayerAttached();
           if (!r.ok || !data.ok) {
             stopConvertPoll();
-            currentConvertJobId = "";
-            setConvertUi(false);
-            $("modalInfo").textContent = (data && data.msg) || "查询进度失败";
+            finishConvertJobUi();
+            if (attached) $("modalInfo").textContent = (data && data.msg) || "查询进度失败";
             return;
           }
           const st = data.status || "";
           const pct = data.percent != null ? data.percent : 0;
           const msg = data.msg || "";
+          const kind = data.kind || currentConvertKind || "";
+          if (kind) currentConvertKind = kind;
           if (st === "done") {
             stopConvertPoll();
-            currentConvertJobId = "";
-            setConvertUi(false);
-            $("modalInfo").textContent = msg || (doneLabel || "完成，已加入片库");
+            finishConvertJobUi();
+            if (attached) $("modalInfo").textContent = msg || (doneLabel || "完成，已加入片库");
             try { await refresh(); } catch (_) {}
+            if (!attached) {
+              alert(msg || (doneLabel || "转换完成，已加入片库"));
+            }
+            refreshQueueBadge();
             return;
           }
           if (st === "error" || st === "cancelled") {
             stopConvertPoll();
-            currentConvertJobId = "";
-            setConvertUi(false);
-            $("modalInfo").textContent = st === "cancelled" ? "已取消" : ("失败：" + (msg || "未知错误"));
+            finishConvertJobUi();
+            const failText = st === "cancelled" ? "已取消" : ("失败：" + (msg || "未知错误"));
+            if (attached) $("modalInfo").textContent = failText;
+            else alert(failText);
+            refreshQueueBadge();
             return;
           }
-          $("modalInfo").textContent = msg || (`处理中… ${pct}%`);
-          const btn = $("btnToMp4");
-          if (btn && btn.style.display !== "none") btn.textContent = pct ? `转换中 ${pct}%` : "转换中…";
-          const fixBtn = $("btnFixAudio");
-          if (fixBtn && fixBtn.style.display !== "none") fixBtn.textContent = pct ? `修复中 ${pct}%` : "修复中…";
+          if (attached) {
+            $("modalInfo").textContent = msg || (`处理中… ${pct}%`);
+            if (kind === "fps30") {
+              const fpsBtn = $("btnFps30");
+              if (fpsBtn) {
+                fpsBtn.style.display = "";
+                fpsBtn.textContent = `帧率转码 ${pct}%`;
+              }
+              const wrap = $("modalFpsActions");
+              if (wrap) wrap.classList.remove("hidden");
+              const label = $("fpsMetaLabel");
+              if (label) label.textContent = msg || (`帧率转码中 ${pct}%`);
+            } else if (kind === "fix_audio") {
+              const fixBtn = $("btnFixAudio");
+              if (fixBtn && fixBtn.style.display !== "none") fixBtn.textContent = `修复中 ${pct}%`;
+            } else {
+              const btn = $("btnToMp4");
+              if (btn && btn.style.display !== "none") btn.textContent = `转换中 ${pct}%`;
+            }
+          }
+          syncQueueBadgeFromJobs([{ ...data, id: jobId }]);
         } catch (e) {
-          stopConvertPoll();
-          currentConvertJobId = "";
-          setConvertUi(false);
-          $("modalInfo").textContent = "查询进度失败: " + e;
+          clientLog("convert_poll_error", {
+            job_id: jobId,
+            error: String(e),
+            player_open: convertPlayerAttached(),
+          }, "WARN");
         }
       };
       await tick();
@@ -5978,6 +6461,9 @@
 
     async function startConvertMp4() {
       if (!currentPlayId) return;
+      if (currentPlayMeta) currentPlayMeta.convertKind = "mp4";
+      currentConvertKind = "mp4";
+      currentConvertVid = currentPlayId;
       setConvertUi(true);
       const btn = $("btnToMp4");
       if (btn) btn.textContent = "转换中…";
@@ -5992,22 +6478,23 @@
         });
         const data = await r.json();
         if (!r.ok || !data.ok || !data.job_id) {
-          currentConvertJobId = "";
-          setConvertUi(false);
+          finishConvertJobUi();
           $("modalInfo").textContent = (data && data.msg) || "无法开始转换";
           return;
         }
         $("modalInfo").textContent = data.msg || "转换已开始…";
         await pollConvertJob(data.job_id, "转换完成，已加入片库");
       } catch (e) {
-        currentConvertJobId = "";
-        setConvertUi(false);
+        finishConvertJobUi();
         $("modalInfo").textContent = "请求失败: " + e;
       }
     }
 
     async function startFixAudio() {
       if (!currentPlayId) return;
+      if (currentPlayMeta) currentPlayMeta.convertKind = "fix_audio";
+      currentConvertKind = "fix_audio";
+      currentConvertVid = currentPlayId;
       setConvertUi(true);
       const btn = $("btnFixAudio");
       if (btn) btn.textContent = "修复中…";
@@ -6022,16 +6509,79 @@
         });
         const data = await r.json();
         if (!r.ok || !data.ok || !data.job_id) {
-          currentConvertJobId = "";
-          setConvertUi(false);
+          finishConvertJobUi();
           $("modalInfo").textContent = (data && data.msg) || "无法开始修复";
           return;
         }
         $("modalInfo").textContent = data.msg || "修复已开始…";
         await pollConvertJob(data.job_id, "声音已修复，已加入片库");
       } catch (e) {
-        currentConvertJobId = "";
-        setConvertUi(false);
+        finishConvertJobUi();
+        $("modalInfo").textContent = "请求失败: " + e;
+      }
+    }
+
+    async function startFps30() {
+      if (!currentPlayId) return;
+      if (!(currentPlayMeta && currentPlayMeta.can_fps30)) {
+        const reason = (currentPlayMeta && currentPlayMeta.fps_gate) || "条件不满足";
+        $("modalInfo").textContent = "当前不可帧率转码：" + reason;
+        clientLog("fps30_start_blocked", {
+          video_id: currentPlayId,
+          reason,
+        }, "WARN", currentOperationId);
+        return;
+      }
+      const srcFps = (currentPlayMeta && currentPlayMeta.fps) || 0;
+      const targetFps = selectedTargetFps(srcFps);
+      if (currentPlayMeta) currentPlayMeta.convertKind = "fps30";
+      currentConvertKind = "fps30";
+      currentConvertVid = currentPlayId;
+      clientLog("fps30_start_clicked", {
+        video_id: currentPlayId,
+        root: (currentPlayMeta && currentPlayMeta.root) || "",
+        width: (currentPlayMeta && currentPlayMeta.width) || 0,
+        height: (currentPlayMeta && currentPlayMeta.height) || 0,
+        fps: srcFps,
+        target_fps: targetFps,
+        can_fps30: !!(currentPlayMeta && currentPlayMeta.can_fps30),
+        fps_gate: (currentPlayMeta && currentPlayMeta.fps_gate) || "",
+      }, "INFO", currentOperationId);
+      setConvertUi(true);
+      const btn = $("btnFps30");
+      if (btn) btn.textContent = "帧率转码中…";
+      $("modalInfo").textContent = "正在提交帧率转码任务（→" + targetFps + "fps）…";
+      try {
+        const root = (currentPlayMeta && currentPlayMeta.root) || "";
+        const rootQ = root ? ("?root=" + encodeURIComponent(root)) : "";
+        const r = await fetch("/api/fps30/" + encodeURIComponent(currentPlayId) + rootQ, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target_fps: targetFps }),
+        });
+        const data = await r.json();
+        clientLog("fps30_start_response", {
+          video_id: currentPlayId,
+          http_ok: r.ok,
+          ok: !!(data && data.ok),
+          job_id: (data && data.job_id) || "",
+          msg: (data && data.msg) || "",
+          status: r.status,
+        }, r.ok && data && data.ok ? "INFO" : "ERROR", currentOperationId);
+        if (!r.ok || !data.ok || !data.job_id) {
+          finishConvertJobUi();
+          $("modalInfo").textContent = (data && data.msg) || "无法开始帧率转码";
+          return;
+        }
+        $("modalInfo").textContent = (data.msg || "帧率转码已开始…") + " 进度见上方按钮，也可打开「转换队列」。";
+        refreshQueueBadge();
+        await pollConvertJob(data.job_id, "帧率转码完成，已加入片库");
+      } catch (e) {
+        clientLog("fps30_start_exception", {
+          video_id: currentPlayId,
+          error: String(e),
+        }, "ERROR", currentOperationId);
+        finishConvertJobUi();
         $("modalInfo").textContent = "请求失败: " + e;
       }
     }
@@ -6076,21 +6626,10 @@
 
     function openPlayer(id, name, meta, ext, kind, segCount, extra) {
       destroyHls();
-      stopConvertPoll();
-      currentConvertJobId = "";
+      stopProbePoll();
+      // Convert jobs keep running after the player closes; do not cancel poll here.
       currentPlayId = id;
       if (!currentOperationId) beginPlaybackOperation(id, "direct", (extra && extra.root) || "");
-      currentPlayMeta = {
-        name: name || "",
-        folder: (extra && extra.folder) || "",
-        root: (extra && extra.root) || state.root || "",
-        rel: (extra && extra.rel) || "",
-      };
-      currentPlayKind = kind || "";
-      state.lastPlayId = id;
-      saveUiPrefs();
-      if ($("coverPanel")) $("coverPanel").style.display = "none";
-      $("modalTitle").textContent = name;
       const hard = !!(extra && extra.browser_hard);
       const audioHard = !!(extra && extra.audio_hard);
       const audioCodec = (extra && extra.audio_codec) || "";
@@ -6107,11 +6646,41 @@
         tip += (tip ? "\n" : "") +
           `浏览器可能听不到声音（音频为 ${audioCodec || "不兼容格式"}）。可点「修复声音」生成 AAC 版，或用「系统播放器」`;
       }
-      if (path) tip += (tip ? " · " : "") + path;
-      $("modalInfo").textContent = tip;
+      currentPlayMeta = {
+        name: name || "",
+        folder: (extra && extra.folder) || "",
+        root: (extra && extra.root) || state.root || "",
+        rel: (extra && extra.rel) || "",
+        path: path,
+        infoTip: tip,
+        width: (extra && extra.width) || 0,
+        height: (extra && extra.height) || 0,
+        fps: (extra && extra.fps) || 0,
+        video_codec: (extra && extra.video_codec) || "",
+        is_hires: !!(extra && extra.is_hires),
+        can_fps30: !!(extra && extra.can_fps30),
+        fps_gate: (extra && extra.fps_gate) || "",
+        audio_hard: audioHard,
+        audio_codec: audioCodec,
+        has_ffmpeg: typeof (extra && extra.has_ffmpeg) === "boolean"
+          ? !!extra.has_ffmpeg
+          : !!state.hasFfmpeg,
+        convertKind: (currentConvertVid === id && currentConvertKind) ? currentConvertKind : "",
+      };
+      if (typeof (extra && extra.has_ffmpeg) === "boolean") {
+        state.hasFfmpeg = !!extra.has_ffmpeg;
+      }
+      currentPlayKind = kind || "";
+      state.lastPlayId = id;
+      saveUiPrefs();
+      if ($("coverPanel")) $("coverPanel").style.display = "none";
+      $("modalTitle").textContent = name;
+      paintPlayerInfoTip();
       updateToMp4Button(kind, ext);
       updateFixAudioButton(extra);
+      updateFps30Button({ ...(extra || {}), kind, ext });
       const video = $("player");
+      bindFpsMetaFromVideo(video);
       video.onended = null;
       video.onerror = () => {
         $("modalInfo").textContent =
@@ -6127,9 +6696,23 @@
         rel: currentPlayMeta.rel,
         browser_hard: hard,
         audio_hard: audioHard,
+        width: currentPlayMeta.width || 0,
+        height: currentPlayMeta.height || 0,
+        fps: currentPlayMeta.fps || 0,
+        video_codec: currentPlayMeta.video_codec || "",
+        probe_pending: !!(extra && extra.probe_pending),
+        is_hires: !!currentPlayMeta.is_hires,
+        can_fps30: !!currentPlayMeta.can_fps30,
+        fps_gate: currentPlayMeta.fps_gate || "",
+        convert_job_id: currentConvertJobId || "",
+        convert_attached: convertPlayerAttached(),
       }, "INFO", currentOperationId);
       $("modal").classList.add("open");
       bindPlayProgress(video);
+      if (convertPlayerAttached()) setConvertUi(true);
+      if (extra && extra.probe_pending) {
+        startProbePoll(id, currentPlayMeta.root || "");
+      }
 
       if (kind === "m3u8") {
         const rootQ = playbackQuery(currentPlayMeta.root);
@@ -6205,12 +6788,30 @@
 
     function closePlayer() {
       const video = $("player");
-      clientLog("player_closed", mediaErrorFields(video), "INFO", currentOperationId);
+      const convertContinues = !!currentConvertJobId;
+      clientLog("player_closed", {
+        ...mediaErrorFields(video),
+        convert_job_id: currentConvertJobId || "",
+        convert_kind: currentConvertKind || "",
+        convert_continues: convertContinues,
+      }, "INFO", currentOperationId);
+      if (convertContinues) {
+        refreshQueueBadge();
+        try {
+          console.info("[convert] 播放页已关，转码继续在后台，进度看「转换队列」", {
+            job_id: currentConvertJobId,
+            kind: currentConvertKind,
+            vid: currentConvertVid,
+          });
+        } catch (_) {}
+      }
       if (currentPlayId && video) {
         savePlayProgress(currentPlayId, video.currentTime || 0, video.duration || 0, currentPlayMeta);
       }
       destroyHls();
-      stopConvertPoll();
+      stopProbePoll();
+      // Keep convert poll running so progress continues on the queue button
+      // even after the player is closed.
       if (playProgressTimer) {
         clearInterval(playProgressTimer);
         playProgressTimer = 0;
@@ -6219,7 +6820,6 @@
       currentOperationId = "";
       currentPlayMeta = { name: "", folder: "" };
       currentPlayKind = "";
-      currentConvertJobId = "";
       if ($("coverPanel")) $("coverPanel").style.display = "none";
       const btn = $("btnToMp4");
       if (btn) {
@@ -6235,6 +6835,17 @@
       }
       const cancel = $("btnCancelMp4");
       if (cancel) cancel.style.display = "none";
+      const fpsWrap = $("modalFpsActions");
+      if (fpsWrap) fpsWrap.classList.add("hidden");
+      const fpsBtn = $("btnFps30");
+      if (fpsBtn) {
+        fpsBtn.disabled = true;
+        fpsBtn.classList.remove("fps-ready");
+        fpsBtn.textContent = "60→30fps";
+        fpsBtn.style.display = "none";
+      }
+      const cancelFps = $("btnCancelFps30");
+      if (cancelFps) cancelFps.style.display = "none";
       video.onended = null;
       video.pause();
       video.removeAttribute("src");
@@ -6578,16 +7189,7 @@
           info.ext,
           info.kind || "",
           info.seg_count || 0,
-          {
-            path: info.path || "",
-            folder: info.folder || "",
-            root: info.root || state.root || "",
-            rel: info.rel || "",
-            browser_hard: !!info.browser_hard,
-            browser_ok: !!info.browser_ok,
-            audio_hard: !!info.audio_hard,
-            audio_codec: info.audio_codec || "",
-          }
+          playerExtraFromInfo(info, root)
         );
       } catch (err) {
         clientLog("video_open_failed", {
@@ -6647,16 +7249,7 @@
           info.ext,
           info.kind || "",
           info.seg_count || 0,
-          {
-            path: info.path || "",
-            folder: info.folder || "",
-            root: info.root || state.root || "",
-            rel: info.rel || "",
-            browser_hard: !!info.browser_hard,
-            browser_ok: !!info.browser_ok,
-            audio_hard: !!info.audio_hard,
-            audio_codec: info.audio_codec || "",
-          }
+          playerExtraFromInfo(info, root)
         );
       } catch (err) {
         clientLog("video_open_failed", {
@@ -7165,6 +7758,14 @@
     $("btnLocalOpen").addEventListener("click", () => localAction("open"));
     $("btnFixAudio").addEventListener("click", () => startFixAudio());
     $("btnToMp4").addEventListener("click", () => startConvertMp4());
+    if ($("btnFps30")) $("btnFps30").addEventListener("click", () => startFps30());
+    const refreshFpsBtnLabel = () => {
+      if (!currentPlayMeta || !currentPlayMeta.can_fps30) return;
+      updateFps30Button(currentPlayMeta);
+    };
+    if ($("fpsTargetSelect")) $("fpsTargetSelect").addEventListener("change", refreshFpsBtnLabel);
+    if ($("fpsTargetCustom")) $("fpsTargetCustom").addEventListener("input", refreshFpsBtnLabel);
+    if ($("btnCancelFps30")) $("btnCancelFps30").addEventListener("click", () => cancelConvertMp4());
     $("btnCancelMp4").addEventListener("click", () => cancelConvertMp4());
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
     $("btnReveal").addEventListener("click", () => localAction("reveal"));
@@ -7253,37 +7854,95 @@
 
     // —— 转换队列 ——
     let queuePollTimer = 0;
+    let queueBadgeTimer = 0;
+
+    function syncQueueBadgeFromJobs(jobs) {
+      const qbtn = $("queueBtn");
+      if (!qbtn) return;
+      const list = Array.isArray(jobs) ? jobs : [];
+      const active = list.filter((j) => j && (j.status === "queued" || j.status === "running"));
+      if (!active.length) {
+        qbtn.textContent = "转换队列";
+        return;
+      }
+      const running = active.find((j) => j.status === "running") || active[0];
+      const pct = running.percent != null ? Number(running.percent) : 0;
+      const kind =
+        running.kind === "fps30" ? "帧率"
+        : running.kind === "fix_audio" ? "修声音"
+        : "转MP4";
+      qbtn.textContent = active.length === 1
+        ? `队列 · ${kind} ${pct}%`
+        : `队列(${active.length}) · ${kind} ${pct}%`;
+    }
+
+    async function refreshQueueBadge() {
+      try {
+        const data = await fetch("/api/convert/queue").then((r) => r.json());
+        syncQueueBadgeFromJobs(data.jobs || []);
+      } catch (_) {}
+    }
+
     async function loadQueueModal() {
       const body = $("queueBody");
       if (!body) return;
       try {
-        const data = await fetch("/api/convert/queue").then((r) => r.json());
+        const r = await fetch("/api/convert/queue");
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+          body.textContent = "加载失败: " + ((data && data.msg) || ("HTTP " + r.status));
+          clientLog("queue_load_failed", {
+            http_ok: r.ok,
+            status: r.status,
+            msg: (data && data.msg) || "",
+          }, "ERROR");
+          return;
+        }
         const par = $("queueParallel");
         if (par && data.parallel) par.value = String(data.parallel);
         const jobs = data.jobs || [];
+        syncQueueBadgeFromJobs(jobs);
         if (!jobs.length) {
-          body.textContent = "队列为空。播放页可「转成 MP4 / 修复声音」；清理页可批量加入。";
+          body.textContent = "队列为空。播放页可「转成 MP4 / 修复声音 / 帧率转码」；清理页可批量加入。";
           return;
         }
+        const statusLabel = {
+          queued: "排队中",
+          running: "进行中",
+          done: "已完成",
+          error: "失败",
+          cancelled: "已取消",
+          cancelling: "取消中",
+        };
         body.innerHTML = jobs.map((j) => {
           const st = j.status || "";
           const canCancel = st === "queued" || st === "running";
-          const kind = j.kind === "fix_audio" ? "修声音" : "转MP4";
+          const kind =
+            j.kind === "fix_audio" ? "修声音"
+            : j.kind === "fps30" ? ("帧率转码" + (j.target_fps ? ("→" + j.target_fps) : ""))
+            : "转MP4";
+          const pct = j.percent != null ? Number(j.percent) : 0;
+          const stText = statusLabel[st] || st;
+          const pctText = (st === "running" || st === "queued" || pct > 0)
+            ? `${pct}%`
+            : "";
+          const bar = (st === "running" || st === "queued")
+            ? `<div class="queue-progress" title="${pct}%"><i style="width:${Math.max(2, Math.min(100, pct))}%"></i></div>`
+            : "";
           return `<div class="media-row">
             <div class="media-row-body">
-              <strong>${escapeHtml(j.name || j.vid)} <span style="opacity:.7;font-weight:400">${kind} · ${escapeHtml(st)} ${j.percent ? j.percent + "%" : ""}</span></strong>
+              <strong>${escapeHtml(j.name || j.vid)} <span style="opacity:.7;font-weight:400">${kind} · ${escapeHtml(stText)} ${pctText}</span></strong>
               <div class="media-row-meta">${escapeHtml(j.msg || "")}</div>
+              ${bar}
               <div class="media-row-actions">
                 ${canCancel ? `<button type="button" class="btn queue-cancel" data-jid="${escapeAttr(j.id)}">取消</button>` : ""}
               </div>
             </div>
           </div>`;
         }).join("");
-        const qbtn = $("queueBtn");
-        if (qbtn && data.active) qbtn.textContent = `队列(${data.active})`;
-        else if (qbtn) qbtn.textContent = "队列";
       } catch (err) {
         body.textContent = "加载失败: " + err;
+        clientLog("queue_load_exception", { error: String(err) }, "ERROR");
       }
     }
     function openQueueModal() {
@@ -7297,6 +7956,10 @@
       if (queuePollTimer) { clearInterval(queuePollTimer); queuePollTimer = 0; }
     }
     if ($("queueBtn")) $("queueBtn").addEventListener("click", openQueueModal);
+    if (!queueBadgeTimer) {
+      refreshQueueBadge();
+      queueBadgeTimer = setInterval(refreshQueueBadge, 2500);
+    }
     if ($("queueModalClose")) $("queueModalClose").addEventListener("click", closeQueueModal);
     if ($("queueModal")) $("queueModal").addEventListener("click", (e) => {
       if (e.target === $("queueModal")) closeQueueModal();

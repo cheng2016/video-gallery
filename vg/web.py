@@ -82,9 +82,17 @@ from vg.media import (
     _item_probe_path,
     _needs_metadata_probe,
     _video_file_for_thumb,
+    classify_high_fps,
+    fps_can_halve_to_30,
+    fps_gate_reason,
+    fps_target_choices,
+    is_2k_or_4k,
     make_thumbnail,
+    player_video_meta_pending,
     probe_media_info,
     save_thumbnail_jpeg,
+    schedule_player_video_meta_probe,
+    wants_player_video_meta,
 )
 from vg.roots import (
     filter_videos_by_lib,
@@ -3318,38 +3326,55 @@ def api_info(vid: str):
     # Skip if duration/audio is already in the index from a previous session.
     want_duration = probe_duration_enabled()
     want_audio = probe_audio_enabled()
-    need_probe = bool(STATE.get("ffmpeg")) and _needs_metadata_probe(
-        item,
-        want_duration=want_duration,
-        want_audio=want_audio,
+    kind = item.get("kind") or ""
+    ext = (item.get("ext") or "").lower()
+    # Resolution/fps/codec are probed in a background thread on player open.
+    stream_like = kind in ("m3u8", "ts_set") or ext == ".m3u8"
+    want_video_meta = wants_player_video_meta(item, stream_like=stream_like)
+    need_duration = bool(STATE.get("ffmpeg")) and want_duration and _needs_metadata_probe(
+        item, want_duration=True, want_audio=False
     )
+    need_audio = bool(STATE.get("ffmpeg")) and want_audio and _needs_metadata_probe(
+        item, want_duration=False, want_audio=True
+    )
+    need_video_meta = bool(STATE.get("ffmpeg")) and want_video_meta
+    # Duration/audio stay on-request (settings-gated). Video meta never blocks this handler.
+    need_probe = need_duration or need_audio
     metadata_changed = False
+    probe_pending = False
     if need_probe:
         path = _item_probe_path(item)
+        log(
+            f"[帧率探测] 打开播放页(同步时长/声音) vid={vid} "
+            f"need_duration={need_duration} need_audio={need_audio} "
+            f"path={path} exists={bool(path and path.is_file())}"
+        )
         if path and path.is_file() and path.suffix.lower() != ".m3u8":
             info = probe_media_info(
                 STATE["ffmpeg"],
                 path,
-                include_duration=want_duration,
-                include_audio=want_audio,
+                include_duration=need_duration,
+                include_audio=need_audio,
+                include_video_meta=False,
             )
             _apply_probe_to_item(
                 item,
                 info,
-                include_duration=want_duration,
-                include_audio=want_audio,
+                include_duration=need_duration,
+                include_audio=need_audio,
+                include_video_meta=False,
             )
             metadata_changed = True
         elif not path or not path.is_file():
-            kind = item.get("kind") or ""
-            if kind not in ("m3u8", "ts_set") and (item.get("ext") or "").lower() != ".m3u8":
+            if not stream_like:
                 item["probe_ver"] = PROBE_META_VER
-                if want_duration:
+                if need_duration:
                     item["probe_duration_done"] = True
-                if want_audio:
+                if need_audio:
                     item["probe_audio_done"] = True
                 item["bad"] = True
                 item["bad_reason"] = "文件不存在"
+                log(f"[帧率探测] 源文件不存在 vid={vid} path={path}")
                 diagnostic_emit(
                     "WARN",
                     "video_marked_bad",
@@ -3361,6 +3386,28 @@ def api_info(vid: str):
                     operation_id=getattr(g, "_diag_operation_id", ""),
                 )
                 metadata_changed = True
+    if need_video_meta:
+        started_bg = schedule_player_video_meta_probe(
+            vid, prefer_root or item.get("_lib_root") or item.get("root"), STATE["ffmpeg"]
+        )
+        probe_pending = True
+        log(
+            f"[帧率探测] 已交后台线程 vid={vid} started={started_bg} "
+            f"cached={item.get('width')}x{item.get('height')}@{item.get('fps')} "
+            f"vcodec={item.get('video_codec') or '-'}"
+        )
+    elif want_video_meta and not STATE.get("ffmpeg"):
+        log(f"[帧率探测] 跳过：未找到 ffmpeg vid={vid}")
+    elif player_video_meta_pending(vid, prefer_root or item.get("_lib_root") or item.get("root")):
+        probe_pending = True
+        log(f"[帧率探测] 后台进行中 vid={vid}")
+    else:
+        log(
+            f"[帧率探测] 使用缓存 vid={vid} "
+            f"{item.get('width')}x{item.get('height')}@{item.get('fps')} "
+            f"vcodec={item.get('video_codec') or '-'} "
+            f"done={bool(item.get('probe_video_meta_done'))}"
+        )
     if metadata_changed:
         try:
             save_library_item(item)
@@ -3379,8 +3426,6 @@ def api_info(vid: str):
         payload["root"] = item["_lib_root"]
     elif STATE.get("root"):
         payload["root"] = str(STATE["root"])
-    ext = (item.get("ext") or "").lower()
-    kind = item.get("kind") or ""
     payload["browser_ok"] = (
         kind in ("m3u8", "ts_set")
         or ext in BROWSER_FRIENDLY_EXTS
@@ -3388,6 +3433,55 @@ def api_info(vid: str):
     payload["browser_hard"] = ext in BROWSER_HARD_EXTS and kind not in ("m3u8", "ts_set")
     payload["audio_codec"] = item.get("audio_codec") or ""
     payload["audio_hard"] = bool(item.get("audio_hard"))
+    payload["video_codec"] = item.get("video_codec") or ""
+    width = item.get("width")
+    height = item.get("height")
+    fps = item.get("fps")
+    payload["width"] = width or 0
+    payload["height"] = height or 0
+    payload["fps"] = fps if fps is not None else None
+    hires = is_2k_or_4k(width, height)
+    payload["is_hires"] = hires
+    gate = fps_gate_reason(
+        width=width,
+        height=height,
+        fps=fps,
+        has_ffmpeg=bool(STATE.get("ffmpeg")),
+        stream_like=stream_like,
+    )
+    payload["fps_gate"] = gate
+    payload["can_fps30"] = gate == "ok"
+    payload["fps_class"] = classify_high_fps(fps)
+    payload["fps_targets"] = fps_target_choices(fps) if gate == "ok" else []
+    payload["fps_target_default"] = (
+        30 if 30 in payload["fps_targets"]
+        else (payload["fps_targets"][0] if payload["fps_targets"] else None)
+    )
+    # Client may open the player before /api/status has set state.hasFfmpeg;
+    # always mirror server ffmpeg presence on the info payload.
+    payload["has_ffmpeg"] = bool(STATE.get("ffmpeg"))
+    payload["probe_pending"] = bool(probe_pending)
+    payload["probe_video_meta_done"] = bool(item.get("probe_video_meta_done"))
+    log(
+        f"[帧率转码] 播放页判定 vid={vid} "
+        f"{width or 0}x{height or 0}@{fps} vcodec={payload['video_codec'] or '-'} "
+        f"hires={hires} can_fps30={payload['can_fps30']} gate={gate} "
+        f"fps_class={payload['fps_class']} targets={payload['fps_targets']} "
+        f"has_ffmpeg={payload['has_ffmpeg']} probe_pending={probe_pending}"
+    )
+    diagnostic_emit(
+        "INFO",
+        "fps30_gate",
+        force=True,
+        video_id=vid,
+        width=width or 0,
+        height=height or 0,
+        fps=fps,
+        is_hires=hires,
+        can_fps30=payload["can_fps30"],
+        gate=gate,
+        operation_id=getattr(g, "_diag_operation_id", ""),
+    )
     if kind == "ts_set":
         payload["seg_count"] = item.get("seg_count") or len(item.get("segments") or [])
         payload["kind"] = "ts_set"
@@ -3408,6 +3502,8 @@ def api_info(vid: str):
         browser_hard=payload["browser_hard"],
         need_probe=need_probe,
         metadata_changed=metadata_changed,
+        probe_pending=probe_pending,
+        video_codec=payload.get("video_codec") or "",
         local_path=local,
         local_exists=bool(local and local.is_file()),
         operation_id=getattr(g, "_diag_operation_id", ""),

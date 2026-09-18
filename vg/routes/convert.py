@@ -152,6 +152,77 @@ def register(
             "status": "queued",
         })
 
+    @app.route("/api/fps30/<vid>", methods=["POST"])
+    def api_fps30_start(vid: str):
+        """2K/4K 60/90/120fps → 自定义低帧率（独立于转格式 / 修声音）。"""
+        from vg.media import normalize_target_fps
+        from vg.util import log as _log
+
+        prefer_root = (request.args.get("root") or "").strip() or None
+        body = request.get_json(silent=True) or {}
+        target_raw = body.get("target_fps")
+        if target_raw is None:
+            target_raw = request.args.get("target_fps")
+        _log(f"[帧率转码] API 请求 vid={vid} root={prefer_root or ''} target_fps={target_raw}")
+        if not re.fullmatch(r"[a-f0-9]{16}", vid or ""):
+            _log(f"[帧率转码] 拒绝：无效 id={vid}")
+            return jsonify({"ok": False, "msg": "无效 id"}), 400
+        if not STATE.get("ffmpeg"):
+            _log("[帧率转码] 拒绝：未找到 ffmpeg")
+            return jsonify({"ok": False, "msg": "未找到 ffmpeg，请先安装后再试"}), 400
+        mounts = repository.mounted_roots()
+        if not (STATE.get("root") or mounts):
+            _log("[帧率转码] 拒绝：尚未选择盘符")
+            return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
+        if len(mounts) > 1 and not prefer_root:
+            _log("[帧率转码] 拒绝：多盘未指定 root")
+            return jsonify({"ok": False, "msg": "多盘帧率转码必须指定 root"}), 400
+        item = repository.find_video(vid, prefer_root=prefer_root)
+        if not item:
+            _log(f"[帧率转码] 拒绝：未找到视频 vid={vid}")
+            return jsonify({"ok": False, "msg": "未找到视频"}), 404
+        kind = item.get("kind") or ""
+        if kind in ("m3u8", "ts_set") or (
+            item.get("ext") or ""
+        ).lower() == ".m3u8":
+            _log(f"[帧率转码] 拒绝：流媒体 vid={vid} kind={kind}")
+            return jsonify({"ok": False, "msg": "流媒体请先转成文件后再做帧率转码"}), 400
+        src_fps = item.get("fps")
+        target_fps = normalize_target_fps(src_fps, target_raw, default=30) if src_fps else None
+        if src_fps is not None and not target_fps:
+            _log(f"[帧率转码] 拒绝：目标帧率无效 src={src_fps} want={target_raw}")
+            return jsonify({"ok": False, "msg": "目标帧率必须低于源帧率"}), 400
+        if target_fps is None:
+            try:
+                target_fps = int(round(float(target_raw))) if target_raw is not None else 30
+            except (TypeError, ValueError):
+                target_fps = 30
+        item_root = (
+            item.get("_lib_root")
+            or item.get("root")
+            or prefer_root
+            or ""
+        ).strip()
+        ok, msg, job_id = enqueue_convert_job(
+            vid,
+            kind="fps30",
+            name=item.get("name") or "",
+            root=item_root or None,
+            target_fps=target_fps,
+        )
+        _log(
+            f"[帧率转码] 入队结果 ok={ok} job_id={job_id} vid={vid} "
+            f"name={item.get('name') or ''} target={target_fps} "
+            f"{item.get('width')}x{item.get('height')}@{item.get('fps')} msg={msg}"
+        )
+        return jsonify({
+            "ok": ok,
+            "job_id": job_id,
+            "msg": msg,
+            "status": "queued",
+            "target_fps": target_fps,
+        })
+
     @app.route("/api/convert/queue")
     def api_convert_queue():
         jobs = list_convert_jobs(50)

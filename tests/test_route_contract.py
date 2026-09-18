@@ -26,6 +26,7 @@ EXPECTED_ROUTES = {
     ("/api/export-static/reveal", frozenset({"POST"})),
     ("/api/export-static/status", frozenset({"GET"})),
     ("/api/fix-audio/<vid>", frozenset({"POST"})),
+    ("/api/fps30/<vid>", frozenset({"POST"})),
     ("/api/info/<vid>", frozenset({"GET"})),
     ("/api/local/<vid>", frozenset({"POST"})),
     ("/api/privacy", frozenset({"GET", "POST"})),
