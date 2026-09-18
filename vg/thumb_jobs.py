@@ -306,14 +306,18 @@ def submit_thumbnail_job(
     work: Callable[[], bool],
     *,
     priority: int = THUMB_PRIORITY_BATCH,
+    force: bool = False,
 ) -> Future:
     """Queue one deduplicated job; lower priority numbers run first.
 
     A visible request may promote a batch job that is still waiting.  The old
     queue entry is harmless: workers ignore it after the promoted entry starts.
+    ``force=True`` skips the recent-failure cooldown (explicit cover retry).
     """
     _ensure_workers()
     with _jobs_lock:
+        if force:
+            _failed_until.pop(key, None)
         until = _failed_until.get(key)
         if until and until > time.monotonic():
             from vg.diagnostics import aggregate

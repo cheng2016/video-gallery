@@ -570,6 +570,41 @@ class MetadataSettingsTests(unittest.TestCase):
             finally:
                 STATE["ffmpeg"] = old_ffmpeg
 
+    def test_enabling_duration_probe_via_privacy_starts_enrichment(self) -> None:
+        old_videos = STATE.get("videos")
+        STATE["videos"] = [{"id": "a" * 16, "rel": "a.mp4", "size": 5_000_000}]
+        try:
+            before = {
+                "encrypt_thumbs": True,
+                "cache_location": "program",
+                "probe_video_duration": False,
+                "probe_video_audio": False,
+                "full_logging": False,
+                "cache_path": ".",
+                "cache_hint": "",
+                "writable_root": ".",
+            }
+            after = dict(before)
+            after["probe_video_duration"] = True
+            with (
+                mock.patch("vg.routes.privacy.set_privacy", return_value=after),
+                mock.patch(
+                    "vg.routes.privacy.privacy_snapshot",
+                    side_effect=[before, after],
+                ),
+                mock.patch("vg.media.start_metadata_enrichment") as start,
+            ):
+                response = web.app.test_client().post(
+                    "/api/privacy",
+                    json={"probe_video_duration": True},
+                )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["ok"])
+            start.assert_called_once()
+            self.assertIn("后台补全", response.get_json()["msg"])
+        finally:
+            STATE["videos"] = old_videos
+
 
 if __name__ == "__main__":
     unittest.main()

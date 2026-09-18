@@ -1122,14 +1122,21 @@ def save_catalog(
                 )
                 _meta_set(conn, "updated", datetime.now().isoformat())
                 conn.execute("COMMIT")
-                from vg.diagnostics import perf
+                from vg.diagnostics import note_catalog_db_op, perf
 
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
                 perf(
                     "sqlite_save_catalog",
-                    (time.perf_counter() - started) * 1000.0,
+                    elapsed_ms,
                     force=True,
                     rows=len(videos),
                     cache=cache,
+                )
+                note_catalog_db_op(
+                    "save_catalog",
+                    cache=cache,
+                    rows=len(videos),
+                    elapsed_ms=elapsed_ms,
                 )
                 return True
             except Exception:
@@ -1245,13 +1252,20 @@ def upsert_catalog_videos(
                     _meta_set(conn, "updated", datetime.now().isoformat())
                     _meta_set(conn, "root", root_s)
                 conn.execute("COMMIT")
-                from vg.diagnostics import perf
+                from vg.diagnostics import note_catalog_db_op, perf
 
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
                 perf(
                     "sqlite_upsert",
-                    (time.perf_counter() - started) * 1000.0,
+                    elapsed_ms,
                     rows=changed,
                     cache=cache,
+                )
+                note_catalog_db_op(
+                    "upsert",
+                    cache=cache,
+                    rows=changed,
+                    elapsed_ms=elapsed_ms,
                 )
                 return changed
             except Exception:

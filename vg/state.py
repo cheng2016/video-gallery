@@ -19,12 +19,15 @@ STATE: dict = {
     "thumb_progress": "",
     "meta_progress": "",
     "ffmpeg": None,
+    "ffmpeg_rm": None,  # None=未探测, True/False=已探测
+    "ffmpeg_rm_pending": False,
     "updating": False,  # 后台增量中
     "exporting": False,
     "export_ok": None,
     "export_msg": "",
     "export_path": "",
     "convert_jobs": {},  # job_id -> job dict
+    "cover_jobs": {},  # job_id -> cover-seek job dict
     "bind_host": "127.0.0.1",
     "bind_port": 8765,
     "lan_share": False,

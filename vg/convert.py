@@ -16,10 +16,14 @@ from vg.cache import thumb_file_ready, thumb_path, thumb_version
 from vg.catalog import build_tree, rebuild_indexes
 from vg.catalog_repository import find_video_by_id
 from vg.config import (
+    BROWSER_HARD_EXTS,
     CONVERT_MAX_PARALLEL,
     PROBE_META_VER,
+    RM_EXTS,
+    RM_UNAVAILABLE_MSG,
     SEGMENT_FOLDER_GENERIC,
     THUMB_EXT,
+    TRANSCODE_OUT_EXTS,
     VGDATA_DIR,
 )
 from vg.disk_libs import (
@@ -117,7 +121,166 @@ def _convert_job_public(job: dict) -> dict:
         "out_path": job.get("out_path") or "",
         "added_id": job.get("added_id") or "",
         "target_fps": int(job.get("target_fps") or 0) or None,
+        "out_ext": job.get("out_ext") or "",
+        "scale": int(job.get("scale") or 0) or 0,
+        "video_encoder": job.get("video_encoder") or "",
     }
+
+
+def convert_kind_label(job: dict) -> str:
+    kind = (job.get("kind") or "mp4").strip().lower()
+    if kind == "fix_audio":
+        return "修声音"
+    if kind == "fps30":
+        target = job.get("target_fps")
+        return f"降帧→{target}" if target else "降帧"
+    if kind == "transcode":
+        parts: list[str] = []
+        if job.get("target_fps"):
+            parts.append(f"降帧→{job['target_fps']}")
+        if job.get("scale"):
+            parts.append(f"压缩{job['scale']}p")
+        enc = (job.get("video_encoder") or "auto").lower()
+        if enc in ("h264", "h265"):
+            parts.append(enc.upper())
+        ext = (job.get("out_ext") or "").lstrip(".")
+        if ext:
+            parts.append(f"转{ext}")
+        return " · ".join(parts) or "转换"
+    return "转封装"
+
+
+def probe_ffmpeg_realmedia(ffmpeg: str | None) -> bool:
+    """True when this ffmpeg binary lists a RealMedia demuxer."""
+    if not ffmpeg:
+        return False
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-demuxers"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=12,
+            creationflags=flags,
+        )
+    except Exception as exc:
+        log(f"[ffmpeg] 探测 RealMedia demuxer 失败: {exc}")
+        return False
+    blob = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    return "realmedia" in blob or "real_media" in blob
+
+
+_rm_probe_lock = threading.Lock()
+
+
+def schedule_ffmpeg_rm_probe() -> bool:
+    """Probe RealMedia demuxer in a daemon thread. Returns True if still unknown/in flight."""
+    if not STATE.get("ffmpeg"):
+        STATE["ffmpeg_rm"] = False
+        STATE["ffmpeg_rm_pending"] = False
+        return False
+    if STATE.get("ffmpeg_rm") is not None:
+        return False
+    with _rm_probe_lock:
+        if STATE.get("ffmpeg_rm") is not None:
+            return False
+        if STATE.get("ffmpeg_rm_pending"):
+            return True
+        STATE["ffmpeg_rm_pending"] = True
+
+    def _run() -> None:
+        ffmpeg = STATE.get("ffmpeg")
+        try:
+            ok = probe_ffmpeg_realmedia(ffmpeg)
+            STATE["ffmpeg_rm"] = bool(ok)
+            log(f"[ffmpeg] 后台探测 RealMedia demuxer={'可用' if ok else '不可用'}")
+        except Exception as exc:
+            STATE["ffmpeg_rm"] = False
+            log(f"[ffmpeg] 后台探测 RealMedia 失败: {exc}")
+        finally:
+            STATE["ffmpeg_rm_pending"] = False
+
+    threading.Thread(target=_run, daemon=True, name="ffmpeg-rm-probe").start()
+    return True
+
+
+def default_transcode_out_ext(item: dict) -> str:
+    kind = (item.get("kind") or "").lower()
+    ext = (item.get("ext") or "").lower()
+    if kind in ("m3u8", "ts_set") or ext in {".m3u8", ".ts"} or ext in BROWSER_HARD_EXTS:
+        return "mp4"
+    plain = ext.lstrip(".")
+    if plain in TRANSCODE_OUT_EXTS:
+        return plain
+    return "mp4"
+
+
+def resolve_transcode_out_ext(requested: str | None, item: dict, encoder: str) -> tuple[str, str]:
+    """Return (out_ext, note). WebM + H.264/H.265 is remapped to mkv."""
+    allowed = set(TRANSCODE_OUT_EXTS)
+    req = (requested or "").lstrip(".").lower()
+    if req not in allowed:
+        req = default_transcode_out_ext(item)
+    note = ""
+    enc = (encoder or "auto").strip().lower()
+    if req == "webm" and enc in {"h264", "h265"}:
+        note = "WebM 不适合 H.264/H.265，已改为 MKV"
+        req = "mkv"
+    return req, note
+
+
+def normalize_video_encoder(raw) -> str:
+    enc = str(raw or "auto").strip().lower()
+    if enc in ("auto", "h264", "h265"):
+        return enc
+    return "auto"
+
+
+def normalize_scale(raw, height=None) -> int:
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    if value not in (0, 720, 1080):
+        return 0
+    if value and height is not None:
+        try:
+            h = int(height)
+        except (TypeError, ValueError):
+            return value
+        if h <= value + 8:
+            return 0
+    return value
+
+
+def _ffmpeg_popen_flags() -> int:
+    flags = 0
+    if sys.platform == "win32":
+        flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+    return flags
+
+
+def _humanize_ffmpeg_err(err: str, *, src_ext: str = "") -> str:
+    text = (err or "").strip()
+    low = text.lower()
+    ext = (src_ext or "").lower()
+    if ext in RM_EXTS or "realmedia" in low or "rmvb" in low:
+        markers = (
+            "unknown format",
+            "invalid data",
+            "demuxer",
+            "decoder",
+            "not found",
+            "could not find codec",
+            "probe",
+            "failed to open",
+        )
+        if any(m in low for m in markers) or not text:
+            return RM_UNAVAILABLE_MSG
+    return text[:400] or "ffmpeg 失败"
 
 
 def list_convert_jobs(limit: int = 40) -> list[dict]:
@@ -136,26 +299,40 @@ def enqueue_convert_job(
     name: str = "",
     root: str | None = None,
     target_fps: int | None = None,
+    out_ext: str | None = None,
+    scale: int | None = None,
+    video_encoder: str | None = None,
 ) -> tuple[bool, str, str]:
-    """Enqueue convert/fix-audio/fps30 job. Returns (ok, msg, job_id)."""
+    """Enqueue convert/fix-audio/fps30/transcode job. Returns (ok, msg, job_id)."""
     kind = (kind or "mp4").strip().lower()
-    if kind not in ("mp4", "fix_audio", "fps30"):
+    if kind not in ("mp4", "fix_audio", "fps30", "transcode"):
         return False, "未知任务类型", ""
     stored_target = None
-    if kind == "fps30":
+    if kind in ("fps30", "transcode") and target_fps is not None and target_fps != "":
         try:
-            stored_target = int(round(float(target_fps if target_fps is not None else 30)))
+            stored_target = int(round(float(target_fps)))
         except (TypeError, ValueError):
-            stored_target = 30
+            return False, "目标帧率无效", ""
         if stored_target < 1 or stored_target > 119:
             return False, "目标帧率无效（需 1–119）", ""
+    elif kind == "fps30":
+        stored_target = 30
+    stored_encoder = normalize_video_encoder(video_encoder) if kind == "transcode" else ""
+    stored_scale = normalize_scale(scale) if kind == "transcode" else 0
+    stored_ext = ""
+    if kind == "transcode":
+        ext = (out_ext or "mp4").lstrip(".").lower()
+        stored_ext = ext if ext in TRANSCODE_OUT_EXTS else "mp4"
+        if stored_ext == "webm" and stored_encoder in {"h264", "h265"}:
+            stored_ext = "mkv"
     try:
         root = str(Path(root).expanduser().resolve()) if root else None
     except OSError:
         root = str(root).strip() if root else None
     log(
         f"[转换队列] 入队请求 kind={kind} vid={vid} root={root or ''} "
-        f"name={name or ''} target_fps={stored_target or '-'}"
+        f"name={name or ''} target_fps={stored_target or '-'} "
+        f"out_ext={stored_ext or '-'} scale={stored_scale or 0} encoder={stored_encoder or '-'}"
     )
     with _convert_lock:
         for jid, job in STATE["convert_jobs"].items():
@@ -167,6 +344,13 @@ def enqueue_convert_job(
             same_target = True
             if kind == "fps30":
                 same_target = int(job.get("target_fps") or 30) == stored_target
+            elif kind == "transcode":
+                same_target = (
+                    int(job.get("target_fps") or 0) == int(stored_target or 0)
+                    and (job.get("out_ext") or "") == stored_ext
+                    and int(job.get("scale") or 0) == int(stored_scale or 0)
+                    and (job.get("video_encoder") or "auto") == (stored_encoder or "auto")
+                )
             if (
                 job.get("vid") == vid
                 and job_root.casefold() == (root or "").casefold()
@@ -191,6 +375,9 @@ def enqueue_convert_job(
             "proc": None,
             "created": time.time(),
             "target_fps": stored_target,
+            "out_ext": stored_ext,
+            "scale": stored_scale,
+            "video_encoder": stored_encoder,
         }
     pump_convert_queue()
     return True, "已加入转换队列", job_id
@@ -223,6 +410,8 @@ def pump_convert_queue() -> None:
             target = _fix_audio_worker
         elif kind == "fps30":
             target = _fps30_worker
+        elif kind == "transcode":
+            target = _transcode_worker
         else:
             target = _convert_worker
         threading.Thread(
@@ -303,7 +492,8 @@ def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> di
         st = out_path.stat()
     except (ValueError, OSError):
         return None
-    if is_too_small_video(".mp4", st.st_size):
+    out_ext = (out_path.suffix or ".mp4").lower()
+    if is_too_small_video(out_ext, st.st_size):
         return None
 
     vid = video_id(rel)
@@ -314,7 +504,7 @@ def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> di
         "filename": out_path.name,
         "rel": rel,
         "folder": folder,
-        "ext": ".mp4",
+        "ext": out_ext,
         "size": st.st_size,
         "size_h": format_size(st.st_size),
         "mtime": st.st_mtime,
@@ -399,6 +589,7 @@ def _run_ffmpeg_attempts(
     out_path: Path,
     duration_hint: float | None = None,
     log_tag: str = "转MP4",
+    src_ext: str = "",
 ) -> tuple[bool, str]:
     """按顺序尝试多组 ffmpeg 参数。返回 (ok, msg)。"""
     last_err = ""
@@ -425,7 +616,7 @@ def _run_ffmpeg_attempts(
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
+                creationflags=_ffmpeg_popen_flags(),
             )
             with _convert_lock:
                 job = STATE["convert_jobs"].get(job_id)
@@ -484,7 +675,7 @@ def _run_ffmpeg_attempts(
             log(f"[{log_tag}] {label}异常: {e}")
             if _convert_job_cancelled(job_id):
                 return False, "已取消"
-    return False, last_err or "转换失败"
+    return False, _humanize_ffmpeg_err(last_err or "转换失败", src_ext=src_ext)
 
 
 def _run_ffmpeg_convert(
@@ -599,7 +790,10 @@ def _prepare_convert_input(item: dict) -> tuple[list[str], Path, Path | None, fl
         tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return ["-f", "concat", "-safe", "0", "-i", str(tmp_path)], out_dir, tmp_path, duration_f
 
-    raise ValueError("仅支持 m3u8 / TS 合集")
+    src = resolve_item_rel(item, item.get("rel") or "")
+    if not src or not src.is_file():
+        raise FileNotFoundError("源文件不存在")
+    return ["-i", str(src)], src.parent, None, duration_f
 
 
 def _convert_mp4_base_name(item: dict) -> str:
@@ -714,6 +908,66 @@ def _fps30_video_encode_args(video_codec: str | None) -> tuple[str, list[str]]:
     return "H.264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
 
 
+def _video_encode_args(encoder: str, src_codec: str = "", out_ext: str = "mp4") -> tuple[str, list[str]]:
+    enc = normalize_video_encoder(encoder)
+    ext = (out_ext or "mp4").lstrip(".").lower()
+    if enc == "h264":
+        return "H.264", ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+    if enc == "h265":
+        return "H.265", ["-c:v", "libx265", "-preset", "medium", "-crf", "28", "-tag:v", "hvc1"]
+    if ext == "webm":
+        return "VP9", ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0"]
+    return _fps30_video_encode_args(src_codec)
+
+
+def _vf_args(target_fps: int | None = None, scale: int = 0) -> list[str]:
+    filters: list[str] = []
+    if target_fps:
+        filters.append(f"fps={int(target_fps)}")
+    if scale:
+        filters.append(f"scale=-2:{int(scale)}")
+    if not filters:
+        return []
+    return ["-vf", ",".join(filters)]
+
+
+def _container_tail(out_ext: str) -> list[str]:
+    ext = (out_ext or "mp4").lstrip(".").lower()
+    if ext in {"mp4", "mov"}:
+        return ["-movflags", "+faststart"]
+    return []
+
+
+def _audio_reencode_args(out_ext: str) -> list[str]:
+    ext = (out_ext or "mp4").lstrip(".").lower()
+    if ext == "webm":
+        return ["-c:a", "libopus", "-b:a", "128k"]
+    return ["-c:a", "aac", "-b:a", "192k"]
+
+
+def _transcode_stem_suffix(
+    *,
+    encoder: str,
+    target_fps: int | None,
+    scale: int,
+    out_ext: str,
+) -> str:
+    bits: list[str] = []
+    enc = normalize_video_encoder(encoder)
+    if enc != "auto":
+        bits.append(enc)
+    if scale:
+        bits.append(f"{int(scale)}p")
+    if target_fps:
+        bits.append(f"{int(target_fps)}fps")
+    if not bits:
+        bits.append("conv")
+    ext = (out_ext or "mp4").lstrip(".")
+    if ext and ext != "mp4":
+        bits.append(ext)
+    return "_".join(bits)
+
+
 def _run_ffmpeg_fps30(
     job_id: str,
     ffmpeg: str,
@@ -782,6 +1036,219 @@ def _run_ffmpeg_fps30(
             )
         )
     return _run_ffmpeg_attempts(job_id, ffmpeg, attempts, out_path, duration_hint, log_tag="帧率转码")
+
+
+def _run_ffmpeg_transcode(
+    job_id: str,
+    ffmpeg: str,
+    input_args: list[str],
+    out_path: Path,
+    duration_hint: float | None = None,
+    *,
+    encoder: str = "auto",
+    src_codec: str = "",
+    out_ext: str = "mp4",
+    target_fps: int | None = None,
+    scale: int = 0,
+    src_ext: str = "",
+    force_reencode: bool = False,
+) -> tuple[bool, str]:
+    vf = _vf_args(target_fps, scale)
+    must_reencode = bool(vf) or force_reencode or normalize_video_encoder(encoder) != "auto"
+    if (out_ext or "").lstrip(".").lower() == "webm" and normalize_video_encoder(encoder) == "auto":
+        must_reencode = True
+    v_label, v_args = _video_encode_args(encoder, src_codec, out_ext)
+    container = _container_tail(out_ext)
+    audio_re = _audio_reencode_args(out_ext)
+    attempts: list[tuple[str, list[str]]] = []
+    if not must_reencode:
+        attempts.append((
+            "封装",
+            input_args + ["-c", "copy", *container, str(out_path)],
+        ))
+        attempts.append((
+            "封装(音频重编码)",
+            input_args + ["-c:v", "copy", *audio_re, *container, str(out_path)],
+        ))
+    attempts.append((
+        f"转码({v_label})",
+        input_args + ["-map", "0:v:0", "-map", "0:a?", *vf, *v_args, "-c:a", "copy", *container, str(out_path)],
+    ))
+    attempts.append((
+        f"转码({v_label}+音频)",
+        input_args + ["-map", "0:v:0", "-map", "0:a?", *vf, *v_args, *audio_re, *container, str(out_path)],
+    ))
+    return _run_ffmpeg_attempts(
+        job_id, ffmpeg, attempts, out_path, duration_hint, log_tag="转换", src_ext=src_ext,
+    )
+
+
+def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
+    tmp_path: Path | None = None
+    with _convert_lock:
+        job = (STATE.get("convert_jobs") or {}).get(job_id) or {}
+        requested_fps = job.get("target_fps")
+        requested_scale = int(job.get("scale") or 0)
+        requested_ext = job.get("out_ext") or ""
+        requested_encoder = job.get("video_encoder") or "auto"
+    log(
+        f"[转换] 开始 job={job_id} vid={vid} fps={requested_fps or '-'} "
+        f"scale={requested_scale or 0} ext={requested_ext or '-'} encoder={requested_encoder}"
+    )
+    try:
+        item = find_video_by_id(vid, prefer_root=root)
+        if not item:
+            _convert_job_update(job_id, status="error", msg="未找到视频", percent=0)
+            return
+        ffmpeg = STATE.get("ffmpeg")
+        if not ffmpeg:
+            _convert_job_update(job_id, status="error", msg="未找到 ffmpeg", percent=0)
+            return
+        src_ext = (item.get("ext") or "").lower()
+        if src_ext in RM_EXTS:
+            if STATE.get("ffmpeg_rm") is None:
+                STATE["ffmpeg_rm"] = probe_ffmpeg_realmedia(ffmpeg)
+                STATE["ffmpeg_rm_pending"] = False
+                log(f"[转换] 任务内补探测 RealMedia={STATE.get('ffmpeg_rm')} job={job_id}")
+            if not STATE.get("ffmpeg_rm"):
+                _convert_job_update(job_id, status="error", msg=RM_UNAVAILABLE_MSG, percent=0)
+                return
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+            return
+        encoder = normalize_video_encoder(requested_encoder)
+        out_ext, remap_note = resolve_transcode_out_ext(requested_ext, item, encoder)
+        if remap_note:
+            log(f"[转换] {remap_note} job={job_id}")
+        _convert_job_update(job_id, status="running", msg="正在分析片源…", percent=0)
+        input_args, out_dir, tmp_path, duration_hint = _prepare_convert_input(item)
+        src = resolve_item_rel(item, item.get("rel") or "")
+        info = {}
+        if src and src.is_file():
+            info = probe_media_info(
+                ffmpeg,
+                src,
+                include_duration=True,
+                include_audio=False,
+                include_video_meta=True,
+            )
+            if info.get("ok"):
+                _apply_probe_to_item(
+                    item,
+                    info,
+                    include_duration=True,
+                    include_audio=False,
+                    include_video_meta=True,
+                )
+        fps = info.get("fps") if info.get("fps") is not None else item.get("fps")
+        height = info.get("height") or item.get("height")
+        video_codec = info.get("video_codec") or item.get("video_codec") or ""
+        target = None
+        if requested_fps:
+            target = normalize_target_fps(fps, requested_fps) if fps else int(requested_fps)
+            if fps and not target:
+                _convert_job_update(
+                    job_id,
+                    status="error",
+                    msg=f"目标帧率必须低于源帧率（源 {fps}）",
+                    percent=0,
+                )
+                return
+        scale = normalize_scale(requested_scale, height)
+        if requested_scale in (720, 1080) and not scale:
+            _convert_job_update(
+                job_id,
+                status="error",
+                msg="源画面已小于所选分辨率",
+                percent=0,
+            )
+            return
+        if not duration_hint:
+            duration_hint = info.get("duration") or _probe_input_duration(ffmpeg, input_args)
+        if duration_hint:
+            try:
+                duration_hint = float(duration_hint)
+            except (TypeError, ValueError):
+                duration_hint = None
+        item_root = root_for_item(item)
+        if not _path_under_root(out_dir, item_root):
+            _convert_job_update(job_id, status="error", msg="输出目录不在扫描根下", percent=0)
+            return
+        suffix = _transcode_stem_suffix(
+            encoder=encoder, target_fps=target, scale=scale, out_ext=out_ext,
+        )
+        src_name = src.stem if src else _convert_mp4_base_name(item)
+        out_path = _unique_out_path(out_dir, f"{src_name}_{suffix}", f".{out_ext}")
+        if not _path_under_root(out_path, item_root):
+            _convert_job_update(job_id, status="error", msg="输出路径非法", percent=0)
+            return
+        force_reencode = src_ext in RM_EXTS
+        msg_bits = []
+        if target:
+            msg_bits.append(f"{int(round(float(fps))) if fps else '?'}→{target}fps")
+        if scale:
+            msg_bits.append(f"{scale}p")
+        msg_bits.append(out_ext)
+        _convert_job_update(
+            job_id,
+            status="running",
+            msg=("开始转换（" + " ".join(msg_bits) + "）…") + (f" {remap_note}" if remap_note else ""),
+            percent=0,
+            out_path=str(out_path),
+            out_ext=out_ext,
+        )
+        ok, msg = _run_ffmpeg_transcode(
+            job_id,
+            ffmpeg,
+            input_args,
+            out_path,
+            duration_hint,
+            encoder=encoder,
+            src_codec=video_codec,
+            out_ext=out_ext,
+            target_fps=target,
+            scale=scale,
+            src_ext=src_ext,
+            force_reencode=force_reencode,
+        )
+        if ok:
+            added = _register_converted_mp4(out_path, item)
+            extra = f"；{remap_note}" if remap_note else ""
+            _convert_job_update(
+                job_id,
+                status="done",
+                msg=f"已生成并加入片库：{out_path.name}{extra}",
+                percent=100,
+                out_path=str(out_path),
+                added_id=(added or {}).get("id") or "",
+            )
+            log(f"[转换] 完成 job={job_id} {vid} → {out_path}")
+        elif msg == "已取消" or _convert_job_cancelled(job_id):
+            try:
+                out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+        else:
+            try:
+                if out_path.exists() and out_path.stat().st_size == 0:
+                    out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            fail = _humanize_ffmpeg_err(msg, src_ext=src_ext)
+            _convert_job_update(job_id, status="error", msg=fail[:500] or "转换失败", percent=0)
+    except Exception as e:
+        if _convert_job_cancelled(job_id):
+            _convert_job_update(job_id, status="cancelled", msg="已取消", percent=0)
+        else:
+            _convert_job_update(job_id, status="error", msg=str(e), percent=0)
+        log(f"[转换] 异常 job={job_id} vid={vid}: {e}")
+    finally:
+        if tmp_path:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _fps30_worker(job_id: str, vid: str, root: str | None = None) -> None:

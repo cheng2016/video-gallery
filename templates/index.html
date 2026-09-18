@@ -1012,7 +1012,19 @@
       color: var(--muted);
       display: flex;
       gap: 8px;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+    .card-meta-left {
+      display: inline-flex;
+      gap: 8px;
       flex-wrap: wrap;
+      align-items: baseline;
+      min-width: 0;
+    }
+    .card-meta .card-fmt {
+      flex: 0 0 auto;
+      letter-spacing: 0.02em;
     }
     .empty {
       text-align: center;
@@ -1047,27 +1059,47 @@
     .modal-bar {
       display: flex;
       align-items: center;
-      gap: 12px;
-      padding: 12px 20px;
+      gap: 10px;
+      padding: 8px 16px;
       background: #0a0c10;
+      min-width: 0;
     }
     .modal-bar .title {
-      flex: 1;
-      font-size: 1rem;
+      flex: 0 1 auto;
+      max-width: min(42vw, 520px);
+      font-size: 0.95rem;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    .modal-bar .modal-info {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .modal-bar .modal-info.modal-info-rich {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      max-height: 4.5em;
     }
     .modal-close {
       background: var(--bg3);
       border: 1px solid var(--border);
       color: var(--text);
-      width: 36px;
-      height: 36px;
+      width: 32px;
+      height: 32px;
       border-radius: 8px;
       cursor: pointer;
       font-size: 1.2rem;
       line-height: 1;
+      flex-shrink: 0;
     }
     .modal-close:hover { background: var(--danger); border-color: var(--danger); }
     .player-wrap {
@@ -1075,9 +1107,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 0 20px 12px;
+      padding: 0 16px;
       min-height: 0;
-      max-height: calc(100vh - 210px);
       overflow: hidden;
     }
     .player-wrap video {
@@ -1090,10 +1121,114 @@
       outline: none;
     }
     .modal-info {
-      padding: 0 20px 8px;
+      padding: 0 16px 6px;
       color: var(--muted);
-      font-size: 0.85rem;
-      line-height: 1.45;
+      font-size: 0.8rem;
+      line-height: 1.4;
+    }
+    .player-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin-left: auto;
+      min-width: 0;
+    }
+    .player-chip {
+      display: inline-flex;
+      align-items: center;
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      background: #12161d;
+      white-space: nowrap;
+    }
+    .player-chip.warn {
+      border-color: #8a5a2b;
+      color: #e0b07a;
+    }
+    .player-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 16px;
+      flex-shrink: 0;
+      z-index: 2;
+      background: #0a0c10;
+    }
+    .player-toolbar .btn {
+      height: 32px;
+      font-size: 0.8rem;
+      padding: 0 12px;
+    }
+    .player-toolbar .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #041016;
+      font-weight: 600;
+    }
+    .convert-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin: 0 16px 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0e1116;
+      flex-shrink: 0;
+    }
+    .convert-panel.hidden { display: none; }
+    .convert-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .convert-field {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+    .convert-field select,
+    .convert-field input {
+      height: 32px;
+      background: #12161d;
+      color: var(--text, #e8edf4);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0 8px;
+      font-size: 0.8rem;
+    }
+    .convert-field input[type="number"] { width: 4.6em; }
+    .convert-actions {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-left: auto;
+    }
+    .convert-actions .btn {
+      height: 32px;
+      font-size: 0.8rem;
+      padding: 0 12px;
+    }
+    .convert-hint:empty {
+      display: none;
+    }
+    .convert-hint {
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .convert-progress {
+      color: #9ec1ff;
+      font-size: 0.8rem;
     }
     .modal-actions {
       display: flex;
@@ -1104,40 +1239,6 @@
       z-index: 2;
       background: #0a0c10;
     }
-    .modal-actions #btnFps30.fps-ready {
-      border-color: #3d8bfd;
-      color: #9ec1ff;
-      background: rgba(61, 139, 253, 0.16);
-    }
-    .modal-actions #btnFps30:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-      border-color: var(--border);
-      color: var(--muted);
-      background: transparent;
-    }
-    .modal-actions .fps-target-wrap {
-      display: none;
-      align-items: center;
-      gap: 6px;
-      color: var(--muted);
-      font-size: 0.8rem;
-    }
-    .modal-actions .fps-target-wrap.visible {
-      display: inline-flex;
-    }
-    .modal-actions #fpsTargetSelect,
-    .modal-actions #fpsTargetCustom {
-      background: #12161d;
-      color: var(--text, #e8edf4);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 5px 8px;
-      font-size: 0.8rem;
-    }
-    .modal-actions #fpsTargetCustom {
-      width: 4.6em;
-    }
     .modal-actions .btn {
       font-size: 0.8rem;
       padding: 6px 12px;
@@ -1147,30 +1248,6 @@
       border-color: var(--accent);
       color: #041016;
       font-weight: 600;
-    }
-    .modal-fps-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-      padding: 8px 20px 16px;
-      border-top: 1px solid rgba(255,255,255,0.06);
-      flex-shrink: 0;
-      background: #0a0c10;
-    }
-    .modal-fps-actions.hidden { display: none; }
-    .modal-fps-actions .fps-label {
-      color: var(--muted);
-      font-size: 0.8rem;
-      margin-right: 4px;
-    }
-    .modal-fps-actions .btn {
-      font-size: 0.8rem;
-      padding: 6px 12px;
-    }
-    .modal-fps-actions .btn:disabled {
-      opacity: 0.55;
-      cursor: not-allowed;
     }
     .settings-modal {
       align-items: center;
@@ -1507,31 +1584,57 @@
   <div class="modal" id="modal">
     <div class="modal-bar">
       <div class="title" id="modalTitle"></div>
+      <div class="modal-info" id="modalInfo"></div>
       <button class="modal-close" id="modalClose" title="关闭">×</button>
     </div>
     <div class="player-wrap">
       <video id="player" controls autoplay playsinline></video>
     </div>
-    <div class="modal-info" id="modalInfo"></div>
-    <div class="modal-actions" id="modalActions">
+    <div class="player-toolbar" id="modalActions">
       <button type="button" class="btn primary" id="btnLocalOpen" title="用系统默认播放器打开">系统播放器</button>
-      <button type="button" class="btn" id="btnFps30" title="仅降低帧率：60/90/120fps 的 2K/4K 转到自定义低帧率（不改封装格式流程）" style="display:none" disabled>60→30fps</button>
-      <label class="fps-target-wrap" id="fpsTargetWrap">
-        转到
-        <select id="fpsTargetSelect" title="目标帧率"></select>
-        <input type="number" id="fpsTargetCustom" min="1" max="119" step="1" placeholder="自定义" title="自定义目标帧率，留空则用左侧选项">
-        fps
-      </label>
-      <button type="button" class="btn" id="btnCancelFps30" title="取消正在进行的帧率转码" style="display:none">取消帧率转码</button>
-      <button type="button" class="btn" id="btnFixAudio" title="视频直拷，音频转为 AAC（解决浏览器无声）" style="display:none">修复声音</button>
-      <button type="button" class="btn" id="btnToMp4" title="用 ffmpeg 转为同目录 MP4" style="display:none">转成 MP4</button>
-      <button type="button" class="btn" id="btnCancelMp4" title="取消正在进行的转换" style="display:none">取消转换</button>
+      <button type="button" class="btn" id="btnConvertToggle" title="封装、降帧、压缩分辨率">转换</button>
       <button type="button" class="btn" id="btnCover" title="用当前画面或指定时间截帧换封面">换封面</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
       <button type="button" class="btn" id="btnReveal" title="在文件管理器中显示">打开位置</button>
+      <div class="player-chips" id="playerChips"></div>
     </div>
-    <div class="modal-fps-actions hidden" id="modalFpsActions">
-      <span class="fps-label" id="fpsMetaLabel">帧率转码 · 2K/4K 打开后检测</span>
+    <div class="convert-panel hidden" id="convertPanel">
+      <div class="convert-row">
+        <label class="convert-field">封装
+          <select id="transcodeExt" title="输出封装">
+            <option value="mp4">mp4</option>
+            <option value="mkv">mkv</option>
+            <option value="mov">mov</option>
+            <option value="avi">avi</option>
+            <option value="webm">webm</option>
+          </select>
+        </label>
+        <label class="convert-field">帧率
+          <select id="transcodeFps" title="目标帧率"></select>
+          <input type="number" id="transcodeFpsCustom" min="1" max="119" step="1" placeholder="自定义">
+        </label>
+        <label class="convert-field">画面
+          <select id="transcodeScale" title="分辨率">
+            <option value="0">原尺寸</option>
+            <option value="1080">1080p</option>
+            <option value="720">720p</option>
+          </select>
+        </label>
+        <label class="convert-field">编码
+          <select id="transcodeEncoder" title="画面编码">
+            <option value="auto">原格式</option>
+            <option value="h264">H.264</option>
+            <option value="h265">H.265</option>
+          </select>
+        </label>
+        <div class="convert-actions">
+          <button type="button" class="btn" id="btnFixAudio" title="视频直拷，音频转为 AAC" style="display:none">仅修复声音</button>
+          <button type="button" class="btn primary" id="btnStartTranscode">开始转换</button>
+          <button type="button" class="btn" id="btnCancelTranscode" style="display:none">取消</button>
+          <span class="convert-progress" id="transcodeProgress"></span>
+        </div>
+      </div>
+      <div class="convert-hint" id="convertHint"></div>
     </div>
     <div id="coverPanel" class="cover-panel" style="display:none">
       <label>截帧时间（秒） <input type="number" id="coverSeek" min="0" step="0.5" value="3" style="width:5em" /></label>
@@ -1840,13 +1943,8 @@
       "lan_share_click",
     ]);
     const CLIENT_LOG_LOOP_EVENTS = new Set([
-      "filter_layout",
-      "sticky_layout",
-      "scroll_tick",
-      "virtual_scroll_geometry",
-      "virtual_spacer_state",
-      "virtual_bottom_spacer_change",
-      "continue_layout",
+      // High-frequency ticks that are still useful (rate-limited). Layout
+      // geometry dumps (filter_layout / sticky_layout / scroll_tick) are gone.
     ]);
     const clientLogLastSent = new Map();
 
@@ -1944,116 +2042,21 @@
       return Math.max(0, clientNow() - Number(started || 0));
     }
 
-    // 筛选区布局诊断：记录真实盒模型尺寸，尤其关注子类容器的
-    // clientHeight/scrollHeight 以及最后一行到容器底部的空白。
-    let filterLayoutLogTimer = 0;
-    function filterLayoutSnapshot(reason) {
-      const started = clientNow();
-      const root = $("filters");
-      if (!root || !root.getBoundingClientRect) return;
-      const rect = (el) => {
-        if (!el) return null;
-        const r = el.getBoundingClientRect();
-        const cs = getComputedStyle(el);
-        return {
-          id: el.id || "",
-          class_name: String(el.className || "").slice(0, 80),
-          x: Math.round(r.x), y: Math.round(r.y),
-          width: Math.round(r.width), height: Math.round(r.height),
-          top: Math.round(r.top), bottom: Math.round(r.bottom),
-          client_height: el.clientHeight, scroll_height: el.scrollHeight,
-          display: cs.display, box_sizing: cs.boxSizing,
-          margin_bottom: cs.marginBottom, padding: cs.padding,
-        };
-      };
-      const rows = Array.from(root.querySelectorAll(".filter-row")).map((row, index) => ({
-        index,
-        level: row.getAttribute("data-sub-level") || "",
-        row: rect(row),
-        tags: rect(row.querySelector(".filter-tags")),
-        tag_count: row.querySelectorAll(".tag").length,
-      }));
-      const sub = $("subFolderRows");
-      const visibleRows = rows.filter((item) => item.row && item.row.display !== "none" && item.row.height > 0);
-      const last = visibleRows.length ? visibleRows[visibleRows.length - 1].row : null;
-      const rootRect = root.getBoundingClientRect();
-      const sticky = $("scopeSticky");
-      const stickyRow = $("stickyFilterRow");
-      const content = $("contentScroll");
-      clientLog("filter_layout", {
-        reason: String(reason || "unknown"),
-        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-        root: JSON.stringify(rect(root)),
-        rows: JSON.stringify(rows).slice(0, 3600),
-        visible_row_count: visibleRows.length,
-        subfolder: JSON.stringify(rect(sub)),
-        last_row_bottom: last ? last.bottom : null,
-        bottom_gap: last ? Math.round(rootRect.bottom - last.bottom) : null,
-        sticky: JSON.stringify(rect(sticky)),
-        sticky_row: JSON.stringify(rect(stickyRow)),
-        sticky_state: sticky ? {
-          is_stuck: sticky.classList.contains("is-stuck"),
-          has_filter_row: sticky.classList.contains("has-filter-row"),
-          visibility: getComputedStyle(stickyRow || sticky).visibility,
-          grid_rows: getComputedStyle(sticky).gridTemplateRows,
-        } : null,
-        content_scroll_top: content ? Math.round(content.scrollTop) : null,
-        viewport_width: window.innerWidth,
-        viewport_height: window.innerHeight,
-      });
-    }
-    function scheduleFilterLayoutLog(reason) {
-      clearTimeout(filterLayoutLogTimer);
-      filterLayoutLogTimer = setTimeout(() => filterLayoutSnapshot(reason), 120);
-    }
-    function syncSubfolderOverflow(reason) {
-      const started = clientNow();
+    function syncSubfolderOverflow(_reason) {
       const box = $("subFolderRows");
       if (!box || !box.children.length) {
         if (box) box.classList.remove("is-scrollable");
-        clientLog("subfolder_overflow", {
-          reason: String(reason || "unknown"),
-          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          content_height: 0,
-          max_height: Math.round(Math.min(window.innerHeight * 0.36, 280)),
-          client_height: box ? box.clientHeight : 0,
-          scroll_height: box ? box.scrollHeight : 0,
-          scrollable: false,
-          row_count: 0,
-        });
         return;
       }
       // 先以完整内容测量，再决定是否启用 max-height，避免空白高度被预留。
       box.classList.remove("is-scrollable");
       const maxHeight = Math.min(window.innerHeight * 0.36, 280);
       const contentHeight = box.scrollHeight;
-      const scrollable = contentHeight > maxHeight + 1;
-      box.classList.toggle("is-scrollable", scrollable);
-      clientLog("subfolder_overflow", {
-        reason: String(reason || "unknown"),
-        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-        content_height: contentHeight,
-        max_height: Math.round(maxHeight),
-        client_height: box.clientHeight,
-        scroll_height: box.scrollHeight,
-        scrollable,
-        row_count: box.querySelectorAll(".filter-row").length,
-      });
+      box.classList.toggle("is-scrollable", contentHeight > maxHeight + 1);
     }
     window.addEventListener("resize", () => {
       syncSubfolderOverflow("resize");
-      scheduleFilterLayoutLog("resize");
     });
-    if (window.ResizeObserver) {
-      const ro = new ResizeObserver(() => scheduleFilterLayoutLog("resize_observer"));
-      const root = $("filters");
-      if (root) ro.observe(root);
-    }
-    if (window.MutationObserver) {
-      const mo = new MutationObserver(() => scheduleFilterLayoutLog("mutation"));
-      const root = $("filters");
-      if (root) mo.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class"] });
-    }
 
     function filterStateFields(extra) {
       return {
@@ -2316,6 +2319,14 @@
         fps_targets: Array.isArray(info.fps_targets) ? info.fps_targets : [],
         fps_class: info.fps_class || 0,
         has_ffmpeg: typeof info.has_ffmpeg === "boolean" ? info.has_ffmpeg : undefined,
+        ffmpeg_rm: typeof info.ffmpeg_rm === "boolean" ? info.ffmpeg_rm : undefined,
+        can_transcode: info.can_transcode !== false,
+        transcode_block: info.transcode_block || "",
+        transcode_block_msg: info.transcode_block_msg || "",
+        scale_choices: Array.isArray(info.scale_choices) ? info.scale_choices : [],
+        default_out_ext: info.default_out_ext || "",
+        is_rm: !!info.is_rm,
+        ext: info.ext || "",
         probe_pending: !!info.probe_pending,
       };
     }
@@ -2352,29 +2363,44 @@
       return map[raw] || raw.toUpperCase();
     }
 
-    function probeLineFromMeta(meta) {
-      const w = Number((meta && meta.width) || 0);
-      const h = Number((meta && meta.height) || 0);
-      const fps = Number((meta && meta.fps) || 0);
-      const codec = formatVideoCodecLabel((meta && meta.video_codec) || "");
-      if (!(w || h || fps || codec)) return "";
-      let line = "探测: ";
-      line += (w || h) ? `${w || "?"}×${h || "?"}` : "?×?";
-      if (fps) line += ` · ${Math.round(fps)}fps`;
-      if (codec) line += ` · ${codec}`;
-      if (meta && meta.can_fps30) line += " · 可转低帧率";
-      return line;
+    function paintPlayerChips(meta) {
+      const el = $("playerChips");
+      if (!el) return;
+      const m = meta || currentPlayMeta || {};
+      const chips = [];
+      const w = Number(m.width || 0);
+      const h = Number(m.height || 0);
+      const fps = Number(m.fps || 0);
+      const codec = formatVideoCodecLabel(m.video_codec || "");
+      const kind = String(m.kind || currentPlayKind || "").toLowerCase();
+      let fmt = "";
+      if (kind === "m3u8") fmt = "HLS";
+      else if (kind === "ts_set") fmt = "TS合集";
+      else {
+        const ext = String(m.ext || "").replace(/^\./, "").toUpperCase();
+        if (ext) fmt = ext;
+      }
+      if (w || h) chips.push(`${w || "?"}×${h || "?"}`);
+      if (fps) chips.push(`${Math.round(fps)}fps`);
+      if (codec) chips.push(codec);
+      if (fmt) chips.push(fmt);
+      if (m.transcode_block === "no_realmedia") {
+        chips.push({ text: m.transcode_block_msg || "当前 ffmpeg 不含 RealMedia，无法转 RMVB", warn: true });
+      }
+      el.innerHTML = chips.map((c) => {
+        if (typeof c === "string") return `<span class="player-chip">${escapeHtml(c)}</span>`;
+        return `<span class="player-chip${c.warn ? " warn" : ""}">${escapeHtml(c.text)}</span>`;
+      }).join("");
     }
 
     function paintPlayerInfoTip() {
       const infoEl = $("modalInfo");
       if (!infoEl || !currentPlayMeta) return;
-      const bits = [];
-      if (currentPlayMeta.infoTip) bits.push(currentPlayMeta.infoTip);
-      const probe = probeLineFromMeta(currentPlayMeta);
-      if (probe) bits.push(probe);
-      if (currentPlayMeta.path) bits.push(currentPlayMeta.path);
-      infoEl.textContent = bits.join("\n");
+      const tip = String(currentPlayMeta.infoTip || "").replace(/\s*\n+\s*/g, " · ");
+      infoEl.textContent = tip;
+      infoEl.title = tip;
+      infoEl.classList.remove("modal-info-rich");
+      paintPlayerChips(currentPlayMeta);
     }
 
     function applyProbedInfo(info) {
@@ -2387,17 +2413,21 @@
       currentPlayMeta.can_fps30 = !!info.can_fps30;
       currentPlayMeta.fps_gate = info.fps_gate || "";
       currentPlayMeta.fps_targets = Array.isArray(info.fps_targets) ? info.fps_targets : [];
+      currentPlayMeta.scale_choices = Array.isArray(info.scale_choices) ? info.scale_choices : [];
       currentPlayMeta.fps_class = info.fps_class || 0;
       currentPlayMeta.audio_hard = !!info.audio_hard;
       currentPlayMeta.audio_codec = info.audio_codec || "";
+      currentPlayMeta.can_transcode = info.can_transcode !== false;
+      currentPlayMeta.transcode_block = info.transcode_block || "";
+      currentPlayMeta.transcode_block_msg = info.transcode_block_msg || "";
+      currentPlayMeta.default_out_ext = info.default_out_ext || currentPlayMeta.default_out_ext || "";
+      currentPlayMeta.is_rm = !!info.is_rm;
+      currentPlayMeta.ext = info.ext || currentPlayMeta.ext || "";
       if (typeof info.has_ffmpeg === "boolean") currentPlayMeta.has_ffmpeg = info.has_ffmpeg;
+      if (typeof info.ffmpeg_rm === "boolean") currentPlayMeta.ffmpeg_rm = info.ffmpeg_rm;
       paintPlayerInfoTip();
       updateFixAudioButton(info);
-      updateFps30Button({
-        ...(info || {}),
-        kind: currentPlayKind || "",
-        ext: (info && info.ext) || "",
-      });
+      updatePlayerConvertUi(info);
     }
 
     function startProbePoll(id, root) {
@@ -2496,20 +2526,12 @@
     }
 
     function renderContinueBar() {
-      const started = clientNow();
       const bar = $("continueBar");
       if (!bar) return;
       const rows = historyEntries("resume").slice(0, 8);
       if (!rows.length) {
         bar.style.display = "none";
         bar.innerHTML = "";
-        clientLog("continue_layout", {
-          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          item_count: 0,
-          client_height: bar.clientHeight,
-          child_rows: 0,
-          single_row: true,
-        });
         return;
       }
       bar.style.display = "flex";
@@ -2526,15 +2548,6 @@
         </button>`;
       }).join("");
       watchThumbs(bar);
-      clientLog("continue_layout", {
-        elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-        item_count: rows.length,
-        client_width: bar.clientWidth,
-        scroll_width: bar.scrollWidth,
-        client_height: bar.clientHeight,
-        child_rows: bar.children.length,
-        single_row: Array.from(bar.children).every((el) => el.getBoundingClientRect().height <= 50),
-      });
     }
 
     loadUiPrefs();
@@ -2567,7 +2580,6 @@
         category_row_visible: $("categoryRow") ? getComputedStyle($("categoryRow")).display !== "none" : false,
         category_tag_count: $("categoryTags") ? $("categoryTags").querySelectorAll("[data-category]").length : 0,
       }));
-      scheduleFilterLayoutLog("sidebar_visibility_changed");
     }
 
     function toggleSidebar() {
@@ -2642,21 +2654,38 @@
       );
     }
     function cancelListRequests() {
+      const aborted = activeListControllers.size;
       activeListControllers.forEach((controller) => {
         try {
           controller.abort("channel-switch");
         } catch (_) {}
       });
       activeListControllers.clear();
+      if (aborted > 0) {
+        clientLog("list_requests_cancelled", {
+          aborted,
+          loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+          offset: state.offset || 0,
+          total: state.totalCount || 0,
+          has_more: !!state.hasMore,
+          refresh_running: !!state._refreshRunning,
+          refresh_pending: !!state._refreshPending,
+          pending_timer_id: state._refreshPending ? state._refreshPending.timer_id : "",
+        }, "WARN");
+      }
     }
 
-    async function fetchVideos(offset, requestReason) {
+    async function fetchVideos(offset, requestReason, extra) {
       const started = clientNow();
       const operationId = newOperationId("page");
       let terminalStatus = "pending";
       let terminalError = "";
       let responseRequestId = "";
       const requestedOffset = offset == null ? state.offset : offset;
+      const requestedLimit = Math.max(
+        1,
+        Number((extra && extra.limit) || state.pageSize || 20) || 20
+      );
       const params = new URLSearchParams();
       if (state.category) params.set("category", state.category);
       if (state.folder) params.set("folder", state.folder);
@@ -2671,12 +2700,12 @@
       if (state.lib) params.set("lib", state.lib);
       params.set("gen", String(state._libGen || 0));
       params.set("offset", String(requestedOffset));
-      params.set("limit", String(state.pageSize));
+      params.set("limit", String(requestedLimit));
       const browserCacheMode = (state._lastScanning || state._updating) ? "no-store" : "default";
       clientLog("page_load_requested", {
         request_reason: requestReason || "unspecified",
-        offset: offset == null ? state.offset : offset,
-        limit: state.pageSize,
+        offset: requestedOffset,
+        limit: requestedLimit,
         lib: state.lib || "all",
         category: state.category || "",
         folder: state.folder || "",
@@ -2712,6 +2741,12 @@
           ext: state.ext || "",
           cache_layer: r.headers.get("X-VG-Cache-Layer") || "",
           cache_policy: r.headers.get("X-VG-Cache-Policy") || "",
+          duration_h_rows: Array.isArray(data.videos)
+            ? data.videos.filter((v) => !!(v && v.duration_h)).length
+            : 0,
+          has_thumb_rows: Array.isArray(data.videos)
+            ? data.videos.filter((v) => !!(v && v.has_thumb)).length
+            : 0,
         }, "INFO", operationId);
         return data;
       } catch (e) {
@@ -2749,6 +2784,37 @@
           error: terminalError,
         }, terminalStatus === "failed" ? "ERROR" : "INFO", operationId);
       }
+    }
+
+    async function fetchVideosCovering(wantCount, requestReason) {
+      const page = Math.max(1, Number(state.pageSize || 20) || 20);
+      const want = Math.max(page, Number(wantCount || 0) || 0);
+      const acc = [];
+      let offset = 0;
+      let last = null;
+      while (acc.length < want) {
+        const chunk = await fetchVideos(
+          offset,
+          requestReason,
+          { limit: Math.min(page, want - acc.length) }
+        );
+        if (!chunk) return null;
+        last = chunk;
+        const rows = Array.isArray(chunk.videos) ? chunk.videos : [];
+        if (!rows.length) break;
+        acc.push(...rows);
+        offset += rows.length;
+        if (!chunk.has_more) break;
+        if (acc.length >= (Number(chunk.count) || want)) break;
+      }
+      if (!last) return null;
+      const total = Number(last.count) || acc.length;
+      return {
+        ...last,
+        videos: acc,
+        has_more: acc.length < total,
+        count: total,
+      };
     }
 
     async function loadDrives() {
@@ -2860,7 +2926,22 @@
       let pollInFlight = false;
 
       state._poll = setInterval(async () => {
-        if (pollInFlight) return;
+        if (pollInFlight) {
+          clientLog("poll_tick_skipped", {
+            reason: "in_flight",
+            was_busy: !!wasBusy,
+            loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+            total: state.totalCount || 0,
+            has_more: !!state.hasMore,
+            refresh_running: !!state._refreshRunning,
+            refresh_pending: !!state._refreshPending,
+            pending_timer_id: state._refreshPending ? state._refreshPending.timer_id : "",
+            pending_age_ms: state._refreshPending
+              ? Math.max(0, Date.now() - Number(state._refreshPending.scheduled_at || 0))
+              : 0,
+          }, "WARN");
+          return;
+        }
         pollInFlight = true;
         try {
           const r = await fetch("/api/status");
@@ -2885,7 +2966,12 @@
           // but polling must stay alive so a newly published disk generation
           // is painted instead of leaving the sidebar on the previous disk.
           const busy = !!(
-            d.scanning || d.updating || d.meta_running || (d.thumb_pending || 0) > 0
+            d.scanning
+            || d.updating
+            || d.meta_running
+            || d.thumb_bulk_running
+            || d.background_busy
+            || (d.thumb_pending || 0) > 0
           );
           const gen = d.lib_gen || 0;
           const found = d.scan_found || 0;
@@ -2915,6 +3001,30 @@
           $("scanDriveBtn").disabled = scanBusy;
           $("driveSelect").disabled = scanBusy;
 
+          // Watchdog: a queued soft refresh whose timer never fires leaves the
+          // grid stuck (see log 233: timer-3 scheduled, no refresh_timer_fired).
+          const pendingRefresh = state._refreshPending || null;
+          if (pendingRefresh && pendingRefresh.scheduled_at) {
+            const pendingAge = Math.max(0, now - Number(pendingRefresh.scheduled_at || 0));
+            const expectedWait = Math.max(50, Number(pendingRefresh.scheduled_wait_ms || 1500));
+            if (pendingAge > expectedWait + 2000) {
+              clientLog("refresh_timer_overdue", {
+                timer_id: pendingRefresh.timer_id || "",
+                schedule_seq: pendingRefresh.schedule_seq || 0,
+                pending_age_ms: pendingAge,
+                scheduled_wait_ms: expectedWait,
+                overdue_ms: pendingAge - expectedWait,
+                refresh_running: !!state._refreshRunning,
+                refresh_pending_lock: !!state._refreshPendingLock,
+                last_full_refresh_age_ms: Math.max(0, now - Number(state._lastFullRefresh || 0)),
+                loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+                total: state.totalCount || 0,
+                has_more: !!state.hasMore,
+                lib_gen: gen,
+                busy: !!busy,
+              }, "WARN");
+            }
+          }
           if (busy) {
             wasBusy = true;
             // Throttle against all refresh callers, not only polling.
@@ -2922,7 +3032,9 @@
             // soft=true = polling-triggered refresh: preserve user scroll
             // position so browsing during a scan does not keep bouncing the
             // grid back to offset 0.
+            let pollAction = "wait";
             if (canFull && (genChanged || foundJump)) {
+              pollAction = genChanged ? "refresh_gen" : "refresh_found_jump";
               state._lastFullRefresh = now;
               lastLibGen = gen;
               lastScanFound = found;
@@ -2937,6 +3049,7 @@
               d.scan_progress !== lastScanProgress &&
               String(d.scan_progress).includes("扫描完成")
             ) {
+              pollAction = "refresh_scan_done";
               state._lastFullRefresh = now;
               lastLibGen = gen;
               state._libGen = gen;
@@ -2946,19 +3059,85 @@
               lastThumbProgress = d.thumb_progress;
               if (now - thumbRefreshTimer > 3000) {
                 thumbRefreshTimer = now;
+                pollAction = "thumbs_visible";
                 refreshVisibleThumbs();
+              } else {
+                pollAction = "thumbs_throttled";
               }
+            } else if (!canFull && (genChanged || foundJump)) {
+              pollAction = "refresh_throttled";
+            }
+            if (pollAction !== "wait") {
+              clientLog("poll_decision", {
+                action: pollAction,
+                lib_gen: gen,
+                last_lib_gen: lastLibGen,
+                scanning: !!d.scanning,
+                meta_running: !!d.meta_running,
+                thumb_pending: d.thumb_pending || 0,
+                thumb_bulk_running: !!d.thumb_bulk_running,
+                background_busy: !!d.background_busy,
+                can_full: canFull,
+                gen_changed: genChanged,
+                loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+                total: state.totalCount || 0,
+                has_more: !!state.hasMore,
+                refresh_pending: !!state._refreshPending,
+                pending_timer_id: state._refreshPending ? state._refreshPending.timer_id : "",
+              }, "INFO");
             }
           } else if (wasBusy) {
             wasBusy = false;
             lastLibGen = gen;
             state._libGen = gen;
-            // All background work drained — make sure sidebar mounts land on
-            // final counts instead of stale per-disk zeros.
+            clientLog("poll_decision", {
+              action: "idle_final_refresh",
+              lib_gen: gen,
+              scanning: !!d.scanning,
+              meta_running: !!d.meta_running,
+              thumb_pending: d.thumb_pending || 0,
+              thumb_bulk_running: !!d.thumb_bulk_running,
+              background_busy: !!d.background_busy,
+              loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+              total: state.totalCount || 0,
+              has_more: !!state.hasMore,
+              refresh_pending: !!state._refreshPending,
+              pending_timer_id: state._refreshPending ? state._refreshPending.timer_id : "",
+              keep_poll: true,
+            }, "INFO");
+            // Background work drained for now — soft-patch cards. Do NOT stop
+            // the poll: metadata is often deferred until after thumb bulk, so
+            // a brief idle gap would otherwise miss the later lib_gen bump
+            // that carries duration/bad badges.
             await refresh({ soft: true, nav: true });
             refreshVisibleThumbs();
-            clearInterval(state._poll);
-            state._poll = null;
+            try { refreshStuckThumbs("poll_idle"); } catch (_) {}
+            try { summarizeGridCardCoverage("poll_idle"); } catch (_) {}
+          } else if (genChanged) {
+            // Late catalog rebuild (metadata finish) while status looks idle.
+            const canFull = now - state._lastFullRefresh >= 1000;
+            lastLibGen = gen;
+            state._libGen = gen;
+            clientLog("poll_decision", {
+              action: canFull ? "idle_gen_refresh" : "idle_gen_throttled",
+              lib_gen: gen,
+              meta_running: !!d.meta_running,
+              thumb_pending: d.thumb_pending || 0,
+              background_busy: !!d.background_busy,
+              loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+              total: state.totalCount || 0,
+              has_more: !!state.hasMore,
+              refresh_pending: !!state._refreshPending,
+              pending_timer_id: state._refreshPending ? state._refreshPending.timer_id : "",
+              can_full: canFull,
+            }, "INFO");
+            if (canFull) {
+              state._lastFullRefresh = now;
+              await refresh({ soft: true, nav: true });
+              refreshVisibleThumbs();
+              try { refreshStuckThumbs("poll_idle_gen"); } catch (_) {}
+              try { summarizeGridCardCoverage("poll_idle_gen"); } catch (_) {}
+            }
           }
           lastScanProgress = d.scan_progress || lastScanProgress;
           driveTick += 1;
@@ -2968,6 +3147,13 @@
             syncLanShareUi(d.lan_share, null, "poll_end");
           }
         } catch (e) {
+          clientLog("poll_tick_failed", {
+            error: String(e && (e.stack || e) || "unknown"),
+            was_busy: !!wasBusy,
+            refresh_pending: !!state._refreshPending,
+            loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+            total: state.totalCount || 0,
+          }, "ERROR");
           console.warn(e);
         } finally {
           pollInFlight = false;
@@ -3045,10 +3231,13 @@
         if (img.dataset.thumbReady === "1") return;
         const url = img.dataset.thumbUrl;
         if (url && thumbsLoaded.has(url)) {
-          img.src = url;
-          img.dataset.thumbReady = "1";
+          // Cached JPEG URL from a previous card — still verify via fetch path.
+          img.dataset.thumbWatched = "1";
+          queueThumb(img);
           return;
         }
+        // thumbWatched sticks while a retry timer is armed; exhausted retries
+        // clear it so scrolling back into view can re-observe.
         if (img.dataset.thumbWatched === "1") return;
         img.dataset.thumbWatched = "1";
         const obs = (scroll && scroll.contains(img)) ? bindThumbObserver() : bindPageThumbObserver();
@@ -3070,26 +3259,124 @@
       }
     }
 
+    const THUMB_MAX_FAST_ATTEMPTS = 12;
+    let thumbDiagSeq = 0;
+
+    function logThumbDiag(event, fields, level) {
+      thumbDiagSeq += 1;
+      // Keep thumb noise down: always log failures / exhaustion, sample ok.
+      if (event === "thumb_ready" && (thumbDiagSeq % 20) !== 1) return;
+      clientLog(event, fields || {}, level || "INFO");
+    }
+
+    function summarizeGridCardCoverage(reason) {
+      const loaded = state.loadedVideos || [];
+      const grid = $("grid");
+      const cards = grid ? grid.querySelectorAll(".card") : [];
+      let durMem = 0;
+      let thumbMem = 0;
+      let dupMem = 0;
+      let badMem = 0;
+      for (const v of loaded) {
+        if (!v) continue;
+        if (v.duration_h || v.seg_count || v.kind === "series" || v.kind === "m3u8") durMem += 1;
+        if (v.has_thumb) thumbMem += 1;
+        if (v.dup) dupMem += 1;
+        if (v.bad) badMem += 1;
+      }
+      let durDom = 0;
+      let dupDom = 0;
+      let badDom = 0;
+      let thumbReady = 0;
+      let thumbPending = 0;
+      let thumbFailed = 0;
+      cards.forEach((card) => {
+        if (card.querySelector(".thumb .dur")) durDom += 1;
+        if (card.querySelector(".thumb .dup-badge")) dupDom += 1;
+        if (card.querySelector(".thumb .bad-badge")) badDom += 1;
+        const img = card.querySelector("img");
+        if (!img) return;
+        if (img.dataset.thumbReady === "1") thumbReady += 1;
+        else if ((Number(img.dataset.thumbAttempt) || 0) >= THUMB_MAX_FAST_ATTEMPTS) thumbFailed += 1;
+        else thumbPending += 1;
+      });
+      clientLog("grid_card_coverage", {
+        reason: reason || "unspecified",
+        loaded: loaded.length,
+        cards: cards.length,
+        duration_in_memory: durMem,
+        duration_in_dom: durDom,
+        dup_in_memory: dupMem,
+        dup_in_dom: dupDom,
+        bad_in_memory: badMem,
+        bad_in_dom: badDom,
+        has_thumb_in_memory: thumbMem,
+        thumb_ready: thumbReady,
+        thumb_pending: thumbPending,
+        thumb_exhausted: thumbFailed,
+      }, "INFO");
+    }
+
     function startThumb(img) {
       const url = img.dataset.thumbUrl;
       if (!url) return;
       img.dataset.thumbLoading = "1";
       thumbBusy += 1;
-      // One request only — a separate probe Image used to double /thumb load and
-      // starve the server when switching channels on large libraries.
-      img.onload = () => {
-        img.dataset.thumbLoading = "";
-        thumbBusy = Math.max(0, thumbBusy - 1);
-        thumbLoadReady(img);
-        pumpThumbs();
-      };
-      img.onerror = () => {
-        img.dataset.thumbLoading = "";
-        thumbBusy = Math.max(0, thumbBusy - 1);
-        if (img.isConnected) thumbLoadFailed(img);
-        else pumpThumbs();
-      };
-      img.src = url;
+      const attempt = Number(img.dataset.thumbAttempt) || 0;
+      // fetch() so we can tell a 503 SVG placeholder from a real JPEG. Using
+      // img.src alone lets some browsers fire onload on the placeholder and
+      // permanently mark the card "ready" while still showing the grey icon.
+      fetch(url, { cache: "no-store", headers: { "Accept": "image/jpeg,image/*;q=0.8,*/*;q=0.5" } })
+        .then((r) => {
+          const ctype = String(r.headers.get("content-type") || "").toLowerCase();
+          if (!r.ok || ctype.includes("svg") || !(ctype.includes("jpeg") || ctype.includes("jpg") || ctype.includes("webp") || ctype.includes("png"))) {
+            const err = new Error("thumb_not_ready");
+            err.status = r.status;
+            err.ctype = ctype;
+            throw err;
+          }
+          return r.blob();
+        })
+        .then((blob) => {
+          if (!img.isConnected) {
+            thumbBusy = Math.max(0, thumbBusy - 1);
+            pumpThumbs();
+            return;
+          }
+          if (img._thumbObjectUrl) {
+            try { URL.revokeObjectURL(img._thumbObjectUrl); } catch (_) {}
+            img._thumbObjectUrl = "";
+          }
+          const objUrl = URL.createObjectURL(blob);
+          img._thumbObjectUrl = objUrl;
+          img.onload = () => {
+            img.dataset.thumbLoading = "";
+            thumbBusy = Math.max(0, thumbBusy - 1);
+            thumbLoadReady(img);
+            logThumbDiag("thumb_ready", {
+              video_id: (img.closest(".card") || {}).dataset?.id || "",
+              attempt,
+              bytes: blob.size || 0,
+            });
+            pumpThumbs();
+          };
+          img.onerror = () => {
+            img.dataset.thumbLoading = "";
+            thumbBusy = Math.max(0, thumbBusy - 1);
+            if (img.isConnected) thumbLoadFailed(img, "blob_decode");
+            else pumpThumbs();
+          };
+          img.src = objUrl;
+        })
+        .catch((err) => {
+          img.dataset.thumbLoading = "";
+          thumbBusy = Math.max(0, thumbBusy - 1);
+          if (img.isConnected) {
+            thumbLoadFailed(img, err && err.status === 503 ? "http_503" : (err && err.message) || "fetch_failed");
+          } else {
+            pumpThumbs();
+          }
+        });
     }
 
     function thumbLoadReady(img) {
@@ -3097,6 +3384,7 @@
       if (src.startsWith("data:image/svg+xml")) return;
       img.dataset.thumbReady = "1";
       img.dataset.thumbAttempt = "0";
+      img.dataset.thumbWatched = "1";
       if (img.dataset.thumbUrl) thumbsLoaded.add(img.dataset.thumbUrl);
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img.style.display = "";
@@ -3105,21 +3393,50 @@
       if (ph) ph.style.display = "none";
     }
 
-    function thumbLoadFailed(img) {
+    function thumbLoadFailed(img, reason) {
       if (!img.dataset.thumbUrl && img.src && !img.src.startsWith("data:")) img.dataset.thumbUrl = img.src;
       const attempt = (Number(img.dataset.thumbAttempt) || 0) + 1;
       img.dataset.thumbAttempt = String(attempt);
       img.dataset.thumbReady = "";
       img.dataset.thumbLoading = "";
-      img.dataset.thumbWatched = "1";
       img.onerror = null;
       img.onload = null;
       img.src = THUMB_PENDING_SRC;
-      if (attempt >= 10) {
+      const card = img.closest(".card");
+      const videoId = (card && card.dataset.id) || "";
+      // Fast retries while the worker queue catches up; after that keep a slow
+      // heartbeat so cards that scrolled off during the backlog still recover
+      // without requiring a full page reload.
+      if (attempt >= THUMB_MAX_FAST_ATTEMPTS) {
+        img.dataset.thumbWatched = "";
+        logThumbDiag("thumb_retry_exhausted", {
+          video_id: videoId,
+          attempt,
+          reason: reason || "unknown",
+          url: String(img.dataset.thumbUrl || "").slice(0, 120),
+        }, "WARN");
+        const slowDelay = 15000;
+        if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
+        img._thumbRetryTimer = setTimeout(() => {
+          if (!img.isConnected || img.dataset.thumbReady === "1") return;
+          img.dataset.thumbAttempt = "0";
+          const url = new URL(img.dataset.thumbUrl, location.href);
+          url.searchParams.set("_retry", String(Date.now()));
+          img.dataset.thumbUrl = url.pathname + url.search;
+          queueThumb(img);
+        }, slowDelay);
         pumpThumbs();
         return;
       }
-      const delay = Math.min(4000, Math.round(400 * Math.pow(1.55, attempt - 1)));
+      img.dataset.thumbWatched = "1";
+      if (attempt === 1 || attempt === 5 || attempt === 10) {
+        logThumbDiag("thumb_retry", {
+          video_id: videoId,
+          attempt,
+          reason: reason || "unknown",
+        }, attempt >= 5 ? "WARN" : "INFO");
+      }
+      const delay = Math.min(5000, Math.round(500 * Math.pow(1.55, attempt - 1)));
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img._thumbRetryTimer = setTimeout(() => {
         if (!img.isConnected) return;
@@ -3145,6 +3462,7 @@
     function refreshVisibleThumbs() {
       const root = $("contentScroll") || document;
       const view = root.getBoundingClientRect ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      let touched = 0;
       document.querySelectorAll("#grid .card img[data-thumb-url], #grid .card img").forEach((img) => {
         const card = img.closest(".card");
         if (!card) return;
@@ -3153,11 +3471,38 @@
         const id = card.dataset.cover || card.dataset.id;
         const rootPath = card.dataset.root || "";
         if (!id) return;
+        touched += 1;
         requestThumbReload(
           img,
           "/thumb/" + id + "?v=" + Date.now() + "&defer=1" + (rootPath ? ("&root=" + encodeURIComponent(rootPath)) : "")
         );
       });
+      clientLog("thumb_visible_refresh", { touched }, "INFO");
+    }
+
+    function refreshStuckThumbs(reason) {
+      const grid = $("grid");
+      if (!grid) return 0;
+      let touched = 0;
+      grid.querySelectorAll(".card img[data-thumb-url]").forEach((img) => {
+        if (img.dataset.thumbReady === "1") return;
+        const card = img.closest(".card");
+        const id = (card && (card.dataset.cover || card.dataset.id)) || "";
+        const rootPath = (card && card.dataset.root) || "";
+        if (!id) return;
+        touched += 1;
+        requestThumbReload(
+          img,
+          "/thumb/" + id + "?v=" + Date.now() + "&defer=1" + (rootPath ? ("&root=" + encodeURIComponent(rootPath)) : "")
+        );
+      });
+      if (touched) {
+        clientLog("thumb_stuck_refresh", {
+          reason: reason || "unspecified",
+          touched,
+        }, "INFO");
+      }
+      return touched;
     }
 
     async function scanSelectedDrive(force) {
@@ -4360,57 +4705,224 @@
       if (!root || !filters || !sticky || !btn) return;
       if (sticky.dataset.bound === "1") return;
       sticky.dataset.bound = "1";
-      let stickyLogTimer = 0;
-      const logStickyLayout = (reason) => {
-        const read = (el) => {
-          if (!el) return null;
-          const r = el.getBoundingClientRect();
-          const cs = getComputedStyle(el);
-          return {
-            top: Math.round(r.top), bottom: Math.round(r.bottom),
-            width: Math.round(r.width), height: Math.round(r.height),
-            client_height: el.clientHeight, scroll_height: el.scrollHeight,
-            min_height: cs.minHeight, max_height: cs.maxHeight,
-            display: cs.display, visibility: cs.visibility,
-          };
-        };
-        const row = $("stickyFilterRow");
-        const tags = row ? row.querySelector(".filter-tags") : null;
-        clientLog("sticky_layout", {
-          reason: String(reason || "unknown"),
-          scroll_top: Math.round(root.scrollTop),
-          sticky: JSON.stringify(read(sticky)),
-          sticky_row: JSON.stringify(read(row)),
-          sticky_tags: JSON.stringify(read(tags)),
-          is_stuck: sticky.classList.contains("is-stuck"),
-          has_filter_row: sticky.classList.contains("has-filter-row"),
-          tag_count: row ? row.querySelectorAll(".tag").length : 0,
-        });
-      };
-      const scheduleStickyLog = (reason) => {
-        clearTimeout(stickyLogTimer);
-        stickyLogTimer = setTimeout(() => logStickyLayout(reason), 80);
-      };
       if ("IntersectionObserver" in window) {
         const io = new IntersectionObserver(
           (entries) => {
             const visible = entries.some((e) => e.isIntersecting);
             sticky.classList.toggle("is-stuck", !visible);
-            scheduleStickyLog("intersection");
           },
           { root, threshold: 0 }
         );
         io.observe(filters);
       }
-      root.addEventListener("scroll", () => scheduleStickyLog("scroll"), { passive: true });
-      scheduleStickyLog("setup");
       btn.addEventListener("click", () => {
         filters.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     }
 
+    function cardDurationLabel(v) {
+      if (!v) return "";
+      if (v.kind === "series") return `${v.ep_count || 0} 集`;
+      if (v.seg_count) return `${v.seg_count} 段`;
+      if (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8") return "HLS";
+      return v.duration_h ? String(v.duration_h) : "";
+    }
+
+    const LOADED_META_FIELDS = [
+      "duration", "duration_h", "size_h", "has_thumb", "thumb_v", "thumb_id",
+      "bad", "bad_reason", "audio_codec", "audio_hard", "probe_duration_done",
+      "probe_audio_done", "width", "height", "fps", "video_codec", "ep_count",
+      "seg_count", "dup", "dup_n", "dup_reason",
+    ];
+
+    function mergeLoadedVideoMeta(target, source) {
+      if (!target || !source) return false;
+      let changed = false;
+      for (const key of LOADED_META_FIELDS) {
+        if (!(key in source)) continue;
+        const next = source[key];
+        if (target[key] !== next) {
+          target[key] = next;
+          changed = true;
+        }
+      }
+      // Runtime duplicate triad: by-ids always sends an explicit dup boolean so
+      // we can clear stale badges when a remake drops a mark.
+      if ("dup" in source) {
+        if (source.dup) {
+          if (!target.dup) {
+            target.dup = true;
+            changed = true;
+          }
+        } else if (target.dup || target.dup_n || target.dup_reason) {
+          delete target.dup;
+          delete target.dup_n;
+          delete target.dup_reason;
+          changed = true;
+        }
+      }
+      return changed;
+    }
+
+    function syncCardDurationBadge(card, v) {
+      if (!card) return;
+      const thumb = card.querySelector(".thumb");
+      if (!thumb) return;
+      const text = cardDurationLabel(v);
+      let el = null;
+      for (const node of thumb.children) {
+        if (node.classList && node.classList.contains("dur")) {
+          el = node;
+          break;
+        }
+      }
+      if (!text) {
+        if (el) el.remove();
+        return;
+      }
+      if (!el) {
+        el = document.createElement("span");
+        el.className = "dur";
+        thumb.appendChild(el);
+      }
+      if (el.textContent !== text) el.textContent = text;
+    }
+
+    function syncCardStatusBadges(card, v) {
+      if (!card || !v) return;
+      const thumb = card.querySelector(".thumb");
+      if (!thumb) return;
+      let dupEl = thumb.querySelector(".dup-badge");
+      if (v.dup) {
+        const text = "重复×" + (v.dup_n || 0);
+        const title = String(v.dup_reason || "重复");
+        if (!dupEl) {
+          dupEl = document.createElement("span");
+          dupEl.className = "dup-badge";
+          thumb.appendChild(dupEl);
+        }
+        if (dupEl.textContent !== text) dupEl.textContent = text;
+        if (dupEl.getAttribute("title") !== title) dupEl.setAttribute("title", title);
+      } else if (dupEl) {
+        dupEl.remove();
+      }
+      let badEl = thumb.querySelector(".bad-badge");
+      if (v.bad) {
+        const title = String(v.bad_reason || "无法读取");
+        if (!badEl) {
+          badEl = document.createElement("span");
+          badEl.className = "bad-badge";
+          badEl.textContent = "损坏";
+          thumb.appendChild(badEl);
+        }
+        if (badEl.getAttribute("title") !== title) badEl.setAttribute("title", title);
+      } else if (badEl) {
+        badEl.remove();
+      }
+    }
+
+    function applyCardBadgesFromLoaded() {
+      const loaded = state.loadedVideos || [];
+      if (!loaded.length) return;
+      const byId = new Map();
+      for (const v of loaded) {
+        if (v && v.id) byId.set(String(v.id), v);
+      }
+      const grid = $("grid");
+      if (!grid) return;
+      grid.querySelectorAll(".card[data-id]").forEach((card) => {
+        const v = byId.get(String(card.dataset.id || ""));
+        if (!v) return;
+        syncCardDurationBadge(card, v);
+        syncCardStatusBadges(card, v);
+      });
+    }
+
+    function applyDurationBadgesFromLoaded() {
+      applyCardBadgesFromLoaded();
+    }
+
+    async function refreshLoadedCardMeta(reason) {
+      const loaded = state.loadedVideos || [];
+      if (!loaded.length) return 0;
+      const ids = [];
+      const hints = {};
+      for (const v of loaded) {
+        if (!v || !v.id) continue;
+        const id = String(v.id);
+        ids.push(id);
+        if (v.root) hints[id] = { root: v.root };
+      }
+      if (!ids.length) return 0;
+      let patched = 0;
+      const byId = new Map();
+      for (let i = 0; i < ids.length; i += 100) {
+        const chunk = ids.slice(i, i + 100);
+        const chunkHints = {};
+        for (const id of chunk) {
+          if (hints[id]) chunkHints[id] = hints[id];
+        }
+        let data;
+        try {
+          data = await fetch("/api/videos-by-ids", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: chunk, hints: chunkHints }),
+          }).then((r) => r.json());
+        } catch (_) {
+          continue;
+        }
+        for (const row of (data && data.videos) || []) {
+          if (row && row.id) byId.set(String(row.id), row);
+        }
+      }
+      for (const v of loaded) {
+        if (!v || !v.id) continue;
+        const fresh = byId.get(String(v.id));
+        if (fresh && mergeLoadedVideoMeta(v, fresh)) patched += 1;
+      }
+      let withDuration = 0;
+      let withThumb = 0;
+      let withDup = 0;
+      let withBad = 0;
+      let missingDuration = 0;
+      for (const v of loaded) {
+        if (!v) continue;
+        if (v.duration_h || v.seg_count || v.kind === "series" || v.kind === "m3u8") withDuration += 1;
+        else missingDuration += 1;
+        if (v.has_thumb) withThumb += 1;
+        if (v.dup) withDup += 1;
+        if (v.bad) withBad += 1;
+      }
+      // Always repaint badges: patched=0 can still mean fields were already in
+      // memory while the preserved DOM never received badge nodes.
+      applyCardBadgesFromLoaded();
+      if (state.virtualEnabled && patched) {
+        try { renderVirtualGrid(); } catch (_) {}
+      }
+      const grid = $("grid");
+      const durDom = grid ? grid.querySelectorAll(".thumb .dur").length : 0;
+      const dupDom = grid ? grid.querySelectorAll(".thumb .dup-badge").length : 0;
+      const badDom = grid ? grid.querySelectorAll(".thumb .bad-badge").length : 0;
+      clientLog("loaded_card_meta_refreshed", {
+        reason: reason || "unspecified",
+        loaded: loaded.length,
+        fetched: byId.size,
+        patched,
+        with_duration: withDuration,
+        missing_duration: missingDuration,
+        with_thumb: withThumb,
+        with_dup: withDup,
+        with_bad: withBad,
+        duration_dom: durDom,
+        dup_dom: dupDom,
+        bad_dom: badDom,
+      }, "INFO");
+      summarizeGridCardCoverage("after_loaded_meta:" + (reason || ""));
+      return patched;
+    }
+
     function cardHtml(v) {
-      const year = v.mtime_h ? String(v.mtime_h).slice(0, 4) : "";
       const isSeries = v.kind === "series";
       const thumbId = v.thumb_id || (isSeries ? (v.cover_id || v.id) : v.id);
       const tv = v.thumb_v || (v.has_thumb ? 1 : 0);
@@ -4420,9 +4932,13 @@
       const bad = !!v.bad;
       const badReason = v.bad_reason || "无法读取";
       const watched = !isSeries && getPlayProgress(v.id) > 5;
-      const epMark = isSeries
-        ? `<span class="dur">${v.ep_count || 0} 集</span>`
-        : (v.seg_count ? `<span class="dur">${v.seg_count} 段</span>` : (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8" ? `<span class="dur">HLS</span>` : (v.duration_h ? `<span class="dur">${escapeHtml(v.duration_h)}</span>` : `<span class="dur">${escapeHtml((v.ext || "").toUpperCase())}</span>`)));
+      const fmt = isSeries
+        ? ""
+        : (v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8"
+          ? "HLS"
+          : String(v.ext || "").replace(/^\./, "").toUpperCase());
+      const durLabel = cardDurationLabel(v);
+      const epMark = durLabel ? `<span class="dur">${escapeHtml(durLabel)}</span>` : "";
       return `
         <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}" data-has-thumb="${v.has_thumb ? "1" : "0"}">
           <div class="thumb">
@@ -4430,24 +4946,16 @@
             <div class="play"><div class="play-icon"></div></div>
             ${dup ? `<span class="dup-badge" title="${escapeAttr(dupReason)}">重复×${dupN}</span>` : ""}
             ${bad ? `<span class="bad-badge" title="${escapeAttr(badReason)}">损坏</span>` : ""}
-            ${year ? `<span class="dur" style="left:8px;right:auto">${escapeHtml(year)}</span>` : ""}
             ${epMark}
           </div>
           <div class="card-body">
             <div class="card-title" title="${escapeAttr(v.name)}">${escapeHtml(v.name)}${watched ? " · 续播" : ""}${isSeries ? " · 剧集" : ""}</div>
             <div class="card-meta">
-              ${(!state.lib && v.lib_label) ? `<span class="lib-badge" title="${escapeAttr(v.root || "")}">${escapeHtml(v.lib_label)}</span>` : ""}
-              <span>${escapeHtml(v.size_h || "")}</span>
-              <span>${escapeHtml(v.folder || "根目录")}</span>
-              ${isSeries ? `<span>${v.ep_count || 0} 集</span>` : ""}
-              ${v.seg_count ? `<span>TS 合集</span>` : ""}
-              ${(v.kind === "m3u8" || (v.ext || "").toLowerCase() === ".m3u8") ? `<span>m3u8</span>` : ""}
-              ${dup ? `<span title="${escapeAttr(dupReason)}">疑似重复</span>` : ""}
-              ${bad ? `<span title="${escapeAttr(badReason)}">疑似损坏</span>` : ""}
-              ${v.duration_h ? `<span>${escapeHtml(v.duration_h)}</span>` : ""}
-              ${(v.genres && v.genres.length) ? `<span>${escapeHtml(v.genres.slice(0, 2).join("·"))}</span>` : ""}
-              ${(v.themes && v.themes.length) ? `<span title="自动主题">主题·${escapeHtml(v.themes.slice(0, 2).join("·"))}</span>` : ""}
-              ${(v.backgrounds && v.backgrounds.length) ? `<span title="自动背景">背景·${escapeHtml(v.backgrounds.slice(0, 2).join("·"))}</span>` : ""}
+              <span class="card-meta-left">
+                ${(!state.lib && v.lib_label) ? `<span class="lib-badge" title="${escapeAttr(v.root || "")}">${escapeHtml(v.lib_label)}</span>` : ""}
+                <span>${escapeHtml(v.size_h || "")}</span>
+              </span>
+              ${fmt ? `<span class="card-fmt">${escapeHtml(fmt)}</span>` : ""}
             </div>
           </div>
         </div>`;
@@ -4553,23 +5061,6 @@
       const beforePadBot = state._lastVPadBot ?? -1;
       state._lastVPadTop = padTop;
       state._lastVPadBot = padBot;
-      // Diagnostic: log spacer state to track scrollbar / list issues
-      if (state.loadedVideos.length <= 40) {
-        clientLog("virtual_spacer_state", {
-          elapsed_ms: 0,
-          loaded: state.loadedVideos.length,
-          total,
-          cols,
-          pad_top: padTop,
-          pad_bot: padBot,
-          raw_pad_bot: rawPadBot,
-          loaded_content_h: loadedContentH,
-          expected_full_height: totalRows * rowStride,
-          view_h: viewH,
-          scroll_height: root.scrollHeight,
-          capped: padBot < rawPadBot,
-        }, "INFO");
-      }
       grid.innerHTML =
         `<div class="v-spacer" style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
         state.loadedVideos.slice(start, end).map(cardHtml).join("") +
@@ -4658,22 +5149,6 @@
           cols,
         }, "INFO");
       }
-      if (Math.abs(padBotJump) >= rowStride * 4) {
-        clientLog("virtual_bottom_spacer_change", {
-          pad_bot_before: beforePadBot,
-          pad_bot_after: padBot,
-          pad_bot_delta: padBotJump,
-          raw_pad_bot: rawPadBot,
-          total_count: total,
-          loaded_videos: loadedNow,
-          loaded_base: loadedBase,
-          scroll_top: Math.round(scrollTop),
-          scroll_height_before: scrollHeight,
-          scroll_height_after: root ? root.scrollHeight : scrollHeight,
-          change_reason: jumpReason,
-          compensation_applied: compensatedForPadBotPx !== 0,
-        }, "INFO");
-      }
       updateGridHint();
       watchThumbs(grid);
       // Auto-load when the visible window reaches the tail of currently
@@ -4736,21 +5211,14 @@
       if (!root) return;
       virtualScrollBound = true;
       let raf = 0;
-      let mergedScrollTicks = 0;
       let lastScrollTop = 0;
-      let lastScrollLogAt = 0;
       let lastScrollDirection = "";
       let jumpCount = 0;
       root.addEventListener("scroll", () => {
         if (!state.virtualEnabled) return;
-        if (raf) {
-          mergedScrollTicks += 1;
-          cancelAnimationFrame(raf);
-        }
+        if (raf) cancelAnimationFrame(raf);
         raf = requestAnimationFrame(() => {
           raf = 0;
-          const before = performance.now();
-          const nowTs = Date.now();
           const sTop = root.scrollTop;
           const sHeight = root.scrollHeight;
           const cHeight = root.clientHeight;
@@ -4759,7 +5227,6 @@
           // A scroll delta bigger than ~2 viewports between two rAF frames
           // cannot be produced by a normal swipe / wheel; it means the DOM
           // height changed underneath or code programmatically scrolled.
-          // This is the #1 signal for "the page jumped on its own".
           if (Math.abs(deltaPx) > Math.max(400, cHeight * 1.5) && lastScrollTop > 0) {
             jumpCount += 1;
             clientLog("scroll_position_jump", {
@@ -4777,69 +5244,6 @@
           lastScrollDirection = direction;
           lastScrollTop = sTop;
           renderVirtualGrid();
-          const renderMs = Number((performance.now() - before).toFixed(1));
-          // Log scroll telemetry at most twice per second so browsing does
-          // not spam startup.log, plus always on large jumps / tail approach.
-          const shouldRateLog = nowTs - lastScrollLogAt >= 500;
-          const distanceFromBottom = Math.max(0, sHeight - sTop - cHeight);
-          const nearBottom = state.hasMore && distanceFromBottom < Math.max(400, cHeight * 1.2);
-          // Record both the final catalog geometry and the currently loaded
-          // prefix geometry so scrollbar changes can be distinguished from a
-          // real loaded-list shrink.
-          const cols = getVirtualCols();
-          const rowStride = VIRTUAL_ROW_H + VIRTUAL_GAP;
-          const expectedRows = Math.ceil(Math.max(0, Number(state.totalCount) || 0) / Math.max(1, cols));
-          const expectedFullHeight = expectedRows * rowStride;
-          const loadedTotalForGeometry =
-            (Number(state.loadedBaseOffset) || 0) + state.loadedVideos.length;
-          const loadedRowsForGeometry = Math.ceil(
-            Math.max(0, loadedTotalForGeometry) / Math.max(1, cols)
-          );
-          const loadedPrefixHeight = Math.max(rowStride, loadedRowsForGeometry * rowStride);
-          const thumbRatio = cHeight / Math.max(cHeight, sHeight);
-          const expectedThumbRatio = cHeight / Math.max(cHeight, expectedFullHeight);
-          if (shouldRateLog || nearBottom || jumpCount > 0) {
-            clientLog("virtual_scroll_geometry", filterStateFields({
-              scroll_top: Math.round(sTop),
-              scroll_height: sHeight,
-              client_height: cHeight,
-              expected_full_height: expectedFullHeight,
-              loaded_prefix_height: loadedPrefixHeight,
-              scrollbar_target: state.hasMore ? "loaded_prefix" : "catalog_total",
-              actual_vs_expected_ratio: Number((sHeight / Math.max(1, expectedFullHeight)).toFixed(3)),
-              thumb_ratio: Number(thumbRatio.toFixed(4)),
-              expected_thumb_ratio: Number(expectedThumbRatio.toFixed(4)),
-              loaded: state.loadedVideos.length,
-              loaded_base: Number(state.loadedBaseOffset) || 0,
-              total: state.totalCount || 0,
-              offset: state.offset || 0,
-              has_more: !!state.hasMore,
-              spacer_capped: false,
-              direction,
-            }), "INFO");
-          }
-          if (shouldRateLog || nearBottom || jumpCount > 0) {
-            lastScrollLogAt = nowTs;
-            clientLog("scroll_tick", filterStateFields({
-              elapsed_ms: renderMs,
-              scroll_top: Math.round(sTop),
-              scroll_height: sHeight,
-              client_height: cHeight,
-              direction,
-              delta_px: Math.round(deltaPx),
-              merged_ticks: mergedScrollTicks,
-              distance_from_bottom_px: Math.round(distanceFromBottom),
-              near_bottom: nearBottom,
-              loaded: state.loadedVideos.length,
-              loaded_base: Number(state.loadedBaseOffset) || 0,
-              total: state.totalCount || 0,
-              offset: state.offset || 0,
-              has_more: !!state.hasMore,
-              virtual_enabled: !!state.virtualEnabled,
-              jump_count: jumpCount,
-            }), (renderMs > 50 || nearBottom || jumpCount > 0) ? "WARN" : "INFO");
-          }
-          mergedScrollTicks = 0;
         });
       }, { passive: true });
       window.addEventListener("resize", () => {
@@ -5058,6 +5462,9 @@
         has_more: !!state.hasMore,
         total: state.totalCount || 0,
       }, (renderMs > 80 || dropped > 0 || (!append && wasScrolled)) ? "WARN" : "INFO");
+      try {
+        summarizeGridCardCoverage(append ? "render_grid_append" : "render_grid_replace");
+      } catch (_) {}
     }
 
     let lastScanning = false;
@@ -5139,7 +5546,21 @@
         else if (mergedOpts.nav === false || options.nav === false) mergedOpts.nav = false;
         mergedOpts.merged_source = (mergedOpts.merged_source ? mergedOpts.merged_source + "+" : "")
           + (options.soft ? "poll" : "ui");
-        if (pending && pending.timeoutId) clearTimeout(pending.timeoutId);
+        if (pending && pending.timeoutId) {
+          clientLog("refresh_timer_cleared", filterStateFields({
+            cleared_timer_id: pending.timer_id || "",
+            cleared_schedule_seq: pending.schedule_seq || 0,
+            cleared_age_ms: Math.max(0, nowTick - Number(pending.scheduled_at || 0)),
+            cleared_wait_ms: pending.scheduled_wait_ms || 0,
+            new_schedule_seq: scheduleSeq,
+            throttle_reason: state._refreshRunning === true
+              ? "refresh_running"
+              : (state._refreshPendingLock === true ? "pending_lock" : "cooldown"),
+            requested_soft: !!options.soft,
+            merged_source: mergedOpts.merged_source || "",
+          }), "WARN", callOperationId);
+          clearTimeout(pending.timeoutId);
+        }
         const wait = MIN_INTERVAL_MS - Math.max(0, nowTick - state._lastFullRefresh);
         clientLog("refresh_queued", filterStateFields({
           schedule_seq: scheduleSeq,
@@ -5161,16 +5582,27 @@
         const timeoutId = setTimeout(() => {
           const dequeueOperationId = (mergedOpts._queued_call_ids || [callOperationId])[0] || callOperationId;
           const timerFiredAt = Date.now();
+          const pendingAtFire = state._refreshPending || null;
+          const staleFire = !!(
+            pendingAtFire
+            && pendingAtFire.timer_id
+            && pendingAtFire.timer_id !== timerId
+          );
           clientLog("refresh_timer_fired", filterStateFields({
             schedule_seq: scheduleSeq,
             timer_id: timerId,
             call_operation_id: callOperationId,
             scheduled_wait_ms: Math.max(50, Math.round(wait)),
             actual_wait_ms: Math.max(0, timerFiredAt - timerScheduledAt),
-            pending_exists: !!state._refreshPending,
-            pending_schedule_seq: state._refreshPending ? state._refreshPending.schedule_seq : 0,
+            pending_exists: !!pendingAtFire,
+            pending_schedule_seq: pendingAtFire ? pendingAtFire.schedule_seq : 0,
+            pending_timer_id: pendingAtFire ? pendingAtFire.timer_id : "",
+            stale_fire: staleFire,
+            refresh_running: !!state._refreshRunning,
+            refresh_pending_lock: !!state._refreshPendingLock,
+            last_full_age_ms: Math.max(0, timerFiredAt - Number(state._lastFullRefresh || 0)),
             queued_call_count: (mergedOpts._queued_call_ids || []).length,
-          }), "INFO", dequeueOperationId);
+          }), staleFire ? "WARN" : "INFO", dequeueOperationId);
           clientLog("refresh_dequeued", filterStateFields({
             schedule_seq: scheduleSeq,
             call_operation_id: callOperationId,
@@ -5217,8 +5649,16 @@
           schedule_seq: scheduleSeq,
           timer_id: timerId,
           scheduled_wait_ms: Math.max(50, Math.round(wait)),
+          expected_fire_at: timerScheduledAt + Math.max(50, Math.round(wait)),
+          last_full_refresh: state._lastFullRefresh || 0,
+          last_full_age_ms: Math.max(0, nowTick - Number(state._lastFullRefresh || 0)),
+          refresh_running: !!state._refreshRunning,
+          refresh_pending_lock: !!state._refreshPendingLock,
           queued_call_count: mergedOpts._queued_call_ids.length,
           queued_call_ids: mergedOpts._queued_call_ids,
+          loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+          total: state.totalCount || 0,
+          has_more: !!state.hasMore,
         }), "INFO", callOperationId);
         return;
       }
@@ -5295,25 +5735,39 @@
         need_nav_cache: !!state.navCache,
         current_offset: state.offset || 0,
       });
-      // soft (polling) refresh preserves the user's current scroll/page.
-      // Explicit user-initiated refresh always resets to the first page.
+      // soft (polling) refresh must be silent when cards are already on screen:
+      // keep scroll/offset/thumb queue and patch badges in place. Only a hard
+      // (user) refresh resets to the first page and replaces the grid.
       const currentOffset = state.offset || 0;
+      const hadLoaded = (state.loadedVideos || []).length > 0;
+      const silentSoft = softRefresh && hadLoaded;
       const hadScrolled = currentOffset > (state.pageSize || 0);
-      if (!softRefresh || !hadScrolled) {
+      if (!softRefresh) {
         state.offset = 0;
         loadingMore = false;
         cancelListRequests();
         resetThumbQueue();
-        // 回到首屏必定是用户（或 soft refresh）发起了一次全新查询：
-        // 清掉 video_facets 高优先级占位，允许新的 tree_nav 先显示标签。
-        resetExtTagsSourcePriority(
-          softRefresh ? "soft_refresh_reset_offset" : "refresh_reset_offset"
-        );
+        resetExtTagsSourcePriority("refresh_reset_offset");
+        state._rebasedSortedTotal = 0;
+      } else if (!silentSoft) {
+        // Soft but empty grid — first paint path.
+        state.offset = 0;
+        loadingMore = false;
+        cancelListRequests();
+        resetThumbQueue();
+        resetExtTagsSourcePriority("soft_refresh_reset_offset");
       } else {
-        // Soft refresh still cancels previous fetches, but do NOT clear the
-        // visible thumbnail queue so cards do not flash placeholders.
+        // Silent soft: cancel in-flight list fetches only; keep thumbs/offset.
         cancelListRequests();
       }
+      clientLog("refresh_soft_mode", filterStateFields({
+        soft: softRefresh,
+        silent_soft: silentSoft,
+        had_loaded: hadLoaded,
+        had_scrolled: hadScrolled,
+        current_offset: currentOffset,
+        loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+      }), "INFO", refreshOperationId);
       let needNav = options.nav !== false;
       if (!state.navCache) needNav = true;
 
@@ -5413,16 +5867,16 @@
         state.folder = state.category + "/" + state.folder;
       }
       let data;
-      // Soft refresh keeps the user's current visible page (if the page is
-      // still within bounds after a scan updated totalCount).  This prevents
-      // the grid from jumping back to offset 0 every time the scan ticker
-      // emits a new generation.
-      const fetchOffset = (softRefresh && hadScrolled) ? currentOffset : 0;
+      // Silent soft keeps the pagination cursor and only samples the page at
+      // the current offset for count/facet updates; card meta is patched via
+      // videos-by-ids so earlier pages still receive dup/bad/duration.
+      const fetchOffset = silentSoft ? currentOffset : 0;
       const videosStarted = clientNow();
       refreshStage("fetch_videos_start", {
         requested_offset: fetchOffset,
         page_size: state.pageSize || 0,
         soft: softRefresh,
+        silent_soft: silentSoft,
       });
       try {
         data = await fetchVideos(fetchOffset, "refresh_primary");
@@ -5495,14 +5949,13 @@
       }
       state.totalCount = data.count || 0;
       state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
-      // A polling refresh intentionally requests the page at the current
-      // offset so it can observe catalog changes without resetting the
-      // user's scroll position.  That page is not the first page, so do not
-      // replace the loaded buffer or rewind the pagination cursor to its
-      // batch length (doing so made 40 loaded cards suddenly become 20 and
-      // caused the next request to duplicate an earlier page).
-      const preserveLoadedBuffer = softRefresh && hadScrolled && fetchOffset > 0;
+      // Polling soft refresh must not replace the loaded buffer or rewind the
+      // pagination cursor. Earlier pages stay on screen; badges are patched
+      // silently via videos-by-ids after the overlapping page merge.
+      const preserveLoadedBuffer = silentSoft;
       const pageHasMore = !!data.has_more;
+      let silentAppendRows = [];
+      let silentRebaseSorted = false;
       if (preserveLoadedBuffer) {
         const loadedTotal =
           (Number(state.loadedBaseOffset) || 0)
@@ -5513,15 +5966,121 @@
         // even though 40/59 are still incomplete.
         const prevHasMore = !!state.hasMore;
         state.hasMore = loadedTotal < state.totalCount;
-        state.offset = currentOffset;
+        // Keep load-more cursor at the end of the preserved buffer unless we
+        // rebase to a freshly sorted first page below.
+        state.offset = loadedTotal;
+        // Soft refresh only re-fetches the page at the current offset. Merge
+        // overlapping rows for badge/meta. New ids mean the preserved prefix
+        // is no longer a valid sorted head of the catalog (D: top-3 then
+        // append C: page-at-3 broke size_desc — log 235).
+        let pageMerged = 0;
+        let pageDup = 0;
+        let pageBad = 0;
+        let pageOverlap = 0;
+        const loadedIds = new Set(
+          (state.loadedVideos || [])
+            .filter((v) => v && v.id)
+            .map((v) => String(v.id))
+        );
+        if (Array.isArray(data.videos) && state.loadedVideos && state.loadedVideos.length) {
+          const byId = new Map();
+          for (const row of data.videos) {
+            if (row && row.id) byId.set(String(row.id), row);
+            if (row && row.dup) pageDup += 1;
+            if (row && row.bad) pageBad += 1;
+            if (row && row.id) {
+              if (loadedIds.has(String(row.id))) pageOverlap += 1;
+              else silentAppendRows.push(row);
+            }
+          }
+          if (byId.size) {
+            for (const item of state.loadedVideos) {
+              const fresh = item && item.id ? byId.get(String(item.id)) : null;
+              if (fresh && mergeLoadedVideoMeta(item, fresh)) pageMerged += 1;
+            }
+          }
+        }
+        const catalogGap = Math.max(0, (state.totalCount || 0) - loadedTotal);
+        const alreadyRebasedForTotal =
+          Number(state._rebasedSortedTotal || 0) >= (state.totalCount || 0)
+          && (state.totalCount || 0) > 0;
+        // Rebase only when the catalog grew since the last sorted rebuild.
+        // Repeating rebase on every poll (same total, new ids at current
+        // offset) shrinks 80 loaded cards back to pageSize=20 (log 236).
+        if (
+          silentAppendRows.length > 0
+          && catalogGap > 0
+          && !alreadyRebasedForTotal
+          && token === refreshToken
+        ) {
+          const coverWant = Math.max(state.pageSize || 20, loadedTotal);
+          try {
+            const sortedHead = await fetchVideosCovering(coverWant, "soft_silent_rebase_sorted");
+            if (token !== refreshToken) return;
+            if (sortedHead && Array.isArray(sortedHead.videos)) {
+              data = sortedHead;
+              state.totalCount = data.count || state.totalCount || 0;
+              state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || state.rawCount || 0;
+              state.hasMore = !!data.has_more;
+              state.offset = (data.videos || []).length;
+              state._rebasedSortedTotal = state.totalCount || 0;
+              silentRebaseSorted = true;
+              silentAppendRows = [];
+              if (Array.isArray(data.genres)) renderGenreTags(data.genres);
+              if (Array.isArray(data.themes)) renderThemeTags(data.themes);
+              if (Array.isArray(data.backgrounds)) renderBackgroundTags(data.backgrounds);
+              if (Array.isArray(data.types)) renderExtTags(data.types, "video_facets_rebase");
+              clientLog("soft_silent_rebase_sorted", filterStateFields({
+                sort: state.sort || "",
+                prev_loaded: loadedTotal,
+                prev_offset: currentOffset,
+                catalog_gap: catalogGap,
+                page_overlap: pageOverlap,
+                cover_want: coverWant,
+                rows: Array.isArray(data.videos) ? data.videos.length : 0,
+                total: state.totalCount || 0,
+                has_more: !!state.hasMore,
+              }), "INFO", refreshOperationId);
+            }
+          } catch (e) {
+            if (isAbortError(e) || token !== refreshToken) return;
+            clientLog("soft_silent_rebase_sorted_failed", filterStateFields({
+              sort: state.sort || "",
+              error: String(e && (e.stack || e) || "unknown"),
+              catalog_gap: catalogGap,
+              append_candidates: silentAppendRows.length,
+            }), "ERROR", refreshOperationId);
+          }
+        } else if (alreadyRebasedForTotal && silentAppendRows.length > 0) {
+          clientLog("soft_silent_rebase_skipped", filterStateFields({
+            reason: "same_total_already_rebased",
+            sort: state.sort || "",
+            total: state.totalCount || 0,
+            rebased_total: state._rebasedSortedTotal || 0,
+            loaded: loadedTotal,
+            append_candidates: silentAppendRows.length,
+            catalog_gap: catalogGap,
+          }), "INFO", refreshOperationId);
+          silentAppendRows = [];
+        }
         clientLog("refresh_loaded_buffer_preserved", filterStateFields({
-          reason: "soft_refresh_scrolled",
-          requested_offset: fetchOffset,
+          reason: silentRebaseSorted ? "soft_refresh_rebase_sorted" : "soft_refresh_silent",
+          sort: state.sort || "",
+          requested_offset: silentRebaseSorted ? 0 : fetchOffset,
           returned_rows: Array.isArray(data.videos) ? data.videos.length : 0,
-          loaded_before: state.loadedVideos ? state.loadedVideos.length : 0,
-          loaded_total: loadedTotal,
+          page_merged: pageMerged,
+          page_dup: pageDup,
+          page_bad: pageBad,
+          page_overlap: pageOverlap,
+          append_candidates: silentAppendRows.length,
+          catalog_gap: catalogGap,
+          rebased_sorted: silentRebaseSorted,
+          loaded_before: loadedTotal,
+          loaded_total: silentRebaseSorted
+            ? (Array.isArray(data.videos) ? data.videos.length : 0)
+            : loadedTotal,
           offset_before: currentOffset,
-          offset_after: currentOffset,
+          offset_after: state.offset,
           total: data.count || 0,
           page_has_more: pageHasMore,
           has_more_before: prevHasMore,
@@ -5676,11 +6235,37 @@
       if (!preserveLoadedBuffer) {
         refreshRenderMode = state.virtualEnabled ? "virtual_replace" : "flat";
         renderGrid(data.videos || [], lastScanning, false);
+      } else if (silentRebaseSorted) {
+        // Catalog grew: replace the stale prefix with a covering sorted window
+        // (at least as many cards as were already loaded).
+        refreshRenderMode = state.virtualEnabled ? "virtual_rebase_sorted" : "flat_rebase_sorted";
+        renderGrid(data.videos || [], lastScanning, false);
+        const scroller = $("contentScroll");
+        if (scroller && renderBeforeScrollTop > 0) {
+          scroller.scrollTop = renderBeforeScrollTop;
+        }
       } else if (state.virtualEnabled) {
         refreshRenderMode = "virtual_preserved";
         // Recompute spacers for a changed total while retaining all loaded
         // cards and the user's current scroll position.
         renderVirtualGrid();
+      } else {
+        // Flat grid kept old DOM; paint duration/dup/bad that arrived via the
+        // overlapping page merge above.
+        refreshRenderMode = "flat_preserved_silent";
+        applyCardBadgesFromLoaded();
+      }
+      // Metadata enrichment bumps lib_gen while soft refresh keeps earlier
+      // pages in memory. Pull fresh duration/dup/bad for the whole loaded
+      // buffer so thumb-corner badges update without replacing the list.
+      // Skip after rebase: the new first page already has current fields.
+      if (preserveLoadedBuffer && !silentRebaseSorted && token === refreshToken) {
+        try {
+          await refreshLoadedCardMeta("soft_refresh_silent");
+        } catch (_) {}
+        if (token !== refreshToken) return;
+        try { refreshStuckThumbs("soft_refresh_silent"); } catch (_) {}
+        summarizeGridCardCoverage("soft_refresh_silent");
       }
       refreshStage("grid_render_done", {
         stage_elapsed_ms: Number(clientElapsedMs(renderStartedAt).toFixed(1)),
@@ -5693,6 +6278,7 @@
         render_ms: Number(clientElapsedMs(renderStartedAt).toFixed(1)),
         token,
         mode: refreshRenderMode,
+        sort: state.sort || "",
         input_rows: Array.isArray(data.videos) ? data.videos.length : 0,
         loaded_before: renderBeforeLoaded,
         loaded_after: state.loadedVideos ? state.loadedVideos.length : 0,
@@ -5703,6 +6289,18 @@
         scroll_top_after: $("contentScroll") ? Math.round($("contentScroll").scrollTop) : 0,
         grid_card_count: $("grid") ? $("grid").querySelectorAll(".card").length : 0,
       }), "INFO", refreshOperationId);
+      if (
+        preserveLoadedBuffer
+        && silentRebaseSorted
+        && state.hasMore
+        && token === refreshToken
+        && (state.loadedVideos ? state.loadedVideos.length : 0) <= (state.pageSize || 20)
+      ) {
+        // Only auto-fill when rebase still left a single page (3→20). Do not
+        // kick loadMore after a covering rebase of an already-long list.
+        try { await loadMore("soft_silent_rebase_sorted"); } catch (_) {}
+        if (token !== refreshToken) return;
+      }
       const libTip = state.lib
         ? ((state.mountedRoots.find((r) => sameLibPath(r.path, state.lib)) || {}).label || state.lib)
         : (state.multi ? "全部目录" : "");
@@ -6104,59 +6702,27 @@
     }
 
     function setConvertUi(converting) {
-      const btn = $("btnToMp4");
+      const startBtn = $("btnStartTranscode");
+      const cancel = $("btnCancelTranscode");
       const fixBtn = $("btnFixAudio");
-      const fpsBtn = $("btnFps30");
-      const cancel = $("btnCancelMp4");
-      const cancelFps = $("btnCancelFps30");
-      if (btn) {
-        btn.disabled = !!converting;
-        if (!converting) btn.textContent = "转成 MP4";
+      const panel = $("convertPanel");
+      if (startBtn) {
+        startBtn.disabled = !!converting;
+        if (!converting) startBtn.textContent = "开始转换";
       }
       if (fixBtn) {
         fixBtn.disabled = !!converting;
-        if (!converting) fixBtn.textContent = "修复声音";
+        if (!converting) fixBtn.textContent = "仅修复声音";
       }
-      if (fpsBtn) {
-        if (converting) {
-          fpsBtn.disabled = true;
-          fpsBtn.classList.remove("fps-ready");
-        } else {
-          // Re-evaluate from current meta so we don't leave a contradictory gray "可转" state.
-          updateFps30Button({
-            width: (currentPlayMeta && currentPlayMeta.width) || 0,
-            height: (currentPlayMeta && currentPlayMeta.height) || 0,
-            fps: (currentPlayMeta && currentPlayMeta.fps) || 0,
-            is_hires: !!(currentPlayMeta && currentPlayMeta.is_hires),
-            can_fps30: !!(currentPlayMeta && currentPlayMeta.can_fps30),
-            fps_gate: (currentPlayMeta && currentPlayMeta.fps_gate) || "",
-            has_ffmpeg: typeof (currentPlayMeta && currentPlayMeta.has_ffmpeg) === "boolean"
-              ? currentPlayMeta.has_ffmpeg
-              : state.hasFfmpeg,
-            kind: currentPlayKind || "",
-          });
-        }
-      }
-      const isFps = !!(currentPlayMeta && currentPlayMeta.convertKind === "fps30");
-      if (cancel) cancel.style.display = converting && !isFps ? "" : "none";
-      if (cancelFps) cancelFps.style.display = converting && isFps ? "" : "none";
+      if (cancel) cancel.style.display = converting ? "" : "none";
+      if (converting && panel) panel.classList.remove("hidden");
+      const prog = $("transcodeProgress");
+      if (prog && !converting) prog.textContent = "";
+      if (!converting) updatePlayerConvertUi(currentPlayMeta || {});
     }
 
     function updateToMp4Button(kind, ext) {
-      const btn = $("btnToMp4");
-      if (!btn) return;
-      const k = (kind || "").toLowerCase();
-      const e = (ext || "").toLowerCase();
-      const can =
-        state.hasFfmpeg &&
-        (k === "m3u8" || k === "ts_set" || e === ".m3u8");
-      btn.style.display = can ? "" : "none";
-      if (!currentConvertJobId) {
-        btn.disabled = false;
-        btn.textContent = "转成 MP4";
-        const cancel = $("btnCancelMp4");
-        if (cancel) cancel.style.display = "none";
-      }
+      updatePlayerConvertUi({ ...(currentPlayMeta || {}), kind, ext });
     }
 
     function updateFixAudioButton(extra) {
@@ -6166,188 +6732,112 @@
       btn.style.display = can ? "" : "none";
       if (!currentConvertJobId) {
         btn.disabled = false;
-        btn.textContent = "修复声音";
+        btn.textContent = "仅修复声音";
       }
-    }
-
-    function isClientHires(w, h) {
-      return (Number(w) || 0) >= 2560 || (Number(h) || 0) >= 1440;
     }
 
     const FPS_TARGET_PRESETS = [24, 25, 30, 48, 50, 60];
-
-    function classifyHighFps(fps) {
-      const v = Number(fps);
-      if (!(v > 0)) return 0;
-      for (const cls of [60, 90, 120]) {
-        if (Math.abs(v - cls) <= 3) return cls;
-      }
-      return 0;
-    }
 
     function fpsTargetChoices(fps, fromApi) {
       if (Array.isArray(fromApi) && fromApi.length) {
         return fromApi.map((n) => Number(n)).filter((n) => n >= 1);
       }
       const src = Number(fps);
-      if (!(src > 0)) return [24, 25, 30];
+      if (!(src > 0)) return [];
       return FPS_TARGET_PRESETS.filter((t) => t < src - 0.5);
     }
 
     function selectedTargetFps(srcFps) {
-      const custom = $("fpsTargetCustom");
-      const sel = $("fpsTargetSelect");
+      const custom = $("transcodeFpsCustom");
+      const sel = $("transcodeFps");
       const customVal = custom && custom.value !== "" ? Number(custom.value) : 0;
       if (customVal >= 1 && customVal < (Number(srcFps) || 999) - 0.5) return Math.round(customVal);
-      const selVal = sel && sel.value ? Number(sel.value) : 0;
+      const selVal = sel && sel.value && sel.value !== "0" ? Number(sel.value) : 0;
       if (selVal >= 1) return Math.round(selVal);
-      const choices = fpsTargetChoices(srcFps);
-      return choices.indexOf(30) >= 0 ? 30 : (choices[0] || 30);
+      return 0;
     }
 
-    function fillFpsTargetSelect(fps, extra) {
-      const sel = $("fpsTargetSelect");
+    function fillTranscodeFpsSelect(fps, extra) {
+      const sel = $("transcodeFps");
       if (!sel) return;
       const choices = fpsTargetChoices(fps, extra && extra.fps_targets);
       const prev = sel.value;
       sel.innerHTML = "";
+      const keep = document.createElement("option");
+      keep.value = "0";
+      keep.textContent = "原帧率";
+      sel.appendChild(keep);
       choices.forEach((t) => {
         const opt = document.createElement("option");
         opt.value = String(t);
         opt.textContent = String(t);
         sel.appendChild(opt);
       });
-      const prefer = Number(prev) || 30;
-      if (choices.indexOf(prefer) >= 0) sel.value = String(prefer);
-      else if (choices.indexOf(30) >= 0) sel.value = "30";
-      else if (choices.length) sel.value = String(choices[0]);
+      if (choices.map(String).indexOf(prev) >= 0) sel.value = prev;
+      else sel.value = "0";
     }
 
-    function updateFps30Button(extra) {
-      const wrap = $("modalFpsActions");
-      const btn = $("btnFps30");
-      const label = $("fpsMetaLabel");
-      const cancel = $("btnCancelFps30");
-      const targetWrap = $("fpsTargetWrap");
-      if (!wrap || !btn) {
-        clientLog("fps30_ui_missing", {
-          has_wrap: !!wrap,
-          has_btn: !!btn,
-        }, "WARN");
-        return;
-      }
-      // Prefer /api/info has_ffmpeg: status may not have arrived yet when player opens.
+    function fillTranscodeScale(extra) {
+      const sel = $("transcodeScale");
+      if (!sel) return;
+      const h = Number((extra && extra.height) || (currentPlayMeta && currentPlayMeta.height) || 0);
+      const allowed = Array.isArray(extra && extra.scale_choices)
+        ? extra.scale_choices.map(Number)
+        : [1080, 720].filter((s) => h > s + 8);
+      Array.from(sel.options).forEach((opt) => {
+        const v = Number(opt.value);
+        if (!v) {
+          opt.disabled = false;
+          return;
+        }
+        opt.disabled = allowed.indexOf(v) < 0;
+      });
+      if (sel.options[sel.selectedIndex] && sel.options[sel.selectedIndex].disabled) sel.value = "0";
+    }
+
+    function updatePlayerConvertUi(extra) {
+      extra = extra || currentPlayMeta || {};
       if (extra && typeof extra.has_ffmpeg === "boolean") {
         state.hasFfmpeg = !!extra.has_ffmpeg;
       }
       const hasFfmpeg = !!state.hasFfmpeg;
-      const kind = (currentPlayKind || (extra && extra.kind) || "").toLowerCase();
-      const ext = String((extra && extra.ext) || "").toLowerCase();
-      const streamLike = kind === "m3u8" || kind === "ts_set" || ext === ".m3u8";
-      let w = Number((extra && extra.width) || (currentPlayMeta && currentPlayMeta.width) || 0);
-      let h = Number((extra && extra.height) || (currentPlayMeta && currentPlayMeta.height) || 0);
-      let fps = Number((extra && extra.fps) || (currentPlayMeta && currentPlayMeta.fps) || 0);
-      const video = $("player");
-      if (video && (video.videoWidth || video.videoHeight)) {
-        if (!w) w = video.videoWidth || 0;
-        if (!h) h = video.videoHeight || 0;
-      }
-      const apiCan = !!(extra && extra.can_fps30);
-      const apiHires = !!(extra && extra.is_hires);
-      const clientHires = isClientHires(w, h);
-      const hires = apiHires || clientHires;
-      const gate = (extra && extra.fps_gate) || "";
-      const fpsClass = Number((extra && extra.fps_class) || classifyHighFps(fps) || 0);
+      const blocked = extra.transcode_block || "";
+      const can = hasFfmpeg
+        && blocked !== "no_realmedia"
+        && blocked !== "rm_pending"
+        && extra.can_transcode !== false;
       const busy = !!currentConvertJobId && currentPlayId === currentConvertVid;
-      const fpsBusy = busy && (currentConvertKind === "fps30" || (currentPlayMeta && currentPlayMeta.convertKind === "fps30"));
-      const eligible = !streamLike && (apiCan || (hasFfmpeg && hires && !!fpsClass));
-      const can = eligible && !busy;
-      // Hide whenever unusable; keep visible only while convertible or fps30 in progress.
-      const show = can || fpsBusy;
-      wrap.classList.toggle("hidden", !show);
-      btn.style.display = show ? "" : "none";
-      if (targetWrap) {
-        targetWrap.classList.toggle("visible", !!show && !fpsBusy);
-        const sel = $("fpsTargetSelect");
-        const custom = $("fpsTargetCustom");
-        if (sel) sel.disabled = !can;
-        if (custom) custom.disabled = !can;
+      const startBtn = $("btnStartTranscode");
+      const hint = $("convertHint");
+      const extSel = $("transcodeExt");
+      if (extSel && extra.default_out_ext && !extSel.dataset.userPicked) {
+        extSel.value = extra.default_out_ext;
       }
+      fillTranscodeFpsSelect(Number(extra.fps || 0), extra);
+      fillTranscodeScale(extra);
+      if (startBtn) {
+        startBtn.disabled = !can || busy;
+        startBtn.textContent = busy ? "转换中…" : "开始转换";
+      }
+      if (hint) {
+        if (blocked === "no_realmedia") hint.textContent = extra.transcode_block_msg || "当前 ffmpeg 不含 RealMedia，无法转 RMVB";
+        else if (blocked === "rm_pending") hint.textContent = extra.transcode_block_msg || "正在检测 ffmpeg 是否支持 RMVB…";
+        else if (!hasFfmpeg) hint.textContent = "未找到 ffmpeg，无法转换";
+        else hint.textContent = "";
+      }
+      updateFixAudioButton(extra);
+      paintPlayerChips(Object.assign({}, currentPlayMeta || {}, extra));
+    }
 
-      clientLog("fps30_button_update", {
-        show,
-        can,
-        eligible,
-        busy,
-        fps_busy: fpsBusy,
-        hires,
-        api_can: apiCan,
-        api_hires: apiHires,
-        client_hires: clientHires,
-        has_ffmpeg: hasFfmpeg,
-        stream_like: streamLike,
-        width: w,
-        height: h,
-        fps,
-        fps_class: fpsClass,
-        gate: gate || "",
-        video_id: currentPlayId || "",
-        convert_job_id: currentConvertJobId || "",
-      }, "INFO");
-      try {
-        console.info("[fps30]", {
-          show, can, eligible, busy, fpsBusy, hires, hasFfmpeg, streamLike, w, h, fps, fpsClass, gate, apiCan,
-        });
-      } catch (_) {}
-      if (currentPlayMeta) {
-        currentPlayMeta.width = w;
-        currentPlayMeta.height = h;
-        currentPlayMeta.fps = fps;
-        currentPlayMeta.is_hires = hires;
-        currentPlayMeta.can_fps30 = eligible;
-        currentPlayMeta.fps_gate = eligible ? "ok" : (gate || "hidden");
-        currentPlayMeta.has_ffmpeg = hasFfmpeg;
-        currentPlayMeta.fps_class = fpsClass;
-        currentPlayMeta.fps_targets = fpsTargetChoices(fps, extra && extra.fps_targets);
-      }
-      if (!show) {
-        if (cancel) cancel.style.display = "none";
-        btn.disabled = true;
-        btn.classList.remove("fps-ready");
-        return;
-      }
-      fillFpsTargetSelect(fps, extra || (currentPlayMeta || {}));
-      const target = selectedTargetFps(fps);
-      const fpsShow = fps >= 1 ? Math.round(fps) : "?";
-      const res = (w && h) ? `${w}×${h}` : "检测中";
-      if (label) {
-        label.textContent = fpsBusy
-          ? `帧率转码 · ${res} · ${fpsShow}fps · 进行中`
-          : `帧率转码 · ${res} · ${fpsShow}fps · 可选目标帧率`;
-      }
-      if (!fpsBusy) btn.textContent = `${fpsShow}→${target}fps`;
-      btn.disabled = !can;
-      btn.classList.toggle("fps-ready", !!can);
-      btn.title = `仅降低帧率：把 ${res} ${fpsShow}fps 转为 ${target}fps（与转 MP4 / 修声音无关）`;
-      if (!busy && cancel) cancel.style.display = "none";
+    function updateFps30Button(extra) {
+      updatePlayerConvertUi(extra);
     }
 
     function bindFpsMetaFromVideo(video) {
       if (!video) return;
       const refresh = () => {
         if (!currentPlayId) return;
-        updateFps30Button({
-          width: (currentPlayMeta && currentPlayMeta.width) || 0,
-          height: (currentPlayMeta && currentPlayMeta.height) || 0,
-          fps: (currentPlayMeta && currentPlayMeta.fps) || 0,
-          is_hires: !!(currentPlayMeta && currentPlayMeta.is_hires),
-          can_fps30: !!(currentPlayMeta && currentPlayMeta.can_fps30),
-          fps_gate: (currentPlayMeta && currentPlayMeta.fps_gate) || "",
-          has_ffmpeg: typeof (currentPlayMeta && currentPlayMeta.has_ffmpeg) === "boolean"
-            ? currentPlayMeta.has_ffmpeg
-            : state.hasFfmpeg,
-          kind: currentPlayKind || "",
-        });
+        updatePlayerConvertUi(currentPlayMeta || {});
       };
       video.addEventListener("loadedmetadata", refresh);
       video.addEventListener("loadeddata", refresh);
@@ -6428,23 +6918,12 @@
           }
           if (attached) {
             $("modalInfo").textContent = msg || (`处理中… ${pct}%`);
-            if (kind === "fps30") {
-              const fpsBtn = $("btnFps30");
-              if (fpsBtn) {
-                fpsBtn.style.display = "";
-                fpsBtn.textContent = `帧率转码 ${pct}%`;
-              }
-              const wrap = $("modalFpsActions");
-              if (wrap) wrap.classList.remove("hidden");
-              const label = $("fpsMetaLabel");
-              if (label) label.textContent = msg || (`帧率转码中 ${pct}%`);
-            } else if (kind === "fix_audio") {
-              const fixBtn = $("btnFixAudio");
-              if (fixBtn && fixBtn.style.display !== "none") fixBtn.textContent = `修复中 ${pct}%`;
-            } else {
-              const btn = $("btnToMp4");
-              if (btn && btn.style.display !== "none") btn.textContent = `转换中 ${pct}%`;
-            }
+            const prog = $("transcodeProgress");
+            if (prog) prog.textContent = msg || (`处理中… ${pct}%`);
+            const startBtn = $("btnStartTranscode");
+            if (startBtn) startBtn.textContent = `转换中 ${pct}%`;
+            const panel = $("convertPanel");
+            if (panel) panel.classList.remove("hidden");
           }
           syncQueueBadgeFromJobs([{ ...data, id: jobId }]);
         } catch (e) {
@@ -6461,33 +6940,9 @@
 
     async function startConvertMp4() {
       if (!currentPlayId) return;
-      if (currentPlayMeta) currentPlayMeta.convertKind = "mp4";
-      currentConvertKind = "mp4";
-      currentConvertVid = currentPlayId;
-      setConvertUi(true);
-      const btn = $("btnToMp4");
-      if (btn) btn.textContent = "转换中…";
-      $("modalInfo").textContent = "正在提交转换任务…";
-      try {
-        const root = (currentPlayMeta && currentPlayMeta.root) || "";
-        const rootQ = root ? ("?root=" + encodeURIComponent(root)) : "";
-        const r = await fetch("/api/convert-mp4/" + encodeURIComponent(currentPlayId) + rootQ, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        const data = await r.json();
-        if (!r.ok || !data.ok || !data.job_id) {
-          finishConvertJobUi();
-          $("modalInfo").textContent = (data && data.msg) || "无法开始转换";
-          return;
-        }
-        $("modalInfo").textContent = data.msg || "转换已开始…";
-        await pollConvertJob(data.job_id, "转换完成，已加入片库");
-      } catch (e) {
-        finishConvertJobUi();
-        $("modalInfo").textContent = "请求失败: " + e;
-      }
+      const extSel = $("transcodeExt");
+      if (extSel) extSel.value = "mp4";
+      await startTranscode();
     }
 
     async function startFixAudio() {
@@ -6496,16 +6951,14 @@
       currentConvertKind = "fix_audio";
       currentConvertVid = currentPlayId;
       setConvertUi(true);
-      const btn = $("btnFixAudio");
-      if (btn) btn.textContent = "修复中…";
       $("modalInfo").textContent = "正在提交修复任务…";
       try {
         const root = (currentPlayMeta && currentPlayMeta.root) || "";
         const rootQ = root ? ("?root=" + encodeURIComponent(root)) : "";
-        const r = await fetch("/api/fix-audio/" + encodeURIComponent(currentPlayId) + rootQ, {
+        const r = await fetch("/api/transcode/" + encodeURIComponent(currentPlayId) + rootQ, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify({ fix_audio: true }),
         });
         const data = await r.json();
         if (!r.ok || !data.ok || !data.job_id) {
@@ -6521,69 +6974,49 @@
       }
     }
 
-    async function startFps30() {
+    async function startTranscode() {
       if (!currentPlayId) return;
-      if (!(currentPlayMeta && currentPlayMeta.can_fps30)) {
-        const reason = (currentPlayMeta && currentPlayMeta.fps_gate) || "条件不满足";
-        $("modalInfo").textContent = "当前不可帧率转码：" + reason;
-        clientLog("fps30_start_blocked", {
-          video_id: currentPlayId,
-          reason,
-        }, "WARN", currentOperationId);
-        return;
-      }
       const srcFps = (currentPlayMeta && currentPlayMeta.fps) || 0;
-      const targetFps = selectedTargetFps(srcFps);
-      if (currentPlayMeta) currentPlayMeta.convertKind = "fps30";
-      currentConvertKind = "fps30";
+      const targetFps = selectedTargetFps(srcFps) || 0;
+      const outExt = ($("transcodeExt") && $("transcodeExt").value) || "mp4";
+      const scale = Number(($("transcodeScale") && $("transcodeScale").value) || 0) || 0;
+      const encoder = ($("transcodeEncoder") && $("transcodeEncoder").value) || "auto";
+      if (currentPlayMeta) currentPlayMeta.convertKind = "transcode";
+      currentConvertKind = "transcode";
       currentConvertVid = currentPlayId;
-      clientLog("fps30_start_clicked", {
-        video_id: currentPlayId,
-        root: (currentPlayMeta && currentPlayMeta.root) || "",
-        width: (currentPlayMeta && currentPlayMeta.width) || 0,
-        height: (currentPlayMeta && currentPlayMeta.height) || 0,
-        fps: srcFps,
-        target_fps: targetFps,
-        can_fps30: !!(currentPlayMeta && currentPlayMeta.can_fps30),
-        fps_gate: (currentPlayMeta && currentPlayMeta.fps_gate) || "",
-      }, "INFO", currentOperationId);
       setConvertUi(true);
-      const btn = $("btnFps30");
-      if (btn) btn.textContent = "帧率转码中…";
-      $("modalInfo").textContent = "正在提交帧率转码任务（→" + targetFps + "fps）…";
+      $("modalInfo").textContent = "正在提交转换任务…";
+      const body = {
+        out_ext: outExt,
+        video_encoder: encoder,
+        scale: scale,
+      };
+      if (targetFps >= 1) body.target_fps = targetFps;
       try {
         const root = (currentPlayMeta && currentPlayMeta.root) || "";
         const rootQ = root ? ("?root=" + encodeURIComponent(root)) : "";
-        const r = await fetch("/api/fps30/" + encodeURIComponent(currentPlayId) + rootQ, {
+        const r = await fetch("/api/transcode/" + encodeURIComponent(currentPlayId) + rootQ, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ target_fps: targetFps }),
+          body: JSON.stringify(body),
         });
         const data = await r.json();
-        clientLog("fps30_start_response", {
-          video_id: currentPlayId,
-          http_ok: r.ok,
-          ok: !!(data && data.ok),
-          job_id: (data && data.job_id) || "",
-          msg: (data && data.msg) || "",
-          status: r.status,
-        }, r.ok && data && data.ok ? "INFO" : "ERROR", currentOperationId);
         if (!r.ok || !data.ok || !data.job_id) {
           finishConvertJobUi();
-          $("modalInfo").textContent = (data && data.msg) || "无法开始帧率转码";
+          $("modalInfo").textContent = (data && data.msg) || "无法开始转换";
           return;
         }
-        $("modalInfo").textContent = (data.msg || "帧率转码已开始…") + " 进度见上方按钮，也可打开「转换队列」。";
+        $("modalInfo").textContent = (data.msg || "转换已开始…") + " 进度也可在「转换队列」查看。";
         refreshQueueBadge();
-        await pollConvertJob(data.job_id, "帧率转码完成，已加入片库");
+        await pollConvertJob(data.job_id, "转换完成，已加入片库");
       } catch (e) {
-        clientLog("fps30_start_exception", {
-          video_id: currentPlayId,
-          error: String(e),
-        }, "ERROR", currentOperationId);
         finishConvertJobUi();
         $("modalInfo").textContent = "请求失败: " + e;
       }
+    }
+
+    async function startFps30() {
+      await startTranscode();
     }
 
     function bindPlayProgress(video) {
@@ -6615,7 +7048,9 @@
             video.currentTime = t;
             const base = $("modalInfo").textContent || "";
             if (!base.includes("续播")) {
-              $("modalInfo").textContent = base + `\n已从 ${formatResumeTime(t)} 续播`;
+              const next = (base ? base + " · " : "") + `已从 ${formatResumeTime(t)} 续播`;
+              $("modalInfo").textContent = next;
+              $("modalInfo").title = next;
             }
           }
         } catch (_) {}
@@ -6643,8 +7078,8 @@
         tip += (tip ? " · " : "") + "此格式浏览器可能无法播放，建议用「系统播放器」";
       }
       if (audioHard) {
-        tip += (tip ? "\n" : "") +
-          `浏览器可能听不到声音（音频为 ${audioCodec || "不兼容格式"}）。可点「修复声音」生成 AAC 版，或用「系统播放器」`;
+        tip += (tip ? " · " : "") +
+          `浏览器可能听不到声音（音频为 ${audioCodec || "不兼容格式"}）。可点「仅修复声音」或用「系统播放器」`;
       }
       currentPlayMeta = {
         name: name || "",
@@ -6660,6 +7095,15 @@
         is_hires: !!(extra && extra.is_hires),
         can_fps30: !!(extra && extra.can_fps30),
         fps_gate: (extra && extra.fps_gate) || "",
+        fps_targets: (extra && extra.fps_targets) || [],
+        scale_choices: (extra && extra.scale_choices) || [],
+        can_transcode: extra && extra.can_transcode !== false,
+        transcode_block: (extra && extra.transcode_block) || "",
+        transcode_block_msg: (extra && extra.transcode_block_msg) || "",
+        default_out_ext: (extra && extra.default_out_ext) || "",
+        is_rm: !!(extra && extra.is_rm),
+        ext: ext || "",
+        kind: kind || "",
         audio_hard: audioHard,
         audio_codec: audioCodec,
         has_ffmpeg: typeof (extra && extra.has_ffmpeg) === "boolean"
@@ -6676,9 +7120,7 @@
       if ($("coverPanel")) $("coverPanel").style.display = "none";
       $("modalTitle").textContent = name;
       paintPlayerInfoTip();
-      updateToMp4Button(kind, ext);
-      updateFixAudioButton(extra);
-      updateFps30Button({ ...(extra || {}), kind, ext });
+      updatePlayerConvertUi({ ...(extra || {}), kind, ext });
       const video = $("player");
       bindFpsMetaFromVideo(video);
       video.onended = null;
@@ -6747,11 +7189,13 @@
       // 浏览器无法在访客电脑上可靠调起桌面播放器；不再下载 bat / 协议跳转
       const escapeAttr = (s) => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
       const urlAttr = escapeAttr(playUrl);
+      $("modalInfo").classList.add("modal-info-rich");
       $("modalInfo").innerHTML =
-        "局域网访客请用页面内播放，或把地址粘贴到本机播放器。<br>" +
+        "局域网访客请用页面内播放，或把地址粘贴到本机播放器。 " +
         '<button type="button" class="btn primary" data-open-stream-url="' + urlAttr + '">浏览器新标签打开</button> ' +
-        '<button type="button" class="btn" data-copy-play-url="' + urlAttr + '">复制播放地址</button><br>' +
+        '<button type="button" class="btn" data-copy-play-url="' + urlAttr + '">复制播放地址</button> ' +
         "<code style='word-break:break-all'>" + escapeHtml(playUrl) + "</code>";
+      $("modalInfo").title = playUrl;
     }
 
     async function localAction(action) {
@@ -6821,31 +7265,25 @@
       currentPlayMeta = { name: "", folder: "" };
       currentPlayKind = "";
       if ($("coverPanel")) $("coverPanel").style.display = "none";
-      const btn = $("btnToMp4");
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = "转成 MP4";
-        btn.style.display = "none";
+      const panel = $("convertPanel");
+      if (panel) panel.classList.add("hidden");
+      const startBtn = $("btnStartTranscode");
+      if (startBtn) {
+        startBtn.disabled = false;
+        startBtn.textContent = "开始转换";
       }
       const fixBtn = $("btnFixAudio");
       if (fixBtn) {
         fixBtn.disabled = false;
-        fixBtn.textContent = "修复声音";
+        fixBtn.textContent = "仅修复声音";
         fixBtn.style.display = "none";
       }
-      const cancel = $("btnCancelMp4");
+      const cancel = $("btnCancelTranscode");
       if (cancel) cancel.style.display = "none";
-      const fpsWrap = $("modalFpsActions");
-      if (fpsWrap) fpsWrap.classList.add("hidden");
-      const fpsBtn = $("btnFps30");
-      if (fpsBtn) {
-        fpsBtn.disabled = true;
-        fpsBtn.classList.remove("fps-ready");
-        fpsBtn.textContent = "60→30fps";
-        fpsBtn.style.display = "none";
-      }
-      const cancelFps = $("btnCancelFps30");
-      if (cancelFps) cancelFps.style.display = "none";
+      const prog = $("transcodeProgress");
+      if (prog) prog.textContent = "";
+      const chips = $("playerChips");
+      if (chips) chips.innerHTML = "";
       video.onended = null;
       video.pause();
       video.removeAttribute("src");
@@ -7757,16 +8195,19 @@
 
     $("btnLocalOpen").addEventListener("click", () => localAction("open"));
     $("btnFixAudio").addEventListener("click", () => startFixAudio());
-    $("btnToMp4").addEventListener("click", () => startConvertMp4());
-    if ($("btnFps30")) $("btnFps30").addEventListener("click", () => startFps30());
-    const refreshFpsBtnLabel = () => {
-      if (!currentPlayMeta || !currentPlayMeta.can_fps30) return;
-      updateFps30Button(currentPlayMeta);
-    };
-    if ($("fpsTargetSelect")) $("fpsTargetSelect").addEventListener("change", refreshFpsBtnLabel);
-    if ($("fpsTargetCustom")) $("fpsTargetCustom").addEventListener("input", refreshFpsBtnLabel);
-    if ($("btnCancelFps30")) $("btnCancelFps30").addEventListener("click", () => cancelConvertMp4());
-    $("btnCancelMp4").addEventListener("click", () => cancelConvertMp4());
+    if ($("btnConvertToggle")) {
+      $("btnConvertToggle").addEventListener("click", () => {
+        const panel = $("convertPanel");
+        if (!panel) return;
+        panel.classList.toggle("hidden");
+        updatePlayerConvertUi(currentPlayMeta || {});
+      });
+    }
+    if ($("btnStartTranscode")) $("btnStartTranscode").addEventListener("click", () => startTranscode());
+    if ($("btnCancelTranscode")) $("btnCancelTranscode").addEventListener("click", () => cancelConvertMp4());
+    if ($("transcodeExt")) $("transcodeExt").addEventListener("change", () => {
+      $("transcodeExt").dataset.userPicked = "1";
+    });
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
     $("btnReveal").addEventListener("click", () => localAction("reveal"));
     $("modalInfo").addEventListener("click", async (e) => {
@@ -7853,34 +8294,73 @@
     });
 
     // —— 转换队列 ——
+    // Badge polls only while queued/running jobs exist. Idle = no timer.
+    const QUEUE_BADGE_POLL_MS = 2500;
+    const QUEUE_MODAL_POLL_MS = 1500;
     let queuePollTimer = 0;
     let queueBadgeTimer = 0;
+    let queueBadgeInflight = null;
+
+    function stopQueueBadgePoll() {
+      if (queueBadgeTimer) {
+        clearInterval(queueBadgeTimer);
+        queueBadgeTimer = 0;
+      }
+    }
+
+    function startQueueBadgePoll() {
+      if (queueBadgeTimer) return;
+      queueBadgeTimer = setInterval(() => { refreshQueueBadge(); }, QUEUE_BADGE_POLL_MS);
+    }
 
     function syncQueueBadgeFromJobs(jobs) {
       const qbtn = $("queueBtn");
-      if (!qbtn) return;
       const list = Array.isArray(jobs) ? jobs : [];
       const active = list.filter((j) => j && (j.status === "queued" || j.status === "running"));
+      if (!qbtn) return active.length;
       if (!active.length) {
         qbtn.textContent = "转换队列";
-        return;
+        stopQueueBadgePoll();
+        return 0;
       }
       const running = active.find((j) => j.status === "running") || active[0];
       const pct = running.percent != null ? Number(running.percent) : 0;
-      const kind =
-        running.kind === "fps30" ? "帧率"
-        : running.kind === "fix_audio" ? "修声音"
-        : "转MP4";
+      const kind = convertJobKindLabel(running);
       qbtn.textContent = active.length === 1
         ? `队列 · ${kind} ${pct}%`
         : `队列(${active.length}) · ${kind} ${pct}%`;
+      startQueueBadgePoll();
+      return active.length;
     }
 
     async function refreshQueueBadge() {
+      if (queueBadgeInflight) return queueBadgeInflight;
+      queueBadgeInflight = (async () => {
+        try {
+          const data = await fetch("/api/convert/queue").then((r) => r.json());
+          syncQueueBadgeFromJobs(data.jobs || []);
+        } catch (_) {}
+      })();
       try {
-        const data = await fetch("/api/convert/queue").then((r) => r.json());
-        syncQueueBadgeFromJobs(data.jobs || []);
-      } catch (_) {}
+        await queueBadgeInflight;
+      } finally {
+        queueBadgeInflight = null;
+      }
+    }
+
+    function convertJobKindLabel(j) {
+      if (!j) return "转换";
+      if (j.kind === "fix_audio") return "修声音";
+      if (j.kind === "fps30") return "降帧" + (j.target_fps ? ("→" + j.target_fps) : "");
+      if (j.kind === "transcode") {
+        const parts = [];
+        if (j.target_fps) parts.push("降帧→" + j.target_fps);
+        if (j.scale) parts.push("压缩" + j.scale + "p");
+        if (j.out_ext) parts.push("转" + j.out_ext);
+        else parts.push("转封装");
+        return parts.join(" · ") || "转换";
+      }
+      return "转封装";
     }
 
     async function loadQueueModal() {
@@ -7901,9 +8381,16 @@
         const par = $("queueParallel");
         if (par && data.parallel) par.value = String(data.parallel);
         const jobs = data.jobs || [];
-        syncQueueBadgeFromJobs(jobs);
+        const activeN = syncQueueBadgeFromJobs(jobs);
+        // Modal open: keep refreshing only while work is in flight.
+        if (activeN > 0) {
+          if (!queuePollTimer) queuePollTimer = setInterval(loadQueueModal, QUEUE_MODAL_POLL_MS);
+        } else if (queuePollTimer) {
+          clearInterval(queuePollTimer);
+          queuePollTimer = 0;
+        }
         if (!jobs.length) {
-          body.textContent = "队列为空。播放页可「转成 MP4 / 修复声音 / 帧率转码」；清理页可批量加入。";
+          body.textContent = "队列为空。播放页「转换」面板可转封装 / 降帧 / 压缩；清理页可批量加入。";
           return;
         }
         const statusLabel = {
@@ -7917,10 +8404,7 @@
         body.innerHTML = jobs.map((j) => {
           const st = j.status || "";
           const canCancel = st === "queued" || st === "running";
-          const kind =
-            j.kind === "fix_audio" ? "修声音"
-            : j.kind === "fps30" ? ("帧率转码" + (j.target_fps ? ("→" + j.target_fps) : ""))
-            : "转MP4";
+          const kind = convertJobKindLabel(j);
           const pct = j.percent != null ? Number(j.percent) : 0;
           const stText = statusLabel[st] || st;
           const pctText = (st === "running" || st === "queued" || pct > 0)
@@ -7948,17 +8432,17 @@
     function openQueueModal() {
       $("queueModal").classList.add("open");
       loadQueueModal();
-      if (queuePollTimer) clearInterval(queuePollTimer);
-      queuePollTimer = setInterval(loadQueueModal, 1500);
     }
     function closeQueueModal() {
       $("queueModal").classList.remove("open");
       if (queuePollTimer) { clearInterval(queuePollTimer); queuePollTimer = 0; }
     }
     if ($("queueBtn")) $("queueBtn").addEventListener("click", openQueueModal);
-    if (!queueBadgeTimer) {
+    // One shot on load (catch leftover jobs). Share the in-flight fetch if
+    // the script somehow runs twice in the same page.
+    if (!window.__vgQueueBadgeInit) {
+      window.__vgQueueBadgeInit = true;
       refreshQueueBadge();
-      queueBadgeTimer = setInterval(refreshQueueBadge, 2500);
     }
     if ($("queueModalClose")) $("queueModalClose").addEventListener("click", closeQueueModal);
     if ($("queueModal")) $("queueModal").addEventListener("click", (e) => {
@@ -8097,13 +8581,104 @@
       return { cardsHit, imgsHit, rowsHit, continueHit, beforeTop, afterTop, hasMoreRepaired };
     }
 
+    let coverSeekBusy = false;
+    let coverSeekPollTimer = 0;
+
+    function setCoverSeekBusy(busy) {
+      coverSeekBusy = !!busy;
+      ["btnCoverSeek", "btnCoverNow"].forEach((id) => {
+        const btn = $(id);
+        if (btn) btn.disabled = coverSeekBusy;
+      });
+    }
+
+    function stopCoverSeekPoll() {
+      if (coverSeekPollTimer) {
+        clearInterval(coverSeekPollTimer);
+        coverSeekPollTimer = 0;
+      }
+    }
+
+    function applyCoverResult(videoId, data, root, seek, source) {
+      $("modalInfo").textContent = data.msg || (data.ok ? "封面已更新" : "失败");
+      if (data.ok && data.thumb_v) {
+        const local = applyCoverLocally(videoId, data, root);
+        clientLog(source === "upload" ? "cover_upload_done" : "cover_seek_done", {
+          video_id: videoId,
+          seek,
+          thumb_v: data.thumb_v || 0,
+          thumb_id: data.thumb_id || "",
+          cards_hit: local.cardsHit,
+          scroll_top: local.afterTop,
+          refresh_skipped: true,
+        });
+        return true;
+      }
+      clientLog(source === "upload" ? "cover_upload_failed" : "cover_seek_failed", {
+        video_id: videoId,
+        seek,
+        msg: data.msg || "",
+      }, "WARN");
+      return false;
+    }
+
+    async function pollCoverJob(jobId, videoId, root, seek) {
+      stopCoverSeekPoll();
+      const started = Date.now();
+      const tick = async () => {
+        if (Date.now() - started > 120000) {
+          stopCoverSeekPoll();
+          setCoverSeekBusy(false);
+          $("modalInfo").textContent = "截帧超时";
+          clientLog("cover_seek_failed", { video_id: videoId, seek, msg: "timeout" }, "WARN");
+          return;
+        }
+        try {
+          const r = await fetch("/api/thumb/job/" + encodeURIComponent(jobId));
+          const data = await r.json();
+          const st = data.status || "";
+          if (st === "done") {
+            stopCoverSeekPoll();
+            setCoverSeekBusy(false);
+            applyCoverResult(videoId, data, root, seek, "seek");
+            return;
+          }
+          if (st === "error" || !r.ok) {
+            stopCoverSeekPoll();
+            setCoverSeekBusy(false);
+            $("modalInfo").textContent = data.msg || "截帧失败";
+            clientLog("cover_seek_failed", {
+              video_id: videoId,
+              seek,
+              msg: data.msg || "",
+            }, "WARN");
+            return;
+          }
+          if ($("modalInfo")) $("modalInfo").textContent = data.msg || "正在截取封面…";
+        } catch (e) {
+          stopCoverSeekPoll();
+          setCoverSeekBusy(false);
+          $("modalInfo").textContent = "换封面失败: " + e;
+          clientLog("cover_seek_failed", {
+            video_id: videoId,
+            seek,
+            error: String(e && (e.stack || e) || "unknown"),
+          }, "ERROR");
+        }
+      };
+      await tick();
+      if (coverSeekBusy) coverSeekPollTimer = setInterval(tick, 600);
+    }
+
     async function applyCoverSeek(seek) {
-      if (!currentPlayId) return;
+      if (!currentPlayId || coverSeekBusy) return;
+      setCoverSeekBusy(true);
       $("modalInfo").textContent = "正在截取封面…";
       const root = (currentPlayMeta && currentPlayMeta.root) || "";
+      const videoId = currentPlayId;
       const scroll = $("contentScroll");
       clientLog("cover_seek_start", {
-        video_id: currentPlayId,
+        video_id: videoId,
         seek,
         root,
         scroll_top: scroll ? Math.round(scroll.scrollTop) : 0,
@@ -8111,36 +8686,28 @@
         loaded: state.loadedVideos ? state.loadedVideos.length : 0,
       });
       try {
-        const url = "/api/thumb/" + encodeURIComponent(currentPlayId) + (root ? ("?root=" + encodeURIComponent(root)) : "");
+        const url = "/api/thumb/" + encodeURIComponent(videoId) + (root ? ("?root=" + encodeURIComponent(root)) : "");
         const r = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ seek }),
         });
         const data = await r.json();
-        $("modalInfo").textContent = data.msg || (data.ok ? "封面已更新" : "失败");
-        if (data.ok) {
-          const local = applyCoverLocally(currentPlayId, data, root);
-          clientLog("cover_seek_done", {
-            video_id: currentPlayId,
-            seek,
-            thumb_v: data.thumb_v || 0,
-            thumb_id: data.thumb_id || "",
-            cards_hit: local.cardsHit,
-            scroll_top: local.afterTop,
-            refresh_skipped: true,
-          });
-        } else {
-          clientLog("cover_seek_failed", {
-            video_id: currentPlayId,
-            seek,
-            msg: data.msg || "",
-          }, "WARN");
+        if (data.job_id) {
+          await pollCoverJob(data.job_id, videoId, root, seek);
+          return;
+        }
+        setCoverSeekBusy(false);
+        if (data.ok) applyCoverResult(videoId, data, root, seek, "seek");
+        else {
+          $("modalInfo").textContent = data.msg || "失败";
+          clientLog("cover_seek_failed", { video_id: videoId, seek, msg: data.msg || "" }, "WARN");
         }
       } catch (e) {
+        setCoverSeekBusy(false);
         $("modalInfo").textContent = "换封面失败: " + e;
         clientLog("cover_seek_failed", {
-          video_id: currentPlayId,
+          video_id: videoId,
           seek,
           error: String(e && (e.stack || e) || "unknown"),
         }, "ERROR");

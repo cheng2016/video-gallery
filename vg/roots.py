@@ -684,10 +684,11 @@ def publish_unified_library(
 ) -> int:
     """Merge mounted roots into STATE videos/indexes.
 
-    ``heavy=False`` is used for post-thumbnail refreshes: thumbnail fields do
-    not affect duplicate grouping, so rerunning the expensive duplicate pass
-    is unnecessary. ``refresh_tree=False`` keeps the existing folder tree when
-    only media metadata changed.
+    ``heavy=False`` skips the duplicate pass inside ``compute_catalog`` for
+    speed, but this path always rebuilds ``merged`` from per-disk catalog
+    copies that omit runtime ``dup`` badges. After a light rebuild we remake
+    badges (signature cache keeps this cheap). ``refresh_tree=False`` keeps
+    the existing folder tree when only media metadata changed.
     """
     publish_started = time.perf_counter()
     from vg.diagnostics import emit as _pub_emit
@@ -781,6 +782,17 @@ def publish_unified_library(
         pass
 
     STATE["videos"] = merged
+    try:
+        from vg.diagnostics import catalog_plane_snapshot
+
+        catalog_plane_snapshot(
+            "publish_unified_after_merge",
+            reason_tag=reason,
+            heavy=heavy,
+            remade_pending=not heavy,
+        )
+    except Exception:
+        pass
     tree_refresh_started = time.perf_counter()
     if refresh_tree:
         STATE["tree"] = tree_for_scope(None)
@@ -857,8 +869,49 @@ def publish_unified_library(
         )
     except Exception:
         pass
+    remade_after_light = False
     try:
         rebuild_indexes(merged, heavy=heavy)
+        # Light publishes copy rows from disk_libs without runtime dup_* fields.
+        # Skipping remake left duplicate_rows=0 after thumbnail_finalize even
+        # though the prior heavy publish had just marked dozens of badges
+        # (see logs: heavy publish → 34 dups, light finalize → 0 dups).
+        if not heavy:
+            from vg.duplicates import mark_duplicates
+
+            before_dups = sum(1 for v in merged if v.get("dup"))
+            mark_duplicates(merged)
+            remade_after_light = True
+            after_dups = sum(1 for v in merged if v.get("dup"))
+            try:
+                from vg.diagnostics import catalog_plane_snapshot
+
+                catalog_plane_snapshot(
+                    "publish_unified_after_dup_remake",
+                    reason_tag=reason,
+                    heavy=heavy,
+                    before_dups=before_dups,
+                    after_dups=after_dups,
+                )
+            except Exception:
+                pass
+            try:
+                from vg.diagnostics import emit
+
+                emit(
+                    "INFO",
+                    "duplicate_badges_remade_after_light_publish",
+                    force=True,
+                    reason=reason,
+                    merged_count=len(merged),
+                    duplicate_rows_before=before_dups,
+                    duplicate_rows_after=after_dups,
+                    same_size_candidate_rows=sum(
+                        size_counts[size] for size in candidate_sizes
+                    ),
+                )
+            except Exception:
+                pass
     except Exception:
         try:
             from vg.diagnostics import emit
@@ -885,7 +938,8 @@ def publish_unified_library(
             force=True,
             heavy=heavy,
             reason=reason,
-            duplicate_rebuild_skipped=not heavy,
+            duplicate_rebuild_skipped=not heavy and not remade_after_light,
+            remade_after_light=remade_after_light,
             merged_count=len(merged),
             duplicate_rows=dup_count,
             missing_file_sig=missing_sig_rows,

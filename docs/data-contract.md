@@ -5,19 +5,12 @@
 
 ## 磁盘格式
 
-每个片库根目录对应一份 `index.json`：
+运行时片库以各盘缓存目录里的 `catalog.sqlite` 为准（`vg/catalog_db.py`）。
+`index.json` 只是兼容遗留；新写入走 SQLite。当前 `INDEX_SCHEMA_VERSION = 3`。
 
-```json
-{
-  "schema_ver": 2,
-  "root": "D:\\Videos",
-  "videos": [],
-  "updated": "2026-08-06T10:00:00"
-}
-```
-
-所有写入必须经过 `vg.schema.serialize_video_item()`；禁止功能模块自行筛字段后写
-`index.json`。未知字段会保留，便于将来扩展。
+所有写入必须经过 `vg.schema.serialize_video_item()`；禁止功能模块自行筛字段后写库。
+未知持久化字段会保留，便于将来扩展。空库有加载冷却，避免每次 `ensure_library`
+都重开 0 行 SQLite。
 
 ## 稳定字段
 
@@ -26,7 +19,7 @@
 - 属性：`size`、`size_h`、`mtime`、`mtime_h`、`duration`、`duration_h`
 - 归属：`root`、`_lib_root`、`_lib_cache`、`_folder_raw`
 - 类型：`kind`、`segments`、`seg_count`
-- 元数据：`genres`、`probe_ver`、`probe_duration_done`、`probe_audio_done`、`audio_codec`、`audio_hard`
+- 元数据：`genres`、`themes`、`backgrounds`、`taxonomy_ver`、`probe_ver`、`probe_duration_done`、`probe_audio_done`、`probe_video_meta_done`、`audio_codec`、`audio_hard`、`width`、`height`、`fps`
 - 状态：`thumb`、`has_thumb`、`thumb_v`、`bad`、`bad_reason`
 
 `id` 在多盘合并时可能为避免冲突而临时改写；原磁盘 ID 存在运行时字段
@@ -42,7 +35,7 @@
 - 剧集派生：`series_id`、`series_title`、`series_n`、`cover_id`、`is_series`、`episodes`
 - API 缩略图别名：`thumb_id`
 
-这些字段可以由功能模块派生，但绝不能写入 `index.json`。
+这些字段可以由功能模块派生，但绝不能写入 `catalog.sqlite` / `index.json`。
 
 ## 重复检测
 
@@ -55,10 +48,35 @@
 只改这个模块，并同时运行 `tests/test_duplicates.py` 与
 `tests/test_cleanup_scope.py`。
 
+`dup*` 只存在于运行时平面，不会写入 SQLite。`publish_unified_library(heavy=False)`
+会用各盘目录副本重建列表，角标会被抹掉；同一路径会立刻 `mark_duplicates` 再补上
+（日志 `duplicate_badges_remade_after_light_publish`）。列表 API 再用
+`_apply_runtime_duplicate_fields` 叠一层，避免 SQLite 页还没带上角标。
+
+`duration_h` / `bad` 属于持久化平面。API 对缺 `duration_h` 的行会从数字
+`duration` 现算，封面角标才能在静默刷新后跟上。
+
+## 双平面
+
+| 平面 | 内容 | 谁写 |
+|------|------|------|
+| 持久化 | 路径、体积、时长、坏片、预览图、探测字段 | 扫描 / 元数据 / 缩略图 → `catalog.sqlite` |
+| 运行时 | `dup*`、合集派生、搜索缓存 `_q` | `mark_duplicates` / `attach_series` / 列表 API |
+
+两平面不是同一把事务。light publish 替换 `STATE["videos"]` 时，日志
+`catalog_plane_snapshot` 可能打出 `plane_conflict=runtime_dup_wiped` 且
+`conflict_expected=True`，随后 remade 把角标填回。`catalog_db_op_overlap`
+表示全量 `save_catalog` 与增量 upsert 时间靠近，不等于写坏。
+
+封面墙静默刷新（`silent_soft`）保留已加载卡片：目录变大时按当前排序
+covering fetch 一次 rebase，**同一 total 不再反复 rebase**，避免滚到后面的列表
+被缩回第一页。
+
 ## 模块边界
 
 - `vg/catalog.py`：频道、搜索串、目录树和派生索引。只有
   `apply_catalog_to_state()` 可以把完整 Catalog 写回 `STATE`。
+  `compute_catalog(heavy=False)` 跳过重复检测，供 light publish 用。
 - `vg/scan.py`：只负责扫描流程、缩略图批任务和扫描完成通知；为兼容旧调用，
   暂时重导出部分 `vg.catalog` 函数。
 - `vg/roots.py`：只负责多盘挂载与合并，不再为树/频道加载扫描模块。

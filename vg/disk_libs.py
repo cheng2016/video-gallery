@@ -21,6 +21,32 @@ _load_log_ts: dict[str, float] = {}
 # refresh does not re-stat the same absent cache dir and re-emit WARN.
 _catalog_missing_until: dict[str, float] = {}
 _CATALOG_MISSING_COOLDOWN_S = 60.0
+# Empty catalog.sqlite (0 accepted rows): same idea — do not reopen SQLite
+# on every ensure_library / publish pass during the same startup burst.
+# Keyed by cache path; invalidated when catalog mtime changes (scan wrote rows).
+_catalog_empty_until: dict[str, float] = {}
+_catalog_empty_mtime: dict[str, float] = {}
+_CATALOG_EMPTY_COOLDOWN_S = 60.0
+
+
+def _mark_catalog_empty(cache_s: str, mtime: float = 0.0) -> None:
+    _catalog_empty_until[cache_s] = time.time() + _CATALOG_EMPTY_COOLDOWN_S
+    _catalog_empty_mtime[cache_s] = float(mtime or 0)
+
+
+def _catalog_empty_cooled(cache_s: str, mtime: float | None = None) -> bool:
+    until = _catalog_empty_until.get(cache_s)
+    if not until or until <= time.time():
+        return False
+    if mtime is not None and float(mtime or 0) != float(_catalog_empty_mtime.get(cache_s) or 0):
+        _clear_catalog_empty(cache_s)
+        return False
+    return True
+
+
+def _clear_catalog_empty(cache_s: str) -> None:
+    _catalog_empty_until.pop(cache_s, None)
+    _catalog_empty_mtime.pop(cache_s, None)
 
 
 def _libs_guard(operation: str):
@@ -114,7 +140,10 @@ def read_root_library(root: Path | str) -> list[dict] | None:
     if not catalog_exists(cache):
         return None
 
+    cache_s = str(cache)
     index_mtime = catalog_mtime(cache)
+    if _catalog_empty_cooled(cache_s, index_mtime):
+        return None
 
     with _libs_guard("disk_libs_read_cached"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)
@@ -128,6 +157,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
 
     videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
     if not videos:
+        _mark_catalog_empty(cache_s, index_mtime or 0)
         return None
     clean = [
         _disk_item(v, root_s, cache)
@@ -135,6 +165,10 @@ def read_root_library(root: Path | str) -> list[dict] | None:
         if isinstance(v, dict) and v.get("id") and item_belongs_to_root(v, root_s)
     ]
     by_id = {v["id"]: v for v in clean}
+    if not by_id:
+        _mark_catalog_empty(cache_s, index_mtime or 0)
+        return None
+    _clear_catalog_empty(cache_s)
     _store_lib(root_s, cache, by_id, index_mtime=index_mtime)
     return list(by_id.values())
 
@@ -384,6 +418,24 @@ def save_library_items(
                 existing["live"] = False
             if bump_gen:
                 STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+    if saved:
+        try:
+            from vg.diagnostics import emit_rate_limited
+
+            emit_rate_limited(
+                "INFO",
+                "catalog_upsert_batch",
+                key=f"upsert|{saved}|{int(bump_gen)}|{int(allow_insert)}",
+                interval=5.0,
+                force=True,
+                saved=saved,
+                roots=len(groups),
+                allow_insert=bool(allow_insert),
+                bump_gen=bool(bump_gen),
+                thread=threading.current_thread().name,
+            )
+        except Exception:
+            pass
     return saved
 
 
@@ -478,6 +530,8 @@ def _store_lib(
     stamp_lib_meta(list(by_id.values()), root=root_s, cache=cache)
     if index_mtime is None and cache:
         index_mtime = catalog_mtime(cache)
+    if cache and by_id:
+        _clear_catalog_empty(str(cache))
     with _libs_guard("disk_lib_store"):
         libs = STATE.setdefault("disk_libs", {})
         libs[root_s] = {
@@ -534,8 +588,26 @@ def load_library_from_index(root: Path | str) -> bool:
         return False
     if not catalog_exists(cache):
         _catalog_missing_until[cache_s] = time.time() + _CATALOG_MISSING_COOLDOWN_S
+        from vg.catalog_db import catalog_db_path
         from vg.diagnostics import emit_rate_limited
 
+        catalog_path = catalog_db_path(cache)
+        catalog_is_file = False
+        catalog_size = -1
+        catalog_mtime_s = 0.0
+        catalog_stat_error = ""
+        if catalog_path is not None:
+            try:
+                st = catalog_path.stat()
+                catalog_is_file = catalog_path.is_file()
+                catalog_size = int(st.st_size)
+                catalog_mtime_s = float(st.st_mtime)
+            except FileNotFoundError:
+                catalog_is_file = False
+                catalog_size = -1
+                catalog_mtime_s = 0.0
+            except OSError as exc:
+                catalog_stat_error = f"{type(exc).__name__}:{exc}"
         emit_rate_limited(
             "WARN",
             "disk_library_load_skipped",
@@ -545,10 +617,17 @@ def load_library_from_index(root: Path | str) -> bool:
             reason="catalog_missing",
             root=root_s,
             cache=cache,
+            catalog_path=str(catalog_path) if catalog_path else "",
+            catalog_is_file=catalog_is_file,
+            catalog_size_bytes=catalog_size,
+            catalog_mtime=catalog_mtime_s,
+            catalog_stat_error=catalog_stat_error,
         )
         return False
     _catalog_missing_until.pop(cache_s, None)
     index_mtime = catalog_mtime(cache)
+    if _catalog_empty_cooled(cache_s, index_mtime):
+        return False
     with _libs_guard("disk_lib_load_state"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         if (
@@ -614,6 +693,7 @@ def load_library_from_index(root: Path | str) -> bool:
                 source_rows=len(videos),
                 accepted_rows=len(clean),
             )
+            _mark_catalog_empty(cache_s, index_mtime or 0)
             with _libs_guard("disk_lib_empty_cleanup"):
                 lib = (STATE.get("disk_libs") or {}).get(root_s)
                 if lib is not None:
@@ -621,6 +701,7 @@ def load_library_from_index(root: Path | str) -> bool:
                     if not lib.get("by_id"):
                         (STATE.get("disk_libs") or {}).pop(root_s, None)
             return False
+        _clear_catalog_empty(cache_s)
         final_mtime = catalog_mtime(cache)
         _store_lib(root_s, cache, by_id, index_mtime=final_mtime or index_mtime)
         now = time.time()

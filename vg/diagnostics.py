@@ -141,6 +141,163 @@ def emit_rate_limited(
     return True
 
 
+# Last catalog-plane counters so writers can detect silent wipe races without
+# guessing. Compared on every catalog_plane_snapshot emit.
+_plane_lock = threading.Lock()
+_last_plane: dict[str, object] = {}
+
+
+def catalog_plane_snapshot(reason: str, *, force: bool = True, **fields) -> dict:
+    """Emit one dual-plane snapshot: durable vs runtime overlay counters.
+
+    Proves/disproves \"non-atomic insert corrupted catalog\" vs \"runtime
+    overlay wiped by a light publish / list replace\" by logging:
+    - videos list identity + lib_gen
+    - dup (runtime-only) vs bad/duration (persisted) counts
+    - concurrent writer flags (meta/scan/thumb)
+    - delta vs previous snapshot (especially dup_rows collapsing to 0)
+    """
+    from vg.state import STATE
+    import vg.state as runtime_state
+
+    videos = STATE.get("videos") or []
+    dup_rows = 0
+    bad_rows = 0
+    duration_rows = 0
+    for video in videos:
+        if not isinstance(video, dict):
+            continue
+        if video.get("dup"):
+            dup_rows += 1
+        if video.get("bad"):
+            bad_rows += 1
+        if (
+            video.get("duration_h")
+            or video.get("duration")
+            or video.get("probe_duration_done")
+            or video.get("seg_count")
+            or video.get("kind") in ("series", "m3u8")
+        ):
+            duration_rows += 1
+
+    snapshot = {
+        "reason": reason,
+        "thread": threading.current_thread().name,
+        "lib_gen": int(STATE.get("lib_gen") or 0),
+        "videos_id": id(videos),
+        "videos_len": len(videos),
+        "dup_rows": dup_rows,
+        "bad_rows": bad_rows,
+        "duration_known_rows": duration_rows,
+        "scanning": bool(STATE.get("scanning")),
+        "meta_running": bool(getattr(runtime_state, "_meta_running", False)),
+        "thumb_bulk": bool(runtime_state.thumb_bulk_running()),
+        **fields,
+    }
+    conflict = ""
+    with _plane_lock:
+        prev = dict(_last_plane) if _last_plane else {}
+        if prev:
+            snapshot["prev_lib_gen"] = prev.get("lib_gen")
+            snapshot["prev_videos_id"] = prev.get("videos_id")
+            snapshot["prev_videos_len"] = prev.get("videos_len")
+            snapshot["prev_dup_rows"] = prev.get("dup_rows")
+            snapshot["prev_bad_rows"] = prev.get("bad_rows")
+            snapshot["list_replaced"] = prev.get("videos_id") != snapshot["videos_id"]
+            prev_dup = int(prev.get("dup_rows") or 0)
+            # Classic light-publish wipe: list length stable/grew but runtime
+            # dup overlay vanished without an explicit remake log nearby.
+            if prev_dup > 0 and dup_rows == 0 and len(videos) >= int(prev.get("videos_len") or 0):
+                conflict = "runtime_dup_wiped"
+            prev_bad = int(prev.get("bad_rows") or 0)
+            if prev_bad > 0 and bad_rows == 0 and len(videos) >= int(prev.get("videos_len") or 0):
+                conflict = conflict or "persisted_bad_wiped"
+        _last_plane.clear()
+        _last_plane.update(
+            {
+                "lib_gen": snapshot["lib_gen"],
+                "videos_id": snapshot["videos_id"],
+                "videos_len": snapshot["videos_len"],
+                "dup_rows": dup_rows,
+                "bad_rows": bad_rows,
+                "reason": reason,
+            }
+        )
+    if conflict:
+        snapshot["plane_conflict"] = conflict
+        # Light publish / mid-scan list replace intentionally drops runtime-only
+        # dup fields until remake. Treat those as expected; warn only when a
+        # "stable" writer leaves the overlay wiped.
+        expected = reason in {
+            "apply_catalog_to_state",
+            "publish_unified_after_merge",
+            "scan_publish_live",
+        }
+        snapshot["conflict_expected"] = expected
+        emit(
+            "INFO" if expected else "WARN",
+            "catalog_plane_conflict" if not expected else "catalog_plane_snapshot",
+            force=True,
+            **snapshot,
+        )
+    else:
+        emit("INFO", "catalog_plane_snapshot", force=force, **snapshot)
+    return snapshot
+
+
+# Detect full-catalog replace overlapping incremental UPSERT on the same
+# catalog.sqlite (audit: cache._index_lock vs catalog_db._lock_for).
+_db_op_lock = threading.Lock()
+_last_db_op: dict[str, dict[str, object]] = {}
+_DB_OP_OVERLAP_S = 2.0
+
+
+def note_catalog_db_op(op: str, *, cache, rows: int = 0, elapsed_ms: float = 0.0) -> None:
+    """Record a catalog.sqlite write; WARN if replace and upsert collide."""
+    try:
+        cache_key = str(cache)
+    except Exception:
+        cache_key = repr(cache)
+    now = time.monotonic()
+    thread = threading.current_thread().name
+    overlap = None
+    with _db_op_lock:
+        prev = _last_db_op.get(cache_key)
+        if prev:
+            gap = now - float(prev.get("at") or 0.0)
+            prev_op = str(prev.get("op") or "")
+            if (
+                gap <= _DB_OP_OVERLAP_S
+                and prev_op
+                and prev_op != op
+                and {prev_op, op} == {"save_catalog", "upsert"}
+            ):
+                overlap = {
+                    "prev_op": prev_op,
+                    "prev_thread": prev.get("thread"),
+                    "prev_rows": prev.get("rows"),
+                    "gap_ms": round(gap * 1000.0, 1),
+                }
+        _last_db_op[cache_key] = {
+            "op": op,
+            "at": now,
+            "thread": thread,
+            "rows": int(rows or 0),
+        }
+    if overlap:
+        emit(
+            "WARN",
+            "catalog_db_op_overlap",
+            force=True,
+            cache=cache_key,
+            op=op,
+            rows=int(rows or 0),
+            elapsed_ms=round(float(elapsed_ms or 0.0), 1),
+            thread=thread,
+            **overlap,
+        )
+
+
 def info(event: str, *, force: bool = False, **fields) -> None:
     """Emit an INFO-level diagnostic event."""
     emit("INFO", event, force=force or _full_logging, **fields)

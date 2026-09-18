@@ -135,6 +135,18 @@ def fps_target_choices(fps) -> list[int]:
     return [t for t in FPS_TARGET_PRESETS if t < src - 0.5]
 
 
+SCALE_PRESETS = (1080, 720)
+
+
+def scale_choices(width=None, height=None) -> list[int]:
+    """Heights the source can downscale to (already-smaller sizes omitted)."""
+    try:
+        h = int(height or 0)
+    except (TypeError, ValueError):
+        return []
+    return [s for s in SCALE_PRESETS if h > s + 8]
+
+
 def normalize_target_fps(src_fps, target_fps, default: int = 30) -> int | None:
     """Return a valid integer target strictly below source, or None."""
     choices = fps_target_choices(src_fps)
@@ -1265,6 +1277,17 @@ def _bg_enrich_metadata() -> None:
             f"元数据完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}"
         )
         log(f"[元数据] 完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}")
+        try:
+            from vg.diagnostics import catalog_plane_snapshot
+
+            catalog_plane_snapshot(
+                "metadata_enrichment_done",
+                readable=ok_n,
+                failed=fail_n,
+                reused=reused_n,
+            )
+        except Exception:
+            pass
         from vg.diagnostics import perf as diagnostic_perf
 
         diagnostic_perf(

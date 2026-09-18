@@ -341,6 +341,9 @@ def main():
     bootlog.step("find_ffmpeg")
     STATE["ffmpeg"] = find_ffmpeg()
     bootlog.write(f"ffmpeg={STATE['ffmpeg']!r}")
+    STATE["ffmpeg_rm"] = None
+    STATE["ffmpeg_rm_pending"] = False
+    bootlog.write("ffmpeg_rm=pending_until_player")
     if not STATE["ffmpeg"]:
         print("提示: 未检测到 ffmpeg，将无法生成预览图（不影响播放）。")
         if sys.platform == "darwin":

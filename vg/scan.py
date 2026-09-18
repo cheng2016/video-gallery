@@ -590,6 +590,10 @@ def start_scan(
                         elapsed_ms=(time.perf_counter() - reuse_started) * 1000.0,
                     )
                     STATE["scan_progress"] = f"已复用启动缓存，共 {preloaded_count} 个视频"
+                    # Soft rescan after enabling duration/audio probe must still
+                    # enqueue ffprobe. Previously this path returned without
+                    # touching metadata, so cards stayed duration-less.
+                    _start_metadata_after_scan(root)
                 else:
                     used_cache = load_or_scan(root, do_thumbs=do_thumbs, force=False, background=False)
                 STATE["scanning"] = False
@@ -1015,6 +1019,7 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
                     file_count=stored_n,
                     folder_counts=stored_counts,
                 )
+            _start_metadata_after_scan(root)
             return
         count_started = time.perf_counter()
         emit(
@@ -1154,6 +1159,14 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
                 file_count=live_n,
                 folder_counts=live,
             )
+        # Cache-stable reopen used to fill thumbs only. Kick duration/audio
+        # enrichment too so enabling probes + soft rescan actually works.
+        if outcome in (
+            "stable_no_changes",
+            "counts_initialized",
+            "incremental_scan",
+        ):
+            _start_metadata_after_scan(root)
     except Exception as e:
         outcome = "failed"
         log(f"[计数] 失败: {e}")
@@ -1832,6 +1845,16 @@ def scan_videos(
             except Exception as _exc:
                 log(f"[扫描] STATE[videos] 同步失败（仅保留当前根）: {_exc}")
                 STATE["videos"] = list(found)
+            try:
+                from vg.diagnostics import catalog_plane_snapshot
+
+                catalog_plane_snapshot(
+                    "scan_publish_live",
+                    found=len(found),
+                    force_tree=bool(force_tree),
+                )
+            except Exception:
+                pass
             if not quiet:
                 try:
                     from vg.roots import get_mounted_roots, tree_for_scope
@@ -2534,6 +2557,37 @@ def scan_videos(
                     tree_rebuild=True,
                 )
                 rebuild_indexes(found, heavy=False)
+                # Same trap as multi-root light publish: if a prior step replaced
+                # ``found`` with unmarked copies, badges disappear. Remake when
+                # the light rebuild left zero dups despite same-size candidates.
+                try:
+                    from vg.duplicates import mark_duplicates
+
+                    if not any(v.get("dup") for v in found):
+                        size_counts: dict[int, int] = {}
+                        for video in found:
+                            try:
+                                size = int(video.get("size") or 0)
+                            except (TypeError, ValueError):
+                                size = 0
+                            if size > 0:
+                                size_counts[size] = size_counts.get(size, 0) + 1
+                        if any(count >= 2 for count in size_counts.values()):
+                            before_dups = 0
+                            mark_duplicates(found)
+                            emit(
+                                "INFO",
+                                "duplicate_badges_remade_after_light_publish",
+                                force=True,
+                                reason="thumbnail_finalize_single_root",
+                                merged_count=len(found),
+                                duplicate_rows_before=before_dups,
+                                duplicate_rows_after=sum(
+                                    1 for v in found if v.get("dup")
+                                ),
+                            )
+                except Exception as remake_exc:
+                    log(f"[扫描] 轻量收尾后补重复标签失败: {remake_exc}")
                 STATE["tree"] = build_tree(root, found)
                 emit(
                     "PERF",

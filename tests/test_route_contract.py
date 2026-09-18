@@ -27,6 +27,7 @@ EXPECTED_ROUTES = {
     ("/api/export-static/status", frozenset({"GET"})),
     ("/api/fix-audio/<vid>", frozenset({"POST"})),
     ("/api/fps30/<vid>", frozenset({"POST"})),
+    ("/api/transcode/<vid>", frozenset({"POST"})),
     ("/api/info/<vid>", frozenset({"GET"})),
     ("/api/local/<vid>", frozenset({"POST"})),
     ("/api/privacy", frozenset({"GET", "POST"})),
@@ -37,6 +38,7 @@ EXPECTED_ROUTES = {
     ("/api/share", frozenset({"GET", "POST"})),
     ("/api/status", frozenset({"GET"})),
     ("/api/thumb/<vid>", frozenset({"POST"})),
+    ("/api/thumb/job/<job_id>", frozenset({"GET"})),
     ("/api/tree", frozenset({"GET"})),
     ("/api/videos", frozenset({"GET"})),
     ("/api/videos-by-ids", frozenset({"POST"})),
@@ -166,13 +168,36 @@ class RouteContractTests(unittest.TestCase):
         with mock.patch.object(web, "diagnostic_emit") as emit:
             response = self.client.post(
                 "/api/client-log",
-                json={"event": "filter_layout", "level": "INFO", "fields": {"height": 20}},
+                json={"event": "nav_highlight", "level": "INFO", "fields": {"height": 20}},
             )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(any(
             len(call.args) > 1 and call.args[1] == "client_action"
             for call in emit.call_args_list
         ))
+
+    def test_layout_geometry_client_log_is_dropped_even_with_full_logging(self) -> None:
+        from unittest import mock
+        from vg import diagnostics
+
+        diagnostics.set_full_logging(True)
+        try:
+            with mock.patch.object(web, "diagnostic_emit") as emit:
+                response = self.client.post(
+                    "/api/client-log",
+                    json={
+                        "event": "filter_layout",
+                        "level": "INFO",
+                        "fields": {"root": "{" * 200, "rows": "[" * 200},
+                    },
+                )
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(any(
+                len(call.args) > 1 and call.args[1] == "client_action"
+                for call in emit.call_args_list
+            ))
+        finally:
+            diagnostics.set_full_logging(False)
 
     def test_scan_route_delegates_mounting_to_background_scan(self) -> None:
         old_scanning = STATE.get("scanning")

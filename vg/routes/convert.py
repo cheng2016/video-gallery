@@ -6,12 +6,17 @@ import re
 
 from flask import jsonify, request
 
+from vg.config import RM_EXTS, RM_UNAVAILABLE_MSG
 from vg.convert import (
     _kill_convert_proc,
     convert_parallel_limit,
     enqueue_convert_job,
     list_convert_jobs,
+    normalize_scale,
+    normalize_video_encoder,
     pump_convert_queue,
+    resolve_transcode_out_ext,
+    schedule_ffmpeg_rm_probe,
 )
 from vg.catalog_repository import CatalogRepository, catalog_repository
 from vg.drives import save_prefs
@@ -81,6 +86,10 @@ def register(
                 "percent": int(job.get("percent") or 0),
                 "out_path": job.get("out_path") or "",
                 "added_id": job.get("added_id") or "",
+                "target_fps": int(job.get("target_fps") or 0) or None,
+                "out_ext": job.get("out_ext") or "",
+                "scale": int(job.get("scale") or 0) or 0,
+                "video_encoder": job.get("video_encoder") or "",
             })
 
     @app.route("/api/convert-mp4/job/<job_id>/cancel", methods=["POST"])
@@ -221,6 +230,98 @@ def register(
             "msg": msg,
             "status": "queued",
             "target_fps": target_fps,
+        })
+
+    @app.route("/api/transcode/<vid>", methods=["POST"])
+    def api_transcode_start(vid: str):
+        """Unified remux / fps / scale / encoder job from the player convert panel."""
+        from vg.media import normalize_target_fps
+        from vg.util import log as _log
+
+        prefer_root = (request.args.get("root") or "").strip() or None
+        body = request.get_json(silent=True) or {}
+        _log(
+            f"[转换] API 请求 vid={vid} root={prefer_root or ''} "
+            f"body_keys={sorted(body.keys())}"
+        )
+        if not re.fullmatch(r"[a-f0-9]{16}", vid or ""):
+            return jsonify({"ok": False, "msg": "无效 id"}), 400
+        if not STATE.get("ffmpeg"):
+            return jsonify({"ok": False, "msg": "未找到 ffmpeg，请先安装后再试"}), 400
+        mounts = repository.mounted_roots()
+        if not (STATE.get("root") or mounts):
+            return jsonify({"ok": False, "msg": "尚未选择盘符"}), 400
+        if len(mounts) > 1 and not prefer_root:
+            return jsonify({"ok": False, "msg": "多盘转换必须指定 root"}), 400
+        item = repository.find_video(vid, prefer_root=prefer_root)
+        if not item:
+            return jsonify({"ok": False, "msg": "未找到视频"}), 404
+        item_root = (
+            item.get("_lib_root") or item.get("root") or prefer_root or ""
+        ).strip()
+        if body.get("fix_audio"):
+            ok, msg, job_id = enqueue_convert_job(
+                vid,
+                kind="fix_audio",
+                name=item.get("name") or "",
+                root=item_root or None,
+            )
+            return jsonify({"ok": ok, "job_id": job_id, "msg": msg, "status": "queued", "kind": "fix_audio"})
+
+        ext = (item.get("ext") or "").lower()
+        if ext in RM_EXTS:
+            if STATE.get("ffmpeg_rm") is None:
+                schedule_ffmpeg_rm_probe()
+                return jsonify({"ok": False, "msg": "正在检测 ffmpeg 是否支持 RMVB，请稍后再试"}), 400
+            if not STATE.get("ffmpeg_rm"):
+                return jsonify({"ok": False, "msg": RM_UNAVAILABLE_MSG}), 400
+
+        encoder = normalize_video_encoder(body.get("video_encoder"))
+        out_ext, remap_note = resolve_transcode_out_ext(body.get("out_ext"), item, encoder)
+        src_fps = item.get("fps")
+        target_raw = body.get("target_fps")
+        target_fps = None
+        if target_raw not in (None, "", 0, "0"):
+            if src_fps is not None:
+                target_fps = normalize_target_fps(src_fps, target_raw)
+                if not target_fps:
+                    return jsonify({"ok": False, "msg": "目标帧率必须低于源帧率"}), 400
+            else:
+                try:
+                    target_fps = int(round(float(target_raw)))
+                except (TypeError, ValueError):
+                    return jsonify({"ok": False, "msg": "目标帧率无效"}), 400
+        scale_raw = body.get("scale")
+        scale = normalize_scale(scale_raw, item.get("height"))
+        if scale_raw in (720, 1080, "720", "1080") and not scale:
+            return jsonify({"ok": False, "msg": "源画面已小于所选分辨率"}), 400
+
+        ok, msg, job_id = enqueue_convert_job(
+            vid,
+            kind="transcode",
+            name=item.get("name") or "",
+            root=item_root or None,
+            target_fps=target_fps,
+            out_ext=out_ext,
+            scale=scale,
+            video_encoder=encoder,
+        )
+        if remap_note and ok:
+            msg = f"{msg}（{remap_note}）"
+        _log(
+            f"[转换] 入队 ok={ok} job={job_id} vid={vid} ext={out_ext} "
+            f"fps={target_fps} scale={scale} encoder={encoder} msg={msg}"
+        )
+        return jsonify({
+            "ok": ok,
+            "job_id": job_id,
+            "msg": msg,
+            "status": "queued",
+            "kind": "transcode",
+            "out_ext": out_ext,
+            "target_fps": target_fps,
+            "scale": scale,
+            "video_encoder": encoder,
         })
 
     @app.route("/api/convert/queue")

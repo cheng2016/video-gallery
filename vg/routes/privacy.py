@@ -69,7 +69,7 @@ def register(app) -> None:
             and after["probe_video_duration"] != before["probe_video_duration"]
         ):
             tips.append(
-                "视频时长探测已开启；将在本次或下次扫描时补全。"
+                "视频时长探测已开启；已开始后台补全（无需强制重扫）。"
                 if after["probe_video_duration"]
                 else "视频时长探测已关闭。"
             )
@@ -78,10 +78,32 @@ def register(app) -> None:
             and after["probe_video_audio"] != before["probe_video_audio"]
         ):
             tips.append(
-                "视频音频探测已开启；将在本次或下次扫描时补全。"
+                "视频音频探测已开启；已开始后台补全（无需强制重扫）。"
                 if after["probe_video_audio"]
                 else "视频音频探测已关闭。"
             )
+        # Turning probes on must kick enrichment immediately. A later soft
+        # rescan often reuses the published snapshot and would otherwise skip
+        # ffprobe forever while cards keep showing no duration.
+        probes_enabled = (
+            (
+                probe_duration is not None
+                and after["probe_video_duration"]
+                and not before["probe_video_duration"]
+            )
+            or (
+                probe_audio is not None
+                and after["probe_video_audio"]
+                and not before["probe_video_audio"]
+            )
+        )
+        if probes_enabled and (STATE.get("videos") or []):
+            try:
+                from vg.media import start_metadata_enrichment
+
+                start_metadata_enrichment()
+            except Exception:
+                pass
         if (
             full_logging is not None
             and after["full_logging"] != before["full_logging"]

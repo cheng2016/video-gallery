@@ -44,6 +44,8 @@ def register(app) -> None:
             "scan_root": STATE.get("scan_root") or "",
             "scan_found": live_count,
             "has_ffmpeg": bool(STATE.get("ffmpeg")),
+            "ffmpeg_rm": STATE.get("ffmpeg_rm"),
+            "ffmpeg_rm_pending": bool(STATE.get("ffmpeg_rm_pending")) or STATE.get("ffmpeg_rm") is None,
             "root": str(STATE["root"]) if STATE.get("root") else "",
             "lan_share": bool(STATE.get("lan_share")),
             "full_logging": full_logging_enabled(),

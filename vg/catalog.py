@@ -267,6 +267,15 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
         invalidate_response_caches()
     except ImportError:
         pass
+    try:
+        from vg.diagnostics import catalog_plane_snapshot
+
+        catalog_plane_snapshot(
+            "apply_catalog_to_state",
+            facet_count=(facets or {}).get("count"),
+        )
+    except Exception:
+        pass
     # Warm the on-disk facets cache so a restart does not need to re-count
     # 2785 videos again (was ~13 ms facets_ms, but with per-scope tree +
     # type/genre counting on every cold start it adds up quickly).  This is

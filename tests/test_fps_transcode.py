@@ -54,6 +54,13 @@ class FpsHelpersTests(unittest.TestCase):
         self.assertIsNone(normalize_target_fps(60, 60))
         self.assertIsNone(normalize_target_fps(60, 90))
 
+    def test_scale_choices_omit_already_smaller(self) -> None:
+        from vg.media import scale_choices
+
+        self.assertEqual(scale_choices(3840, 2160), [1080, 720])
+        self.assertEqual(scale_choices(1920, 1080), [720])
+        self.assertEqual(scale_choices(1280, 720), [])
+
     def test_gate_prefers_fps_too_low_over_no_ffmpeg(self) -> None:
         # 4K@30 is already the target rate — don't blame missing ffmpeg first.
         self.assertEqual(
@@ -188,20 +195,142 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
         self.assertEqual(label, "H.264")
         self.assertIn("libx264", args)
 
+    def test_video_encode_and_vf_helpers(self) -> None:
+        from vg.convert import (
+            _vf_args,
+            _video_encode_args,
+            probe_ffmpeg_realmedia,
+            resolve_transcode_out_ext,
+        )
+
+        label, args = _video_encode_args("auto", "hevc", "mp4")
+        self.assertEqual(label, "H.265")
+        self.assertIn("libx265", args)
+        label, args = _video_encode_args("h264", "hevc", "mp4")
+        self.assertEqual(label, "H.264")
+        self.assertIn("libx264", args)
+        label, args = _video_encode_args("h265", "h264", "mkv")
+        self.assertEqual(label, "H.265")
+        self.assertIn("libx265", args)
+        label, args = _video_encode_args("auto", "h264", "webm")
+        self.assertEqual(label, "VP9")
+        self.assertIn("libvpx-vp9", args)
+        self.assertEqual(_vf_args(30, 0), ["-vf", "fps=30"])
+        self.assertEqual(_vf_args(None, 1080), ["-vf", "scale=-2:1080"])
+        self.assertEqual(_vf_args(24, 720), ["-vf", "fps=24,scale=-2:720"])
+        self.assertEqual(_vf_args(None, 0), [])
+        ext, note = resolve_transcode_out_ext("webm", {"ext": ".mkv"}, "h264")
+        self.assertEqual(ext, "mkv")
+        self.assertIn("MKV", note)
+        with mock.patch("vg.convert.subprocess.run") as run:
+            run.return_value = mock.Mock(stdout=" D  rm              RealMedia\n", stderr="")
+            self.assertTrue(probe_ffmpeg_realmedia("ffmpeg"))
+            run.return_value = mock.Mock(stdout=" D  mov,mp4,m4a\n", stderr="")
+            self.assertFalse(probe_ffmpeg_realmedia("ffmpeg"))
+        self.assertFalse(probe_ffmpeg_realmedia(None))
+
 
 class UiFpsControlsTests(unittest.TestCase):
-    def test_player_has_separate_fps_actions(self) -> None:
+    def test_player_has_convert_panel(self) -> None:
         html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
-        self.assertIn('id="modalFpsActions"', html)
-        self.assertIn('id="btnFps30"', html)
-        self.assertIn("/api/fps30/", html)
-        self.assertIn("function startFps30(", html)
-        self.assertIn("function updateFps30Button(", html)
-        self.assertIn('id="fpsTargetSelect"', html)
-        self.assertIn('id="fpsTargetCustom"', html)
-        self.assertIn("帧率转码", html)
-        # Must stay visually/API-separate from format convert.
-        self.assertIn("与转 MP4 / 修声音无关", html)
+        self.assertIn('id="convertPanel"', html)
+        self.assertIn('id="transcodeExt"', html)
+        self.assertIn('id="transcodeFps"', html)
+        self.assertIn('id="transcodeScale"', html)
+        self.assertIn('id="transcodeEncoder"', html)
+        self.assertIn('id="btnStartTranscode"', html)
+        self.assertIn('id="btnConvertToggle"', html)
+        self.assertIn('id="playerChips"', html)
+        self.assertIn("function startTranscode(", html)
+        self.assertIn("/api/transcode/", html)
+        self.assertNotIn('id="btnToMp4"', html)
+        self.assertNotIn('id="btnFps30"', html)
+
+
+class TranscodeApiTests(unittest.TestCase):
+    def test_rmvb_rejected_without_realmedia(self) -> None:
+        from vg import web
+        from vg.catalog_repository import catalog_repository
+        from vg.config import RM_UNAVAILABLE_MSG
+        from vg.state import STATE
+
+        vid = "a" * 16
+        item = {
+            "id": vid,
+            "ext": ".rmvb",
+            "name": "clip.rmvb",
+            "fps": 25,
+            "width": 640,
+            "height": 480,
+            "_lib_root": r"D:\lib",
+        }
+        prev_ff = STATE.get("ffmpeg")
+        prev_rm = STATE.get("ffmpeg_rm")
+        prev_root = STATE.get("root")
+        prev_jobs = STATE.get("convert_jobs")
+        try:
+            STATE["ffmpeg"] = "ffmpeg"
+            STATE["ffmpeg_rm"] = False
+            STATE["root"] = r"D:\lib"
+            STATE["convert_jobs"] = {}
+            with mock.patch.object(catalog_repository, "find_video", return_value=item), mock.patch.object(
+                catalog_repository, "mounted_roots", return_value=[r"D:\lib"]
+            ):
+                resp = web.app.test_client().post(
+                    f"/api/transcode/{vid}?root=D%3A%5Clib",
+                    json={"out_ext": "mp4", "video_encoder": "h264"},
+                )
+            self.assertEqual(resp.status_code, 400)
+            self.assertFalse(resp.get_json().get("ok"))
+            self.assertIn("RealMedia", resp.get_json().get("msg") or "")
+            self.assertEqual(resp.get_json().get("msg"), RM_UNAVAILABLE_MSG)
+        finally:
+            STATE["ffmpeg"] = prev_ff
+            STATE["ffmpeg_rm"] = prev_rm
+            STATE["root"] = prev_root
+            STATE["convert_jobs"] = prev_jobs
+
+    def test_rmvb_enqueued_when_realmedia_present(self) -> None:
+        from vg import web
+        from vg.catalog_repository import catalog_repository
+        from vg.state import STATE
+
+        vid = "b" * 16
+        item = {
+            "id": vid,
+            "ext": ".rmvb",
+            "name": "clip.rmvb",
+            "fps": 25,
+            "width": 640,
+            "height": 480,
+            "_lib_root": r"D:\lib",
+        }
+        prev_ff = STATE.get("ffmpeg")
+        prev_rm = STATE.get("ffmpeg_rm")
+        prev_root = STATE.get("root")
+        prev_jobs = STATE.get("convert_jobs")
+        try:
+            STATE["ffmpeg"] = "ffmpeg"
+            STATE["ffmpeg_rm"] = True
+            STATE["root"] = r"D:\lib"
+            STATE["convert_jobs"] = {}
+            with mock.patch.object(catalog_repository, "find_video", return_value=item), mock.patch.object(
+                catalog_repository, "mounted_roots", return_value=[r"D:\lib"]
+            ), mock.patch("vg.convert.pump_convert_queue"):
+                resp = web.app.test_client().post(
+                    f"/api/transcode/{vid}?root=D%3A%5Clib",
+                    json={"out_ext": "mp4", "video_encoder": "h264"},
+                )
+            data = resp.get_json()
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(data.get("ok"))
+            self.assertTrue(data.get("job_id"))
+            self.assertEqual(data.get("kind"), "transcode")
+        finally:
+            STATE["ffmpeg"] = prev_ff
+            STATE["ffmpeg_rm"] = prev_rm
+            STATE["root"] = prev_root
+            STATE["convert_jobs"] = prev_jobs
 
 
 if __name__ == "__main__":

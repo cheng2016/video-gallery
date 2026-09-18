@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import re
+import secrets
 from collections import OrderedDict
 
 
@@ -58,7 +59,10 @@ from vg.config import (
     BROWSER_HARD_EXTS,
     GENRE_DEFS,
     PROBE_META_VER,
+    RM_EXTS,
+    RM_UNAVAILABLE_MSG,
 )
+from vg.convert import default_transcode_out_ext, schedule_ffmpeg_rm_probe
 from vg.disk_libs import (
     cache_dir_for_item,
     ensure_library,
@@ -87,6 +91,7 @@ from vg.media import (
     fps_gate_reason,
     fps_target_choices,
     is_2k_or_4k,
+    scale_choices,
     make_thumbnail,
     player_video_meta_pending,
     probe_media_info,
@@ -124,6 +129,7 @@ from vg.streaming import _stream_file, rewrite_m3u8_for_proxy
 from vg.trash import move_to_trash
 from vg.util import (
     _clear_path_attrs_windows,
+    format_duration,
     format_size,
     log,
     resolve_under_root,
@@ -234,6 +240,25 @@ def _runtime_duplicate_fields_index() -> tuple[dict[str, dict[str, object]], int
             len(videos),
             _runtime_duplicate_video_count,
         )
+
+
+def _apply_runtime_duplicate_fields(enriched: dict) -> bool:
+    """Overlay live ``dup*`` fields onto a row (SQL or by-id lookup).
+
+    Returns True when the row is currently marked duplicate. Always writes an
+    explicit ``dup`` boolean so soft-refresh clients can clear stale badges.
+    """
+    duplicate_index, _, _ = _runtime_duplicate_fields_index()
+    duplicate_fields = duplicate_index.get(video_identity(enriched))
+    if duplicate_fields is None:
+        duplicate_fields = duplicate_index.get(_video_location_identity(enriched))
+    if duplicate_fields:
+        enriched.update(duplicate_fields)
+        return True
+    enriched.pop("dup_n", None)
+    enriched.pop("dup_reason", None)
+    enriched["dup"] = False
+    return False
 
 
 @app.errorhandler(Exception)
@@ -565,6 +590,59 @@ def warm_response_caches() -> None:
         with _warm_lock:
             _warming = False
 
+
+def _ensure_duration_h(row: dict) -> None:
+    """Fill duration_h from numeric duration when the JSON blob omitted it."""
+    if row.get("duration_h"):
+        return
+    dur = row.get("duration")
+    if not dur:
+        return
+    try:
+        label = format_duration(float(dur))
+    except (TypeError, ValueError):
+        return
+    if label:
+        row["duration_h"] = label
+
+
+def _log_video_page_coverage(slim: list[dict], *, offset: int, total: int, path: str) -> None:
+    """Emit one compact coverage line so missing duration/thumbs/badges are visible."""
+    if not slim and offset > 0:
+        return
+    with_duration = 0
+    with_thumb = 0
+    with_dup = 0
+    with_bad = 0
+    for row in slim:
+        if row.get("duration_h") or row.get("seg_count") or row.get("kind") in ("series", "m3u8"):
+            with_duration += 1
+        if row.get("has_thumb"):
+            with_thumb += 1
+        if row.get("dup"):
+            with_dup += 1
+        if row.get("bad"):
+            with_bad += 1
+    diagnostic_emit_rate_limited(
+        "INFO",
+        "api_videos_page_coverage",
+        key=(
+            f"{path}|{offset}|{total}|{len(slim)}|{with_duration}|{with_thumb}"
+            f"|{with_dup}|{with_bad}"
+        ),
+        interval=8.0,
+        force=True,
+        offset=offset,
+        rows=len(slim),
+        total_rows=total,
+        with_duration_h=with_duration,
+        missing_duration_h=max(0, len(slim) - with_duration),
+        with_has_thumb=with_thumb,
+        missing_has_thumb=max(0, len(slim) - with_thumb),
+        with_dup=with_dup,
+        with_bad=with_bad,
+        request_id=getattr(g, "_diag_request_id", ""),
+    )
 
 def _serialized(lock: threading.RLock):
     def decorate(func):
@@ -1019,6 +1097,16 @@ _CLIENT_LOG_CORE_EVENTS = {
     "refresh_render_completed",
     "load_more_done",
 }
+_CLIENT_LOG_LAYOUT_NOISE = {
+    "filter_layout",
+    "sticky_layout",
+    "continue_layout",
+    "subfolder_overflow",
+    "virtual_scroll_geometry",
+    "virtual_spacer_state",
+    "virtual_bottom_spacer_change",
+    "scroll_tick",
+}
 
 
 def _ingest_client_action(data: object) -> tuple[str, int] | None:
@@ -1045,13 +1133,15 @@ def _ingest_client_action(data: object) -> tuple[str, int] | None:
     if level not in {"INFO", "WARN", "ERROR"}:
         level = "INFO"
     full_logging = diagnostic_full_logging_enabled()
+    if event in _CLIENT_LOG_LAYOUT_NOISE:
+        diagnostic_aggregate("client_log_layout_dropped")
+        return None
     if level == "INFO" and not full_logging and event not in _CLIENT_LOG_CORE_EVENTS:
         diagnostic_aggregate("client_log_suppressed")
         return None
     raw_fields = data.get("fields")
     fields: dict[str, object] = {}
-    # 布局诊断需要保留多行控件的完整矩形数据；普通客户端日志仍保持较小上限。
-    field_value_limit = 4000 if event == "filter_layout" else 500
+    field_value_limit = 500
     if isinstance(raw_fields, dict):
         for key, value in list(raw_fields.items())[:24]:
             safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", str(key))[:40]
@@ -1594,7 +1684,8 @@ def api_tree():
         "meta_progress": STATE.get("meta_progress") or "",
         "lib_gen": int(STATE.get("lib_gen") or 0),
         "scan_found": len(STATE.get("scan_live") or []) if isinstance(STATE.get("scan_live"), list) else 0,
-        "has_ffmpeg": bool(STATE["ffmpeg"]),
+            "has_ffmpeg": bool(STATE["ffmpeg"]),
+            "ffmpeg_rm": STATE.get("ffmpeg_rm"),
         "bind_host": STATE.get("bind_host") or "127.0.0.1",
         "bind_port": int(STATE.get("bind_port") or 8765),
         "lan_share": bool(STATE.get("lan_share")),
@@ -1644,6 +1735,8 @@ def api_videos_by_ids():
     out = []
     missing = []
     offline = set(offline_roots(roots_needed))
+    matched_runtime_duplicate_rows = 0
+    with_bad = 0
     for vid in ids[:100]:
         vid = str(vid or "")
         if not vid:
@@ -1660,6 +1753,8 @@ def api_videos_by_ids():
             missing.append(miss)
             continue
         enriched = dict(v)
+        if _apply_runtime_duplicate_fields(enriched):
+            matched_runtime_duplicate_rows += 1
         attach_thumb_meta(enriched)
         row = {
             k: enriched[k]
@@ -1671,7 +1766,26 @@ def api_videos_by_ids():
             row["root"] = v["_lib_root"]
         elif STATE.get("root"):
             row["root"] = str(STATE["root"])
+        _ensure_duration_h(row)
+        if row.get("bad"):
+            with_bad += 1
         out.append(row)
+    diagnostic_emit_rate_limited(
+        "INFO",
+        "api_videos_by_ids_coverage",
+        key=(
+            f"by-ids|{len(ids)}|{len(out)}|{matched_runtime_duplicate_rows}|{with_bad}"
+        ),
+        interval=4.0,
+        force=True,
+        requested=len(ids),
+        returned=len(out),
+        missing=len(missing),
+        matched_runtime_duplicate_rows=matched_runtime_duplicate_rows,
+        with_dup=matched_runtime_duplicate_rows,
+        with_bad=with_bad,
+        request_id=getattr(g, "_diag_request_id", ""),
+    )
     return jsonify({
         "ok": True,
         "videos": out,
@@ -2096,7 +2210,7 @@ def api_videos():
                 )
             sql_ms = (time.perf_counter() - sql_started) * 1000.0
             thumb_started = time.perf_counter()
-            duplicate_index, runtime_video_count, runtime_duplicate_count = (
+            _, runtime_video_count, runtime_duplicate_count = (
                 _runtime_duplicate_fields_index()
             )
             sql_runtime_field_rows = 0
@@ -2110,11 +2224,7 @@ def api_videos():
                     enriched["root"] = lib
                 if any(key in enriched for key in ("dup", "dup_n", "dup_reason")):
                     sql_runtime_field_rows += 1
-                duplicate_fields = duplicate_index.get(video_identity(enriched))
-                if duplicate_fields is None:
-                    duplicate_fields = duplicate_index.get(_video_location_identity(enriched))
-                if duplicate_fields:
-                    enriched.update(duplicate_fields)
+                if _apply_runtime_duplicate_fields(enriched):
                     matched_runtime_duplicate_rows += 1
                 attach_thumb_meta(enriched)
                 excluded = {
@@ -2123,6 +2233,7 @@ def api_videos():
                 row = {key: enriched[key] for key in enriched if key not in excluded}
                 if not row.get("root"):
                     row["root"] = lib or ""
+                _ensure_duration_h(row)
                 slim.append(row)
             thumb_meta_ms = (time.perf_counter() - thumb_started) * 1000.0
             facet_started = time.perf_counter()
@@ -2252,6 +2363,7 @@ def api_videos():
                         ext=ext,
                     )
             serialize_started = time.perf_counter()
+            _log_video_page_coverage(slim, offset=offset, total=total, path="sql")
             response = jsonify({
                 "videos": slim,
                 "count": total,
@@ -2436,6 +2548,7 @@ def api_videos():
             row["lib_label"] = v["_lib_label"]
         if v.get("actors"):
             row["actors"] = list(v["actors"])
+        _ensure_duration_h(row)
         slim.append(row)
 
     page_ms = (time.perf_counter() - page_started) * 1000.0
@@ -2457,6 +2570,7 @@ def api_videos():
         "lib": lib,
     }
     serialize_started = time.perf_counter()
+    _log_video_page_coverage(slim, offset=offset, total=total, path="memory")
     response = jsonify(payload)
     serialize_ms = (time.perf_counter() - serialize_started) * 1000.0
     total_ms = (time.perf_counter() - api_started) * 1000.0
@@ -3452,15 +3566,35 @@ def api_info(vid: str):
     payload["fps_gate"] = gate
     payload["can_fps30"] = gate == "ok"
     payload["fps_class"] = classify_high_fps(fps)
-    payload["fps_targets"] = fps_target_choices(fps) if gate == "ok" else []
+    payload["fps_targets"] = fps_target_choices(fps)
     payload["fps_target_default"] = (
         30 if 30 in payload["fps_targets"]
         else (payload["fps_targets"][0] if payload["fps_targets"] else None)
     )
-    # Client may open the player before /api/status has set state.hasFfmpeg;
-    # always mirror server ffmpeg presence on the info payload.
+    payload["scale_choices"] = scale_choices(width, height)
     payload["has_ffmpeg"] = bool(STATE.get("ffmpeg"))
-    payload["probe_pending"] = bool(probe_pending)
+    rm_pending = False
+    if payload["has_ffmpeg"]:
+        rm_pending = schedule_ffmpeg_rm_probe() or STATE.get("ffmpeg_rm") is None
+    payload["ffmpeg_rm"] = STATE.get("ffmpeg_rm")
+    payload["ffmpeg_rm_pending"] = bool(rm_pending)
+    payload["is_rm"] = ext in RM_EXTS
+    payload["default_out_ext"] = default_transcode_out_ext(item)
+    if not payload["has_ffmpeg"]:
+        payload["can_transcode"] = False
+        payload["transcode_block"] = "no_ffmpeg"
+    elif ext in RM_EXTS and payload["ffmpeg_rm"] is None:
+        payload["can_transcode"] = False
+        payload["transcode_block"] = "rm_pending"
+        payload["transcode_block_msg"] = "正在检测 ffmpeg 是否支持 RMVB…"
+    elif ext in RM_EXTS and not payload["ffmpeg_rm"]:
+        payload["can_transcode"] = False
+        payload["transcode_block"] = "no_realmedia"
+        payload["transcode_block_msg"] = RM_UNAVAILABLE_MSG
+    else:
+        payload["can_transcode"] = True
+        payload["transcode_block"] = ""
+    payload["probe_pending"] = bool(probe_pending or rm_pending)
     payload["probe_video_meta_done"] = bool(item.get("probe_video_meta_done"))
     log(
         f"[帧率转码] 播放页判定 vid={vid} "
@@ -3789,9 +3923,108 @@ def api_delete():
     })
 
 
+_cover_jobs_lock = threading.Lock()
+_COVER_JOBS_MAX = 32
+
+
+def _cover_jobs() -> dict:
+    jobs = STATE.get("cover_jobs")
+    if not isinstance(jobs, dict):
+        jobs = {}
+        STATE["cover_jobs"] = jobs
+    return jobs
+
+
+def _cover_job_public(job: dict) -> dict:
+    return {
+        "ok": job.get("status") != "error",
+        "job_id": job.get("id") or "",
+        "status": job.get("status") or "",
+        "msg": job.get("msg") or "",
+        "vid": job.get("vid") or "",
+        "thumb_id": job.get("thumb_id") or "",
+        "thumb_v": job.get("thumb_v") or 0,
+        "seek": job.get("seek"),
+    }
+
+
+def _prune_cover_jobs() -> None:
+    jobs = _cover_jobs()
+    if len(jobs) <= _COVER_JOBS_MAX:
+        return
+    finished = [
+        (jid, j) for jid, j in jobs.items()
+        if (j or {}).get("status") in ("done", "error")
+    ]
+    finished.sort(key=lambda pair: float((pair[1] or {}).get("created") or 0))
+    drop = max(0, len(jobs) - _COVER_JOBS_MAX)
+    for jid, _job in finished[:drop]:
+        jobs.pop(jid, None)
+
+
+def _finish_cover_seek_job(job: dict, item: dict, cache, file_id: str, seek: float, ok: bool) -> None:
+    if not ok:
+        mark_thumbnail_failure(item, reason="explicit_retry_failed")
+        try:
+            save_library_item(item)
+            diagnostic_emit(
+                "INFO",
+                "thumbnail_failure_marker_saved",
+                force=True,
+                video_id=file_id,
+                cache=cache,
+                reason="explicit_retry_failed",
+                explicit_retry=True,
+            )
+        except Exception as exc:
+            diagnostic_error(
+                "thumbnail_failure_marker_save_failed",
+                exc,
+                video_id=file_id,
+                cache=cache,
+            )
+        job["status"] = "error"
+        job["msg"] = "截帧失败"
+        return
+    thumb_cache_invalidate(file_id)
+    item["has_thumb"] = True
+    item["thumb_v"] = thumb_version(cache, file_id) or int(datetime.now().timestamp())
+    item["thumb_seek"] = seek
+    save_library_item(item)
+    job["status"] = "done"
+    job["thumb_v"] = item["thumb_v"]
+    job["thumb_id"] = file_id
+    job["msg"] = f"已截取 {seek:.1f}s 处画面为封面"
+    diagnostic_emit(
+        "INFO",
+        "cover_set_ok",
+        force=True,
+        video_id=job.get("vid") or "",
+        thumb_id=file_id,
+        thumb_v=item["thumb_v"],
+        mode="seek",
+        seek=f"{seek:.1f}",
+        root=job.get("root") or item.get("_lib_root") or item.get("root") or "",
+        operation_id=job.get("operation_id") or "",
+        async_job=True,
+    )
+
+
+@app.route("/api/thumb/job/<job_id>")
+def api_thumb_job(job_id: str):
+    """Poll cover-seek job started by POST /api/thumb/<vid>."""
+    if not re.fullmatch(r"[a-f0-9]{8,32}", job_id or ""):
+        return jsonify({"ok": False, "msg": "无效任务 id"}), 400
+    with _cover_jobs_lock:
+        job = dict(_cover_jobs().get(job_id) or {})
+    if not job:
+        return jsonify({"ok": False, "msg": "未找到任务"}), 404
+    return jsonify(_cover_job_public(job))
+
+
 @app.route("/api/thumb/<vid>", methods=["POST"])
 def api_thumb_set(vid: str):
-    """换封面：JSON {seek:秒} 截帧，或 multipart 上传图片字段 file。"""
+    """换封面：JSON {seek:秒} 截帧（异步），或 multipart 上传图片字段 file。"""
     if not re.fullmatch(r"[a-f0-9]{16}", vid or ""):
         return jsonify({"ok": False, "msg": "无效 id"}), 400
     prefer_root = (request.args.get("root") or "").strip() or None
@@ -3869,51 +4102,65 @@ def api_thumb_set(vid: str):
     # This route is an explicit user retry; clear the persisted negative
     # marker before forcing a new ffmpeg attempt.
     clear_thumbnail_failure(item)
-    ok = make_thumbnail(ffmpeg, src, out, seek=seek, force=True)
-    if not ok:
-        mark_thumbnail_failure(item, reason="explicit_retry_failed")
-        try:
-            save_library_item(item)
-            diagnostic_emit(
-                "INFO",
-                "thumbnail_failure_marker_saved",
-                force=True,
-                video_id=file_id,
-                cache=cache,
-                reason="explicit_retry_failed",
-                explicit_retry=True,
-            )
-        except Exception as exc:
-            diagnostic_error(
-                "thumbnail_failure_marker_save_failed",
-                exc,
-                video_id=file_id,
-                cache=cache,
-            )
-        return jsonify({"ok": False, "msg": "截帧失败"}), 500
-    thumb_cache_invalidate(file_id)
-    item["has_thumb"] = True
-    item["thumb_v"] = thumb_version(cache, file_id) or int(datetime.now().timestamp())
-    item["thumb_seek"] = seek
-    save_library_item(item)
+    job_id = secrets.token_hex(8)
+    root_s = prefer_root or item.get("_lib_root") or item.get("root") or ""
+    job = {
+        "id": job_id,
+        "vid": vid,
+        "thumb_id": file_id,
+        "thumb_v": 0,
+        "status": "queued",
+        "msg": f"正在截取 {seek:.1f}s 封面…",
+        "seek": seek,
+        "root": root_s,
+        "created": time.time(),
+        "operation_id": getattr(g, "_diag_operation_id", ""),
+    }
+    with _cover_jobs_lock:
+        _cover_jobs()[job_id] = job
+        _prune_cover_jobs()
+    work_ffmpeg = ffmpeg
+    work_src = src
+    work_out = out
+    work_seek = seek
+
+    def generate_cover_thumb() -> bool:
+        with _cover_jobs_lock:
+            current = _cover_jobs().get(job_id)
+            if current is not None:
+                current["status"] = "running"
+                current["msg"] = f"正在截取 {work_seek:.1f}s 封面…"
+        ok = make_thumbnail(work_ffmpeg, work_src, work_out, seek=work_seek, force=True)
+        with _cover_jobs_lock:
+            current = _cover_jobs().get(job_id)
+            if current is None:
+                current = job
+            _finish_cover_seek_job(current, item, cache, file_id, work_seek, ok)
+        return ok
+
+    submit_thumbnail_job(
+        thumbnail_job_key(cache, file_id) + f"::cover::{work_seek:.1f}",
+        generate_cover_thumb,
+        priority=THUMB_PRIORITY_VISIBLE,
+        force=True,
+    )
     diagnostic_emit(
         "INFO",
-        "cover_set_ok",
+        "cover_set_queued",
         force=True,
         video_id=vid,
         thumb_id=file_id,
-        thumb_v=item["thumb_v"],
-        mode="seek",
         seek=f"{seek:.1f}",
-        root=prefer_root or item.get("_lib_root") or item.get("root") or "",
-        operation_id=getattr(g, "_diag_operation_id", ""),
+        job_id=job_id,
+        root=root_s,
     )
     return jsonify({
         "ok": True,
-        "msg": f"已截取 {seek:.1f}s 处画面为封面",
-        "thumb_v": item["thumb_v"],
-        "thumb_id": file_id,
+        "status": "queued",
+        "job_id": job_id,
+        "msg": job["msg"],
         "seek": seek,
+        "thumb_id": file_id,
     })
 
 

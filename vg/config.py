@@ -38,6 +38,9 @@ MIN_SEGMENT_FILE_BYTES = 256 * 1024
 
 BROWSER_FRIENDLY_EXTS = {".mp4", ".webm", ".m4v", ".mov"}
 BROWSER_HARD_EXTS = {".mkv", ".avi", ".wmv", ".flv", ".rmvb", ".rm", ".ts", ".m2ts", ".mpg", ".mpeg"}
+RM_EXTS = {".rmvb", ".rm"}
+TRANSCODE_OUT_EXTS = ("mp4", "mkv", "mov", "avi", "webm")
+RM_UNAVAILABLE_MSG = "当前 ffmpeg 不含 RealMedia，无法转 RMVB"
 BROWSER_FRIENDLY_AUDIO = {"aac", "mp3", "opus", "vorbis"}
 PROBE_META_VER = 2
 
