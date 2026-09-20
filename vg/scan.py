@@ -423,29 +423,46 @@ def start_scan(
     # Manual non-force scans of an already published root used to reload its
     # SQLite catalog and rebuild that single-root index, immediately followed
     # by on_scan_finished() rebuilding the unified index again. Reuse the
-    # in-memory published snapshot when it already covers this root; the
-    # background folder-count verifier still checks the disk afterwards.
+    # in-memory published snapshot only when it already has rows for *this*
+    # root. Do NOT treat "STATE.root matches + unified STATE has other disks'
+    # videos" as coverage — that skipped first-time E:\ walks while C:/D:
+    # rows stayed in the merged list (log 239: videos=88 but E catalog=0).
     if not force and not reuse_preloaded_cache:
         root_key = str(root).rstrip("\\/").casefold()
+        state_videos = STATE.get("videos") or []
         preloaded_count = sum(
             1
-            for video in (STATE.get("videos") or [])
+            for video in state_videos
             if str(video.get("_lib_root") or video.get("root") or "")
             .rstrip("\\/")
             .casefold()
             == root_key
         )
-        if preloaded_count or (_same_root(STATE.get("root"), root) and STATE.get("videos")):
+        same_root = _same_root(STATE.get("root"), root)
+        if preloaded_count > 0:
             reuse_preloaded_cache = True
             emit(
                 "INFO",
                 "scan_cache_reuse_auto",
                 force=True,
                 root=root,
-                videos=preloaded_count or len(STATE.get("videos") or []),
+                videos=preloaded_count,
+                state_videos=len(state_videos),
+                same_root=same_root,
                 reason="published_snapshot_covers_root",
                 load_skipped=True,
                 rebuild_skipped=True,
+            )
+        elif same_root and state_videos:
+            emit(
+                "INFO",
+                "scan_cache_reuse_rejected",
+                force=True,
+                root=root,
+                videos_for_root=0,
+                state_videos=len(state_videos),
+                same_root=True,
+                reason="unified_snapshot_has_no_rows_for_root",
             )
 
     emit(
@@ -1043,23 +1060,111 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
         _stored_n, stored = read_index_counts(cache)
         if stored is None:
             videos = _load_index_videos(cache, root)
-            saved = save_index(cache, root, videos, file_count=live_n, folder_counts=live)
-            if not saved:
+            # Empty catalog + live files on disk = first scan never ran
+            # (e.g. false cache-reuse). Writing counts alone would mark the
+            # disk "validated" and leave the library empty forever.
+            if not videos and live_n > 0:
                 emit(
                     "WARN",
-                    "background_catalog_counts_save_failed",
+                    "background_catalog_empty_but_disk_has_files",
                     force=True,
                     root=root,
-                    cache=cache,
                     live_files=live_n,
-                    videos=len(videos),
+                    live_folders=len(live),
+                    catalog_videos=0,
+                    action="full_scan",
                 )
-            log(f"[缓存] 已写入目录文件计数 {live_n}，跳过全盘扫描")
-            STATE["scan_progress"] = f"已加载缓存，共 {len(videos)} 个视频"
-            outcome = "counts_initialized"
+                if not try_acquire_scan_lock(f"bg_validation_empty_catalog:{root}"):
+                    outcome = "skipped_scan_lock_busy"
+                    emit(
+                        "WARN",
+                        "background_catalog_validation_skipped",
+                        force=True,
+                        root=root,
+                        reason="scan_lock_busy_before_empty_catalog_scan",
+                        live_files=live_n,
+                        **scan_lock_status(),
+                    )
+                    return
+                lock_held = True
+                STATE["scan_progress"] = f"首次扫描 {root}（磁盘约 {live_n} 个视频）…"
+                STATE["updating"] = True
+                updating_started = True
+                outcome = "empty_catalog_full_scan"
+                emit(
+                    "INFO",
+                    "library_updating_started",
+                    force=True,
+                    root=root,
+                    changed_folders=len(live),
+                    live_files=live_n,
+                    reason="empty_catalog_disk_has_files",
+                )
+                try:
+                    scan_videos(
+                        root,
+                        do_thumbs=do_thumbs,
+                        incremental=True,
+                        quiet=True,
+                        only_folders=None,
+                        folder_counts=live,
+                        burst_thumbs=False,
+                    )
+                    do_thumbs = False
+                finally:
+                    STATE["updating"] = False
+                    emit(
+                        "INFO",
+                        "library_updating_finished",
+                        force=True,
+                        root=root,
+                        changed_folders=len(live),
+                        reason="empty_catalog_disk_has_files",
+                    )
+            else:
+                saved = save_index(cache, root, videos, file_count=live_n, folder_counts=live)
+                if not saved:
+                    emit(
+                        "WARN",
+                        "background_catalog_counts_save_failed",
+                        force=True,
+                        root=root,
+                        cache=cache,
+                        live_files=live_n,
+                        videos=len(videos),
+                    )
+                log(f"[缓存] 已写入目录文件计数 {live_n}，跳过全盘扫描")
+                STATE["scan_progress"] = f"已加载缓存，共 {len(videos)} 个视频"
+                outcome = "counts_initialized"
+                emit(
+                    "INFO",
+                    "background_catalog_counts_initialized",
+                    force=True,
+                    root=root,
+                    live_files=live_n,
+                    catalog_videos=len(videos),
+                    skip_scan=True,
+                )
         else:
             changed = changed_folder_keys(stored, live)
             changed_count = len(changed)
+            catalog_n = _catalog_row_count(cache)
+            # Poisoned empty catalog: folder counts were written without a
+            # real walk (log 239 counts_initialized rows=0). Counts match
+            # disk so changed=[] — still must scan when the catalog is empty.
+            if not changed and catalog_n == 0 and live_n > 0:
+                emit(
+                    "WARN",
+                    "background_catalog_counts_without_videos",
+                    force=True,
+                    root=root,
+                    live_files=live_n,
+                    stored_files=_stored_n,
+                    catalog_videos=0,
+                    action="full_scan",
+                )
+                changed = set(live.keys()) or {""}
+                changed_count = len(changed)
             if not changed:
                 log(f"[缓存] 文件个数一致（{live_n}），跳过扫描")
                 STATE["scan_progress"] = f"已加载缓存，共 {len(STATE.get('videos') or [])} 个视频"
@@ -1165,6 +1270,7 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
             "stable_no_changes",
             "counts_initialized",
             "incremental_scan",
+            "empty_catalog_full_scan",
         ):
             _start_metadata_after_scan(root)
     except Exception as e:
@@ -1654,6 +1760,28 @@ def _load_index_videos(cache: Path, root: Path) -> list[dict]:
     except Exception as e:
         log(f"[增量] 读取旧索引失败: {e}")
         return []
+
+
+def _catalog_row_count(cache: Path) -> int:
+    """Cheap videos-table COUNT(*) for empty-catalog detection."""
+    from vg.catalog_db import catalog_db_path, catalog_exists
+
+    if not catalog_exists(cache):
+        return 0
+    path = catalog_db_path(cache)
+    if path is None:
+        return 0
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(str(path), timeout=5.0)
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM videos").fetchone()
+            return int(row[0] or 0) if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
 
 
 def _final_scan_change_counts(

@@ -105,7 +105,7 @@ def is_2k_or_4k(width, height) -> bool:
 
 
 HIGH_FPS_CLASSES = (60, 90, 120)
-FPS_TARGET_PRESETS = (24, 25, 30, 48, 50, 60)
+FPS_TARGET_PRESETS = (15, 20, 24, 25, 30, 48, 50, 60, 72, 90, 100, 120)
 _HIGH_FPS_TOLERANCE = 3.0
 
 

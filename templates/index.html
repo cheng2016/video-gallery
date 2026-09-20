@@ -1207,6 +1207,7 @@
       font-size: 0.8rem;
     }
     .convert-field input[type="number"] { width: 4.6em; }
+    .convert-field input[type="number"].hidden { display: none; }
     .convert-actions {
       display: inline-flex;
       flex-wrap: wrap;
@@ -1611,7 +1612,7 @@
         </label>
         <label class="convert-field">帧率
           <select id="transcodeFps" title="目标帧率"></select>
-          <input type="number" id="transcodeFpsCustom" min="1" max="119" step="1" placeholder="自定义">
+          <input type="number" id="transcodeFpsCustom" class="hidden" min="1" max="239" step="1" placeholder="fps" title="自定义目标帧率（须低于片源）">
         </label>
         <label class="convert-field">画面
           <select id="transcodeScale" title="分辨率">
@@ -2912,6 +2913,9 @@
     function startPoll() {
       if (state._poll) return;
       let wasBusy = true;
+      // First idle after page load still soft-refreshes once; later thumb-only
+      // busy episodes must not rebuild the grid for unrelated disks.
+      let busyNeedsListRefresh = true;
       let lastThumbProgress = "";
       let lastScanProgress = "";
       let lastLibGen = state._libGen || 0;
@@ -3027,6 +3031,11 @@
           }
           if (busy) {
             wasBusy = true;
+            // Scan / meta / updating change list rows or badges. Thumb bulk
+            // alone only fills .vgt — do not treat it as a list-refresh reason.
+            if (d.scanning || d.updating || d.meta_running) {
+              busyNeedsListRefresh = true;
+            }
             // Throttle against all refresh callers, not only polling.
             const canFull = now - state._lastFullRefresh >= 3000;
             // soft=true = polling-triggered refresh: preserve user scroll
@@ -3057,10 +3066,38 @@
               await refresh({ soft: true, nav: true });
             } else if (d.thumb_progress && d.thumb_progress !== lastThumbProgress) {
               lastThumbProgress = d.thumb_progress;
-              if (now - thumbRefreshTimer > 3000) {
+              const thumbNeed = countGridThumbPending();
+              if (now - thumbRefreshTimer > 3000 && thumbNeed.pending_visible > 0) {
                 thumbRefreshTimer = now;
                 pollAction = "thumbs_visible";
                 refreshVisibleThumbs();
+                clientLog("thumb_refresh_gate", {
+                  decision: "reload_visible",
+                  reason: "thumb_progress_changed",
+                  pending_visible: thumbNeed.pending_visible,
+                  visible: thumbNeed.visible,
+                  pending_loaded: thumbNeed.pending_loaded,
+                  loaded: thumbNeed.loaded,
+                  thumb_pending: d.thumb_pending || 0,
+                  thumb_bulk_running: !!d.thumb_bulk_running,
+                  category: state.category || "",
+                  folder: state.folder || "",
+                }, "INFO");
+              } else if (thumbNeed.pending_visible <= 0) {
+                pollAction = "thumbs_skipped_unrelated";
+                clientLog("thumb_refresh_gate", {
+                  decision: "skip",
+                  reason: "no_pending_visible_in_current_grid",
+                  pending_visible: 0,
+                  visible: thumbNeed.visible,
+                  pending_loaded: thumbNeed.pending_loaded,
+                  loaded: thumbNeed.loaded,
+                  thumb_pending: d.thumb_pending || 0,
+                  thumb_bulk_running: !!d.thumb_bulk_running,
+                  thumb_progress: String(d.thumb_progress || "").slice(0, 80),
+                  category: state.category || "",
+                  folder: state.folder || "",
+                }, "INFO");
               } else {
                 pollAction = "thumbs_throttled";
               }
@@ -3079,6 +3116,7 @@
                 background_busy: !!d.background_busy,
                 can_full: canFull,
                 gen_changed: genChanged,
+                busy_needs_list: !!busyNeedsListRefresh,
                 loaded: state.loadedVideos ? state.loadedVideos.length : 0,
                 total: state.totalCount || 0,
                 has_more: !!state.hasMore,
@@ -3090,14 +3128,23 @@
             wasBusy = false;
             lastLibGen = gen;
             state._libGen = gen;
+            const thumbNeed = countGridThumbPending();
+            // Thumb-only busy episode: images can be patched in-place. Soft
+            // list refresh here used to rebuild the grid when E: thumbs
+            // finished while the user was still on another folder.
+            const doSoftList = !!busyNeedsListRefresh;
+            busyNeedsListRefresh = false;
             clientLog("poll_decision", {
-              action: "idle_final_refresh",
+              action: doSoftList ? "idle_final_refresh" : "idle_final_thumbs_only",
               lib_gen: gen,
               scanning: !!d.scanning,
               meta_running: !!d.meta_running,
               thumb_pending: d.thumb_pending || 0,
               thumb_bulk_running: !!d.thumb_bulk_running,
               background_busy: !!d.background_busy,
+              do_soft_list: doSoftList,
+              pending_visible: thumbNeed.pending_visible,
+              pending_loaded: thumbNeed.pending_loaded,
               loaded: state.loadedVideos ? state.loadedVideos.length : 0,
               total: state.totalCount || 0,
               has_more: !!state.hasMore,
@@ -3105,11 +3152,23 @@
               pending_timer_id: state._refreshPending ? state._refreshPending.timer_id : "",
               keep_poll: true,
             }, "INFO");
-            // Background work drained for now — soft-patch cards. Do NOT stop
-            // the poll: metadata is often deferred until after thumb bulk, so
-            // a brief idle gap would otherwise miss the later lib_gen bump
-            // that carries duration/bad badges.
-            await refresh({ soft: true, nav: true });
+            if (doSoftList) {
+              // Background work drained for now — soft-patch cards. Do NOT stop
+              // the poll: metadata is often deferred until after thumb bulk, so
+              // a brief idle gap would otherwise miss the later lib_gen bump
+              // that carries duration/bad badges.
+              await refresh({ soft: true, nav: true });
+            } else {
+              clientLog("thumb_refresh_gate", {
+                decision: "skip_soft_list",
+                reason: "busy_was_thumbs_only",
+                pending_visible: thumbNeed.pending_visible,
+                pending_loaded: thumbNeed.pending_loaded,
+                loaded: thumbNeed.loaded,
+                category: state.category || "",
+                folder: state.folder || "",
+              }, "INFO");
+            }
             refreshVisibleThumbs();
             try { refreshStuckThumbs("poll_idle"); } catch (_) {}
             try { summarizeGridCardCoverage("poll_idle"); } catch (_) {}
@@ -3457,6 +3516,32 @@
       img.dataset.thumbWatched = "1";
       img.src = THUMB_PENDING_SRC;
       queueThumb(img);
+    }
+
+    function countGridThumbPending() {
+      const rootEl = $("contentScroll") || document;
+      const view = rootEl.getBoundingClientRect
+        ? rootEl.getBoundingClientRect()
+        : { top: 0, bottom: window.innerHeight };
+      let visible = 0;
+      let pendingVisible = 0;
+      let pendingLoaded = 0;
+      document.querySelectorAll("#grid .card").forEach((card) => {
+        const img = card.querySelector("img");
+        const pending = !(img && img.dataset.thumbReady === "1")
+          && card.dataset.hasThumb !== "1";
+        if (pending) pendingLoaded += 1;
+        const box = card.getBoundingClientRect();
+        if (box.bottom < view.top - 80 || box.top > view.bottom + 80) return;
+        visible += 1;
+        if (pending) pendingVisible += 1;
+      });
+      return {
+        visible,
+        pending_visible: pendingVisible,
+        pending_loaded: pendingLoaded,
+        loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+      };
     }
 
     function refreshVisibleThumbs() {
@@ -6736,24 +6821,45 @@
       }
     }
 
-    const FPS_TARGET_PRESETS = [24, 25, 30, 48, 50, 60];
+    const FPS_TARGET_PRESETS = [15, 20, 24, 25, 30, 48, 50, 60, 72, 90, 100, 120];
 
     function fpsTargetChoices(fps, fromApi) {
-      if (Array.isArray(fromApi) && fromApi.length) {
-        return fromApi.map((n) => Number(n)).filter((n) => n >= 1);
-      }
       const src = Number(fps);
-      if (!(src > 0)) return [];
-      return FPS_TARGET_PRESETS.filter((t) => t < src - 0.5);
+      const belowSrc = (n) => n >= 1 && (!(src > 0) || n < src - 0.5);
+      const fromList = Array.isArray(fromApi)
+        ? fromApi.map((n) => Number(n)).filter(belowSrc)
+        : [];
+      const merged = [];
+      FPS_TARGET_PRESETS.concat(fromList).forEach((t) => {
+        if (belowSrc(t) && merged.indexOf(t) < 0) merged.push(t);
+      });
+      merged.sort((a, b) => a - b);
+      return merged;
+    }
+
+    function syncCustomFpsField() {
+      const sel = $("transcodeFps");
+      const custom = $("transcodeFpsCustom");
+      if (!custom) return;
+      const on = !!(sel && sel.value === "custom");
+      custom.classList.toggle("hidden", !on);
+      if (on) {
+        try { custom.focus(); } catch (_) {}
+      }
     }
 
     function selectedTargetFps(srcFps) {
-      const custom = $("transcodeFpsCustom");
       const sel = $("transcodeFps");
-      const customVal = custom && custom.value !== "" ? Number(custom.value) : 0;
-      if (customVal >= 1 && customVal < (Number(srcFps) || 999) - 0.5) return Math.round(customVal);
+      const custom = $("transcodeFpsCustom");
+      const src = Number(srcFps) || 0;
+      const belowSrc = (n) => n >= 1 && (!(src > 0) || n < src - 0.5);
+      if (sel && sel.value === "custom") {
+        const customVal = custom && custom.value !== "" ? Number(custom.value) : 0;
+        if (belowSrc(customVal)) return Math.round(customVal);
+        return 0;
+      }
       const selVal = sel && sel.value && sel.value !== "0" ? Number(sel.value) : 0;
-      if (selVal >= 1) return Math.round(selVal);
+      if (belowSrc(selVal)) return Math.round(selVal);
       return 0;
     }
 
@@ -6770,11 +6876,16 @@
       choices.forEach((t) => {
         const opt = document.createElement("option");
         opt.value = String(t);
-        opt.textContent = String(t);
+        opt.textContent = String(t) + " fps";
         sel.appendChild(opt);
       });
-      if (choices.map(String).indexOf(prev) >= 0) sel.value = prev;
+      const customOpt = document.createElement("option");
+      customOpt.value = "custom";
+      customOpt.textContent = "自定义";
+      sel.appendChild(customOpt);
+      if (prev === "custom" || (prev && choices.map(String).indexOf(prev) >= 0)) sel.value = prev;
       else sel.value = "0";
+      syncCustomFpsField();
     }
 
     function fillTranscodeScale(extra) {
@@ -6981,6 +7092,11 @@
       const outExt = ($("transcodeExt") && $("transcodeExt").value) || "mp4";
       const scale = Number(($("transcodeScale") && $("transcodeScale").value) || 0) || 0;
       const encoder = ($("transcodeEncoder") && $("transcodeEncoder").value) || "auto";
+      const fpsSel = $("transcodeFps");
+      if (fpsSel && fpsSel.value === "custom" && !(targetFps >= 1)) {
+        $("modalInfo").textContent = "请在自定义帧率框输入低于片源的整数 fps";
+        return;
+      }
       if (currentPlayMeta) currentPlayMeta.convertKind = "transcode";
       currentConvertKind = "transcode";
       currentConvertVid = currentPlayId;
@@ -8207,6 +8323,9 @@
     if ($("btnCancelTranscode")) $("btnCancelTranscode").addEventListener("click", () => cancelConvertMp4());
     if ($("transcodeExt")) $("transcodeExt").addEventListener("change", () => {
       $("transcodeExt").dataset.userPicked = "1";
+    });
+    if ($("transcodeFps")) $("transcodeFps").addEventListener("change", () => {
+      syncCustomFpsField();
     });
     $("btnCopyPath").addEventListener("click", () => localAction("path"));
     $("btnReveal").addEventListener("click", () => localAction("reveal"));
