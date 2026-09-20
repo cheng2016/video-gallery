@@ -1726,6 +1726,7 @@ def api_videos_by_ids():
     # starving waitress threads so tag clicks looked dead.  find_video_by_id
     # already prefers STATE.by_id / videos (enriched in place); only load a
     # catalog when memory misses and the writer is idle.
+    t0 = time.perf_counter()
     roots_needed = []
     seen_roots: set[str] = set()
     for vid in ids[:100]:
@@ -1735,6 +1736,7 @@ def api_videos_by_ids():
             if r and r.casefold() not in seen_roots:
                 seen_roots.add(r.casefold())
                 roots_needed.append(r)
+    collect_ms = (time.perf_counter() - t0) * 1000.0
 
     catalog_writer_busy = bool(
         STATE.get("scanning")
@@ -1742,6 +1744,7 @@ def api_videos_by_ids():
         or STATE.get("meta_progress")
     )
     ensure_skipped = False
+    t_ensure = time.perf_counter()
     if catalog_writer_busy:
         ensure_skipped = True
         diagnostic_emit_rate_limited(
@@ -1761,19 +1764,34 @@ def api_videos_by_ids():
     else:
         for root in roots_needed:
             ensure_library(root)
+    ensure_ms = (time.perf_counter() - t_ensure) * 1000.0
 
     out = []
     missing = []
-    offline = set(offline_roots(roots_needed))
+    # Path.resolve().is_dir() can hitch on busy removable volumes; skip while
+    # a writer owns the catalog — missing rows already signal soft-refresh retry.
+    t_off = time.perf_counter()
+    offline = set() if catalog_writer_busy else set(offline_roots(roots_needed))
+    offline_ms = (time.perf_counter() - t_off) * 1000.0
     matched_runtime_duplicate_rows = 0
     with_bad = 0
+    lookup_ms = 0.0
+    attach_ms = 0.0
+    slowest_lookup_ms = 0.0
+    slowest_lookup_id = ""
     for vid in ids[:100]:
         vid = str(vid or "")
         if not vid:
             continue
         h = hints.get(vid) or hints.get(str(vid)) or {}
         prefer = (h.get("root") or "").strip() if isinstance(h, dict) else ""
+        t_look = time.perf_counter()
         v = find_video_by_id(vid, prefer_root=prefer or None)
+        one_lookup = (time.perf_counter() - t_look) * 1000.0
+        lookup_ms += one_lookup
+        if one_lookup > slowest_lookup_ms:
+            slowest_lookup_ms = one_lookup
+            slowest_lookup_id = vid[:24]
         if not v:
             miss = {"id": vid}
             if prefer:
@@ -1785,7 +1803,9 @@ def api_videos_by_ids():
         enriched = dict(v)
         if _apply_runtime_duplicate_fields(enriched):
             matched_runtime_duplicate_rows += 1
+        t_att = time.perf_counter()
         attach_thumb_meta(enriched)
+        attach_ms += (time.perf_counter() - t_att) * 1000.0
         row = {
             k: enriched[k]
             for k in enriched
@@ -1800,6 +1820,13 @@ def api_videos_by_ids():
         if row.get("bad"):
             with_bad += 1
         out.append(row)
+    total_ms = (time.perf_counter() - t0) * 1000.0
+    try:
+        from vg import state as runtime_state
+
+        thumb_bulk = bool(runtime_state.thumb_bulk_running())
+    except Exception:
+        thumb_bulk = False
     diagnostic_emit_rate_limited(
         "INFO",
         "api_videos_by_ids_coverage",
@@ -1819,6 +1846,31 @@ def api_videos_by_ids():
         ensure_skipped=ensure_skipped,
         request_id=getattr(g, "_diag_request_id", ""),
     )
+    if total_ms >= 200.0:
+        diagnostic_emit(
+            "PERF" if total_ms < 2000.0 else "WARN",
+            "api_videos_by_ids_stages",
+            force=True,
+            request_id=getattr(g, "_diag_request_id", ""),
+            requested=min(len(ids), 100),
+            returned=len(out),
+            missing=len(missing),
+            roots=len(roots_needed),
+            catalog_writer_busy=catalog_writer_busy,
+            ensure_skipped=ensure_skipped,
+            thumb_bulk=thumb_bulk,
+            scanning=bool(STATE.get("scanning")),
+            updating=bool(STATE.get("updating")),
+            total_ms=f"{total_ms:.1f}",
+            collect_ms=f"{collect_ms:.1f}",
+            ensure_ms=f"{ensure_ms:.1f}",
+            offline_ms=f"{offline_ms:.1f}",
+            lookup_ms=f"{lookup_ms:.1f}",
+            attach_ms=f"{attach_ms:.1f}",
+            slowest_lookup_ms=f"{slowest_lookup_ms:.1f}",
+            slowest_lookup_id=slowest_lookup_id,
+            videos_len=len(STATE.get("videos") or []),
+        )
     return jsonify({
         "ok": True,
         "videos": out,
