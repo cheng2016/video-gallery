@@ -79,7 +79,7 @@ class CacheTrustTests(unittest.TestCase):
             STATE[key] = value
         self._tmp.cleanup()
 
-    def test_load_or_scan_keeps_index_rows_without_statting_files(self) -> None:
+    def test_load_or_scan_prunes_missing_source_files(self) -> None:
         ghost = {
             "id": "deadbeefdeadbeef",
             "name": "gone",
@@ -96,12 +96,15 @@ class CacheTrustTests(unittest.TestCase):
             mock.patch("vg.scan.start_metadata_enrichment"),
             mock.patch("vg.scan.save_prefs"),
             mock.patch("vg.scan.save_index") as save,
+            mock.patch("vg.scan.sync_disk_lib_memory"),
             mock.patch("vg.roots.on_scan_finished"),
         ):
             ok = load_or_scan(self.root, do_thumbs=False, force=False, background=False)
         self.assertTrue(ok)
-        save.assert_not_called()
-        self.assertIn("deadbeefdeadbeef", {v["id"] for v in STATE.get("videos") or []})
+        # Ghost rows (source deleted) must be dropped and persisted.
+        save.assert_called_once()
+        self.assertNotIn("deadbeefdeadbeef", {v["id"] for v in STATE.get("videos") or []})
+        self.assertEqual(STATE.get("videos") or [], [])
 
     def test_matching_folder_counts_skip_scan_videos(self) -> None:
         item = {

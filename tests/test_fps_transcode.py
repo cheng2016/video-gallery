@@ -333,5 +333,73 @@ class TranscodeApiTests(unittest.TestCase):
             STATE["convert_jobs"] = prev_jobs
 
 
+class TranscodeNamingTests(unittest.TestCase):
+    def test_hls_index_uses_parent_folder(self) -> None:
+        from vg.convert import (
+            _transcode_output_base_name,
+            _transcode_stem_suffix,
+        )
+
+        # filename=index + HLS → parent folder, even if catalog name is also index
+        item = {
+            "kind": "m3u8",
+            "ext": ".m3u8",
+            "folder": "",  # catalog folder missing should still work via src
+            "name": "index",
+            "filename": "index.m3u8",
+            "rel": "Shows/CoolMovie/index.m3u8",
+        }
+        src = Path(r"D:\lib\Shows\CoolMovie\index.m3u8")
+        self.assertEqual(_transcode_output_base_name(item, src), "CoolMovie")
+
+        item_with_folder = {
+            **item,
+            "folder": "Shows/CoolMovie",
+        }
+        self.assertEqual(_transcode_output_base_name(item_with_folder, None), "CoolMovie")
+
+        # Plain remux: no encoder/fps/scale → empty suffix (not "_conv").
+        self.assertEqual(
+            _transcode_stem_suffix(
+                encoder="auto", target_fps=None, scale=0, out_ext="mp4"
+            ),
+            "",
+        )
+        self.assertEqual(
+            _transcode_stem_suffix(
+                encoder="h264", target_fps=30, scale=1080, out_ext="mp4"
+            ),
+            "h264_1080p_30fps",
+        )
+
+    def test_hls_under_generic_ts_folder_uses_grandparent(self) -> None:
+        from vg.convert import _transcode_output_base_name
+
+        item = {
+            "kind": "m3u8",
+            "ext": ".m3u8",
+            "folder": "Shows/CoolMovie/ts",
+            "name": "index",
+            "filename": "index.m3u8",
+            "rel": "Shows/CoolMovie/ts/index.m3u8",
+        }
+        src = Path(r"D:\lib\Shows\CoolMovie\ts\index.m3u8")
+        self.assertEqual(_transcode_output_base_name(item, src), "CoolMovie")
+
+    def test_regular_file_keeps_stem(self) -> None:
+        from vg.convert import _transcode_output_base_name
+
+        item = {
+            "kind": "file",
+            "ext": ".mkv",
+            "folder": "Shows",
+            "name": "clip",
+            "filename": "clip.mkv",
+            "rel": "Shows/clip.mkv",
+        }
+        src = Path(r"D:\lib\Shows\clip.mkv")
+        self.assertEqual(_transcode_output_base_name(item, src), "clip")
+
+
 if __name__ == "__main__":
     unittest.main()

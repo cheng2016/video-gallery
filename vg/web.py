@@ -1720,7 +1720,12 @@ def api_videos_by_ids():
     if not isinstance(hints, dict):
         hints = {}
 
-    # 先按历史里的 root 预加载索引（不切换当前盘）
+    # Collect root hints for offline reporting.  Do NOT eagerly ensure_library
+    # here: metadata enrichment holds disk_libs + SQLite write locks while
+    # upserting, and soft-refresh by-ids used to wait minutes on that lock,
+    # starving waitress threads so tag clicks looked dead.  find_video_by_id
+    # already prefers STATE.by_id / videos (enriched in place); only load a
+    # catalog when memory misses and the writer is idle.
     roots_needed = []
     seen_roots: set[str] = set()
     for vid in ids[:100]:
@@ -1730,7 +1735,32 @@ def api_videos_by_ids():
             if r and r.casefold() not in seen_roots:
                 seen_roots.add(r.casefold())
                 roots_needed.append(r)
-                ensure_library(r)
+
+    catalog_writer_busy = bool(
+        STATE.get("scanning")
+        or STATE.get("updating")
+        or STATE.get("meta_progress")
+    )
+    ensure_skipped = False
+    if catalog_writer_busy:
+        ensure_skipped = True
+        diagnostic_emit_rate_limited(
+            "WARN",
+            "api_videos_by_ids_skip_ensure_writer_busy",
+            key="by-ids-writer-busy",
+            interval=5.0,
+            force=True,
+            requested=min(len(ids), 100),
+            roots=len(roots_needed),
+            scanning=bool(STATE.get("scanning")),
+            updating=bool(STATE.get("updating")),
+            meta_progress=str(STATE.get("meta_progress") or "")[:120],
+            reason="avoid_catalog_lock_deadlock",
+            request_id=getattr(g, "_diag_request_id", ""),
+        )
+    else:
+        for root in roots_needed:
+            ensure_library(root)
 
     out = []
     missing = []
@@ -1741,7 +1771,7 @@ def api_videos_by_ids():
         vid = str(vid or "")
         if not vid:
             continue
-        h = hints.get(vid) or {}
+        h = hints.get(vid) or hints.get(str(vid)) or {}
         prefer = (h.get("root") or "").strip() if isinstance(h, dict) else ""
         v = find_video_by_id(vid, prefer_root=prefer or None)
         if not v:
@@ -1775,6 +1805,7 @@ def api_videos_by_ids():
         "api_videos_by_ids_coverage",
         key=(
             f"by-ids|{len(ids)}|{len(out)}|{matched_runtime_duplicate_rows}|{with_bad}"
+            f"|busy={int(catalog_writer_busy)}"
         ),
         interval=4.0,
         force=True,
@@ -1784,6 +1815,8 @@ def api_videos_by_ids():
         matched_runtime_duplicate_rows=matched_runtime_duplicate_rows,
         with_dup=matched_runtime_duplicate_rows,
         with_bad=with_bad,
+        catalog_writer_busy=catalog_writer_busy,
+        ensure_skipped=ensure_skipped,
         request_id=getattr(g, "_diag_request_id", ""),
     )
     return jsonify({

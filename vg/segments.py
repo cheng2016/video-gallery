@@ -18,19 +18,24 @@ from vg.state import STATE
 from vg.taxonomy import TAXONOMY_VERSION, classify_video_taxonomy
 from vg.util import format_size, natural_sort_key, video_id
 
+_GENERIC_ENTRY_NAMES = frozenset({
+    "index", "playlist", "master", "video", "stream", "视频流",
+})
+
+
 def _ts_set_display_name(folder: str, items: list[dict]) -> str:
     """用文件夹名作为入口名；目录名太泛（如 ts）则用上一级。"""
-    parts = [p for p in (folder or "").split("/") if p]
+    parts = [p for p in (folder or "").replace("\\", "/").split("/") if p]
     name = parts[-1] if parts else ""
     if name.lower() in SEGMENT_FOLDER_GENERIC and len(parts) >= 2:
         name = parts[-2]
-    if name:
+    if name and name.lower() not in _GENERIC_ENTRY_NAMES:
         return name
-    # 取文件名公共前缀
+    # 取文件名公共前缀（跳过 index/playlist 等泛化 stem）
     stems = [Path(i.get("filename") or i.get("name") or "").stem for i in items]
-    stems = [s for s in stems if s]
+    stems = [s for s in stems if s and s.lower() not in _GENERIC_ENTRY_NAMES]
     if not stems:
-        return "视频流"
+        return ""
     prefix = stems[0]
     for s in stems[1:]:
         while prefix and not s.startswith(prefix):
@@ -41,6 +46,43 @@ def _ts_set_display_name(folder: str, items: list[dict]) -> str:
     return prefix or stems[0]
 
 
+def hls_entry_display_name(item: dict) -> str:
+    """HLS/m3u8 卡片标题：index.m3u8 → 父文件夹名。"""
+    folder = (
+        item.get("folder") or item.get("_folder_raw") or ""
+    ).strip("/").replace("\\", "/")
+    disp = _ts_set_display_name(folder, [item]) if folder else ""
+    if disp and disp.lower() not in _GENERIC_ENTRY_NAMES:
+        return disp
+    rel = (item.get("rel") or "").replace("\\", "/").strip("/")
+    if rel:
+        parts = [p for p in Path(rel).parts[:-1] if p and p not in {".", "/"}]
+        while parts and parts[-1].lower() in SEGMENT_FOLDER_GENERIC:
+            parts.pop()
+        if parts and parts[-1].lower() not in _GENERIC_ENTRY_NAMES:
+            return parts[-1]
+    fallback = (
+        (item.get("name") or "").strip()
+        or Path(item.get("filename") or "playlist").stem
+        or "视频流"
+    )
+    return fallback
+
+
+def apply_hls_display_name(item: dict) -> bool:
+    """Rewrite generic playlist stems (index/…) to parent folder. Mutates item."""
+    kind = str(item.get("kind") or "").lower()
+    ext = str(item.get("ext") or "").lower()
+    if kind != "m3u8" and ext != ".m3u8":
+        return False
+    new = hls_entry_display_name(item)
+    old = (item.get("name") or "").strip()
+    if not new or new == old:
+        return False
+    item["name"] = new
+    return True
+
+
 def make_ts_set(folder: str, items: list[dict]) -> dict:
     items = sorted(items, key=lambda x: natural_sort_key(x.get("filename") or x.get("name") or ""))
     first = items[0]
@@ -49,7 +91,7 @@ def make_ts_set(folder: str, items: list[dict]) -> dict:
     segments = [i["rel"] for i in items if i.get("rel")]
     set_key = f"__ts_set__/{folder or '_root_'}"
     vid = video_id(set_key)
-    name = _ts_set_display_name(folder, items)
+    name = _ts_set_display_name(folder, items) or "视频流"
     themes, backgrounds = classify_video_taxonomy(folder + "/" + name, name)
     return {
         "id": vid,
@@ -78,12 +120,10 @@ def make_ts_set(folder: str, items: list[dict]) -> dict:
 
 def make_m3u8_entry(item: dict) -> dict:
     """把扫描到的 m3u8 规范成播放入口。"""
-    folder = (item.get("folder") or "").strip("/")
-    name = item.get("name") or Path(item.get("filename") or "playlist").stem
-    # 目录名更可读时用目录名
-    disp = _ts_set_display_name(folder, [item])
-    if disp and disp.lower() not in {"index", "playlist", "master", "video"}:
-        name = disp
+    folder = (item.get("folder") or "").strip("/").replace("\\", "/")
+    name = hls_entry_display_name({**item, "folder": folder})
+    if not name:
+        name = "视频流"
     vid = item.get("id") or video_id(item.get("rel") or "")
     themes, backgrounds = classify_video_taxonomy(item.get("rel") or "", name)
     return {
@@ -326,12 +366,9 @@ def collapse_segment_sets(videos: list[dict]) -> list[dict]:
 
     for folder, items in by_folder_m3u8.items():
         ready = [x for x in items if x.get("kind") == "m3u8" and x.get("rel")]
-        if ready:
-            pick = _pick_preferred_m3u8(ready)
-        else:
-            pick = make_m3u8_entry(_pick_preferred_m3u8(items))
-        if pick.get("kind") != "m3u8":
-            pick = make_m3u8_entry(pick)
+        pool = ready if ready else items
+        # Always normalize via make_m3u8_entry so index.m3u8 → parent folder title.
+        pick = make_m3u8_entry(_pick_preferred_m3u8(pool))
         pick_rel = (pick.get("rel") or "").replace("\\", "/").strip("/")
         # 已被其它 master 引用的子列表：不单独占一个入口
         if pick_rel and pick_rel in nested_playlists:

@@ -69,6 +69,11 @@ class RuntimeCatalogRepository:
 
     def find_video(self, vid: str, prefer_root: str | None = None) -> dict | None:
         prefer = (prefer_root or "").strip() or None
+        catalog_writer_busy = bool(
+            STATE.get("scanning")
+            or STATE.get("updating")
+            or STATE.get("meta_progress")
+        )
         if prefer:
             # The current/unified runtime indexes already contain the owning
             # root.  Check them before touching per-disk persistence: the old
@@ -92,6 +97,29 @@ class RuntimeCatalogRepository:
             hit = find_in_disk_libs(vid, prefer_root=prefer)
             if hit is not None:
                 return hit
+            # While scan/meta holds the catalog write lock, opening SQLite for a
+            # soft by-ids refresh only stalls waitress. Retry after the writer
+            # finishes and lib_gen advances.
+            if catalog_writer_busy:
+                try:
+                    from vg.diagnostics import emit_rate_limited
+
+                    emit_rate_limited(
+                        "WARN",
+                        "catalog_lookup_skip_sqlite_writer_busy",
+                        key=f"lookup-skip|{prefer or ''}",
+                        interval=5.0,
+                        force=True,
+                        video_id=str(vid)[:24],
+                        prefer_root=prefer or "",
+                        scanning=bool(STATE.get("scanning")),
+                        updating=bool(STATE.get("updating")),
+                        meta_progress=str(STATE.get("meta_progress") or "")[:120],
+                        reason="avoid_catalog_lock_deadlock",
+                    )
+                except Exception:
+                    pass
+                return None
             saved = read_root_library(prefer)
             if saved is not None:
                 hit = next(
@@ -126,6 +154,26 @@ class RuntimeCatalogRepository:
         hit = find_in_disk_libs(vid, prefer_root=None)
         if hit is not None:
             return hit
+        if catalog_writer_busy:
+            try:
+                from vg.diagnostics import emit_rate_limited
+
+                emit_rate_limited(
+                    "WARN",
+                    "catalog_lookup_skip_sqlite_writer_busy",
+                    key="lookup-skip|no-prefer",
+                    interval=5.0,
+                    force=True,
+                    video_id=str(vid)[:24],
+                    prefer_root="",
+                    scanning=bool(STATE.get("scanning")),
+                    updating=bool(STATE.get("updating")),
+                    meta_progress=str(STATE.get("meta_progress") or "")[:120],
+                    reason="avoid_catalog_lock_deadlock",
+                )
+            except Exception:
+                pass
+            return None
         ensure_cached_indexes_scanned()
         return find_in_disk_libs(vid, prefer_root=None)
 

@@ -17,6 +17,62 @@ _MAX_DISK_LIBS = 12
 _libs_lock = threading.RLock()
 _scanned_caches = False
 _load_log_ts: dict[str, float] = {}
+# One SQLite catalog load per root at a time. Concurrent /thumb + /api/videos
+# used to miss disk_libs together and reopen the same 800-row catalog.
+_catalog_flight_lock = threading.Lock()
+_catalog_flights: dict[str, threading.Event] = {}
+_CATALOG_FLIGHT_WAIT_S = 60.0
+
+
+def _catalog_flight_key(root_s: str) -> str:
+    return os.path.normcase(os.path.normpath(str(root_s or "")))
+
+
+def _begin_catalog_flight(root_s: str) -> tuple[bool, threading.Event, str]:
+    key = _catalog_flight_key(root_s)
+    with _catalog_flight_lock:
+        existing = _catalog_flights.get(key)
+        if existing is not None:
+            return False, existing, key
+        event = threading.Event()
+        _catalog_flights[key] = event
+        return True, event, key
+
+
+def _end_catalog_flight(key: str, event: threading.Event) -> None:
+    with _catalog_flight_lock:
+        if _catalog_flights.get(key) is event:
+            _catalog_flights.pop(key, None)
+    event.set()
+
+
+def _wait_catalog_flight(root_s: str, event: threading.Event, *, caller: str) -> None:
+    from vg.diagnostics import emit
+
+    emit(
+        "INFO",
+        "disk_library_load_wait",
+        force=True,
+        root=root_s,
+        caller=caller,
+        timeout_s=_CATALOG_FLIGHT_WAIT_S,
+    )
+    if not event.wait(timeout=_CATALOG_FLIGHT_WAIT_S):
+        log(f"[跨盘] 等待目录库加载超时 {root_s} caller={caller}")
+
+
+def _disk_lib_snapshot(root_s: str) -> list[dict] | None:
+    with _libs_guard("disk_libs_snapshot"):
+        existing = (STATE.get("disk_libs") or {}).get(root_s)
+        if not existing:
+            for k, val in (STATE.get("disk_libs") or {}).items():
+                if str(k).lower() == root_s.lower():
+                    existing = val
+                    break
+        if existing and existing.get("by_id"):
+            return list(existing["by_id"].values())
+    return None
+
 # Short-term cooldown for roots whose catalog is missing, so every page
 # refresh does not re-stat the same absent cache dir and re-emit WARN.
 _catalog_missing_until: dict[str, float] = {}
@@ -97,7 +153,13 @@ def stamp_lib_meta(
             v["_lib_cache"] = cache_s
 
 
-def _disk_item(item: dict, root_s: str, cache: Path) -> dict:
+def _disk_item(
+    item: dict,
+    root_s: str,
+    cache: Path,
+    *,
+    rename_acc: list[str] | None = None,
+) -> dict:
     """Return a canonical per-disk record from a possibly merged runtime item."""
     out = serialize_video_item(item, root=root_s, cache=cache)
     # Per-disk RAM archives are not persisted JSON responses. Keep the exact
@@ -105,7 +167,27 @@ def _disk_item(item: dict, root_s: str, cache: Path) -> dict:
     # recompute pinyin/actor text when it merges the disk libraries.
     if isinstance(item.get("_q"), str):
         out["_q"] = item["_q"]
+    # Persisted catalogs may still title HLS rows as "index"; fix on load.
+    from vg.segments import apply_hls_display_name
+
+    old_name = (out.get("name") or "").strip()
+    try:
+        if apply_hls_display_name(out):
+            if rename_acc is not None:
+                rename_acc.append(f"{old_name}→{out.get('name')}")
+    except Exception as exc:
+        log(f"[HLS标题] 改写失败 id={out.get('id') or '-'} rel={out.get('rel') or '-'}: {exc}")
     return out
+
+
+def _log_hls_title_rewrites(root_s: str, samples: list[str]) -> None:
+    if not samples:
+        return
+    preview = "；".join(samples[:3])
+    log(
+        f"[HLS标题] 根={root_s} 改写 {len(samples)} 条 index/playlist→父目录"
+        + (f"（例: {preview}）" if preview else "")
+    )
 
 
 def item_belongs_to_root(item: dict, root: Path | str) -> bool:
@@ -155,22 +237,34 @@ def read_root_library(root: Path | str) -> list[dict] | None:
         ):
             return list(existing["by_id"].values())
 
-    videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
-    if not videos:
-        _mark_catalog_empty(cache_s, index_mtime or 0)
-        return None
-    clean = [
-        _disk_item(v, root_s, cache)
-        for v in videos
-        if isinstance(v, dict) and v.get("id") and item_belongs_to_root(v, root_s)
-    ]
-    by_id = {v["id"]: v for v in clean}
-    if not by_id:
-        _mark_catalog_empty(cache_s, index_mtime or 0)
-        return None
-    _clear_catalog_empty(cache_s)
-    _store_lib(root_s, cache, by_id, index_mtime=index_mtime)
-    return list(by_id.values())
+    leader, flight, flight_key = _begin_catalog_flight(root_s)
+    if not leader:
+        _wait_catalog_flight(root_s, flight, caller="read_root_library")
+        return _disk_lib_snapshot(root_s)
+    try:
+        cached = _disk_lib_snapshot(root_s)
+        if cached:
+            return cached
+        videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
+        if not videos:
+            _mark_catalog_empty(cache_s, index_mtime or 0)
+            return None
+        renames: list[str] = []
+        clean = [
+            _disk_item(v, root_s, cache, rename_acc=renames)
+            for v in videos
+            if isinstance(v, dict) and v.get("id") and item_belongs_to_root(v, root_s)
+        ]
+        by_id = {v["id"]: v for v in clean}
+        if not by_id:
+            _mark_catalog_empty(cache_s, index_mtime or 0)
+            return None
+        _clear_catalog_empty(cache_s)
+        _log_hls_title_rewrites(root_s, renames)
+        _store_lib(root_s, cache, by_id, index_mtime=index_mtime)
+        return list(by_id.values())
+    finally:
+        _end_catalog_flight(flight_key, flight)
 
 
 def store_live_library(root: Path | str, videos: list[dict]) -> None:
@@ -193,6 +287,12 @@ def store_live_library(root: Path | str, videos: list[dict]) -> None:
         stamped["root"] = root_s
         if "_folder_raw" not in stamped:
             stamped["_folder_raw"] = (stamped.get("folder") or "").replace("\\", "/").strip("/")
+        from vg.segments import apply_hls_display_name
+
+        try:
+            apply_hls_display_name(stamped)
+        except Exception as exc:
+            log(f"[HLS标题] live改写失败 id={stamped.get('id') or '-'}: {exc}")
         source_id = stamped.get("_thumb_id") or stamped["id"]
         by_id[source_id] = stamped
     with _libs_guard("disk_libs_store_live"):
@@ -636,26 +736,46 @@ def load_library_from_index(root: Path | str) -> bool:
             and float(existing.get("index_mtime") or 0) == index_mtime
         ):
             return True
+        # Metadata enrichment UPSERTs bump catalog mtime every few seconds.
+        # Reloading the whole SQLite catalog for every /api/videos-by-ids while
+        # that writer holds the same lock freezes waitress threads (and the UI
+        # looks like tag clicks do nothing). Keep the in-memory copy.
+        if (
+            existing
+            and existing.get("by_id")
+            and (
+                STATE.get("meta_progress")
+                or STATE.get("scanning")
+                or STATE.get("updating")
+            )
+        ):
+            try:
+                from vg.diagnostics import emit_rate_limited
+
+                emit_rate_limited(
+                    "WARN",
+                    "disk_lib_reload_skipped_writer_busy",
+                    key=f"reload-skip|{root_s}",
+                    interval=5.0,
+                    force=True,
+                    root=root_s,
+                    cached_rows=len(existing.get("by_id") or {}),
+                    cached_mtime=float(existing.get("index_mtime") or 0),
+                    disk_mtime=float(index_mtime or 0),
+                    scanning=bool(STATE.get("scanning")),
+                    updating=bool(STATE.get("updating")),
+                    meta_progress=str(STATE.get("meta_progress") or "")[:120],
+                    reason="avoid_catalog_lock_deadlock",
+                )
+            except Exception:
+                pass
+            return True
         # Scan flushes catalog.sqlite often; reloading 778+ rows for every
         # /thumb or history lookup stalls the UI. Keep RAM copy briefly.
         if existing and existing.get("by_id"):
             loaded_at = float(existing.get("updated") or 0)
             if loaded_at and (time.time() - loaded_at) < 3.0:
                 return True
-        # Parallel /thumb lookups must not each deserialize the whole catalog.
-        if existing and existing.get("loading"):
-            from vg.diagnostics import emit
-
-            emit(
-                "INFO",
-                "disk_library_load_coalesced",
-                force=True,
-                root=root_s,
-                cache=cache,
-                serving_previous=bool(existing.get("by_id")),
-                previous_rows=len(existing.get("by_id") or {}),
-            )
-            return bool(existing.get("by_id"))
         if existing is None:
             STATE.setdefault("disk_libs", {})[root_s] = {
                 "root": root_s,
@@ -671,15 +791,22 @@ def load_library_from_index(root: Path | str) -> bool:
             # Keep serving the previous generation while we refresh.
             if existing.get("by_id"):
                 pass
+    leader, flight, flight_key = _begin_catalog_flight(root_s)
+    if not leader:
+        _wait_catalog_flight(root_s, flight, caller="load_library_from_index")
+        return bool(_disk_lib_snapshot(root_s))
     try:
+        if _disk_lib_snapshot(root_s):
+            return True
         videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
         clean = []
+        renames: list[str] = []
         for raw in videos:
             if not isinstance(raw, dict) or not raw.get("id"):
                 continue
             if not item_belongs_to_root(raw, root_s):
                 continue
-            clean.append(_disk_item(raw, root_s, cache))
+            clean.append(_disk_item(raw, root_s, cache, rename_acc=renames))
         by_id = {v["id"]: v for v in clean}
         if not by_id:
             from vg.diagnostics import emit
@@ -704,6 +831,7 @@ def load_library_from_index(root: Path | str) -> bool:
         _clear_catalog_empty(cache_s)
         final_mtime = catalog_mtime(cache)
         _store_lib(root_s, cache, by_id, index_mtime=final_mtime or index_mtime)
+        _log_hls_title_rewrites(root_s, renames)
         now = time.time()
         last = float(_load_log_ts.get(root_s) or 0)
         if now - last >= 5.0:
@@ -711,6 +839,7 @@ def load_library_from_index(root: Path | str) -> bool:
             log(f"[跨盘] 已加载历史盘索引: {root_s}（{len(by_id)} 部）")
         return True
     finally:
+        _end_catalog_flight(flight_key, flight)
         with _libs_guard("disk_lib_load_finalize"):
             lib = (STATE.get("disk_libs") or {}).get(root_s)
             if lib is not None:
@@ -829,7 +958,31 @@ def find_in_disk_libs(vid: str, prefer_root: str | None = None) -> dict | None:
     if not vid:
         return None
     prefer = _norm_root_str(prefer_root) if prefer_root else ""
-    if prefer:
+    catalog_writer_busy = bool(
+        STATE.get("scanning")
+        or STATE.get("updating")
+        or STATE.get("meta_progress")
+    )
+    if prefer and catalog_writer_busy:
+        try:
+            from vg.diagnostics import emit_rate_limited
+
+            emit_rate_limited(
+                "WARN",
+                "disk_libs_ensure_skipped_writer_busy",
+                key=f"ensure-skip|{prefer}",
+                interval=5.0,
+                force=True,
+                root=prefer,
+                video_id=str(vid)[:24],
+                scanning=bool(STATE.get("scanning")),
+                updating=bool(STATE.get("updating")),
+                meta_progress=str(STATE.get("meta_progress") or "")[:120],
+                reason="avoid_catalog_lock_deadlock",
+            )
+        except Exception:
+            pass
+    elif prefer:
         ensure_library(prefer)
     with _libs_guard("disk_libs_lookup_by_id"):
         libs = STATE.get("disk_libs") or {}

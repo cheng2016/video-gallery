@@ -344,6 +344,83 @@ def expand_scan_walk_jobs(
     return shallow, [(str(job["label"]), Path(job["path"])) for job in leaves]
 
 
+def _catalog_item_on_disk(item: dict, root: Path) -> bool:
+    """True when the catalog row still has a source file under root."""
+    kind = str(item.get("kind") or "").lower()
+    try:
+        if kind == "ts_set":
+            segs = item.get("segments") or []
+            if not segs:
+                return False
+            for rel in segs:
+                rel_s = str(rel or "").replace("\\", "/").strip("/")
+                if rel_s and (root / rel_s).is_file():
+                    return True
+            return False
+        rel = str(item.get("rel") or "").replace("\\", "/").strip("/")
+        if not rel:
+            return False
+        path = root / rel
+        return path.is_file() or path.is_dir()
+    except OSError:
+        return False
+
+
+def _folder_hit_by_targets(folder: str, targets: set[str]) -> bool:
+    """True if folder is a targeted dir or a descendant of one."""
+    key = folder_key(folder)
+    if key in targets:
+        return True
+    for target in targets:
+        if target and key.startswith(target + "/"):
+            return True
+    return False
+
+
+def prune_missing_catalog_items(
+    videos: list[dict],
+    root: Path,
+    *,
+    log_tag: str = "扫描",
+) -> list[dict]:
+    """Drop catalog rows whose source files were deleted on disk."""
+    if not videos:
+        return videos
+    kept: list[dict] = []
+    removed = 0
+    samples: list[str] = []
+    for item in videos:
+        if _catalog_item_on_disk(item, root):
+            kept.append(item)
+            continue
+        removed += 1
+        if len(samples) < 5:
+            samples.append(
+                str(item.get("rel") or item.get("name") or item.get("id") or "?")
+            )
+    if removed:
+        sample = "；".join(samples)
+        log(
+            f"[{log_tag}] 剔除已删除文件 {removed} 条"
+            + (f"（例: {sample}）" if sample else "")
+        )
+        try:
+            from vg.diagnostics import emit
+
+            emit(
+                "INFO",
+                "catalog_prune_missing_files",
+                force=True,
+                root=root,
+                removed=removed,
+                kept=len(kept),
+                sample=sample,
+            )
+        except Exception:
+            pass
+    return kept
+
+
 def start_scan(
     root: Path,
     do_thumbs: bool = True,
@@ -500,25 +577,25 @@ def start_scan(
             STATE["root"] = root
             STATE["cache_dir"] = ensure_cache_dir(root)
             save_prefs(last_root=str(root))
+            # User-triggered scan (soft or force): drop validation cooldown so
+            # deleted files are not skipped for up to 5 minutes.
+            try:
+                from vg.catalog_db import clear_catalog_validation_time
+
+                clear_catalog_validation_time(ensure_cache_dir(root))
+            except Exception as exc:
+                from vg.diagnostics import emit as _emit
+
+                _emit(
+                    "WARN",
+                    "catalog_validation_marker_clear_failed",
+                    force=True,
+                    root=root,
+                    error=str(exc),
+                )
             if force:
                 STATE["scan_progress"] = f"正在增量扫描 {root} …"
                 STATE["thumb_progress"] = ""
-                # Drop validation cooldown so a soft re-scan after a bad force
-                # walk can recount folders instead of trusting a stale marker.
-                try:
-                    from vg.catalog_db import clear_catalog_validation_time
-
-                    clear_catalog_validation_time(ensure_cache_dir(root))
-                except Exception as exc:
-                    from vg.diagnostics import emit as _emit
-
-                    _emit(
-                        "WARN",
-                        "catalog_validation_marker_clear_failed",
-                        force=True,
-                        root=root,
-                        error=str(exc),
-                    )
                 # 多盘时不要把其它盘的片从内存清空到「整库变空」；
                 # 其它盘频道仍可从各盘 index 读出；扫完 on_scan_finished 会再合并。
                 try:
@@ -2185,37 +2262,50 @@ def scan_videos(
 
     scanned: list[dict] = []
     if target_folders is not None:
+        prior_index = _load_index_videos(cache, root)
         kept = [
             v
-            for v in _load_index_videos(cache, root)
-            if item_folder_key(v) not in target_folders
+            for v in prior_index
+            if not _folder_hit_by_targets(item_folder_key(v), target_folders)
         ]
+        log(
+            f"[增量] 定向扫描 {len(target_folders)} 个目录："
+            f"保留未变 {len(kept)} / 原目录 {len(prior_index)}，"
+            f"目标例={','.join(sorted(target_folders)[:6])}"
+        )
         for folder in sorted(target_folders):
             dirpath = root / folder if folder else root
-            count_scan("directories_scanned")
             try:
                 if not dirpath.is_dir():
+                    count_scan("target_folder_missing", dirpath)
                     continue
-                names = os.listdir(dirpath)
             except OSError as err:
                 on_walk_error(err if isinstance(err, OSError) else OSError(err))
                 continue
-            for name in names:
-                full = dirpath / name
-                try:
-                    if not full.is_file():
+            # Recursively walk the changed folder so nested videos are rebuilt
+            # after we dropped all descendants from ``kept``.
+            for walk_dir, dirnames, filenames in os.walk(dirpath, onerror=on_walk_error):
+                count_scan("directories_scanned")
+                kept_dirs: list[str] = []
+                for name in dirnames:
+                    if should_skip_dir(name):
                         continue
-                except OSError:
-                    continue
-                ext = Path(name).suffix.lower()
-                if ext not in VIDEO_EXTS and ext not in PLAYLIST_EXTS:
-                    continue
-                count_scan("candidate_files")
-                item = ingest_file(full, name, ext, count_folder=False)
-                if item:
-                    scanned.append(item)
-                    found.append(item)
-                    note_found()
+                    child = Path(walk_dir) / name
+                    if _is_linkish_dir(child):
+                        continue
+                    kept_dirs.append(name)
+                dirnames[:] = kept_dirs
+                for name in filenames:
+                    ext = Path(name).suffix.lower()
+                    if ext not in VIDEO_EXTS and ext not in PLAYLIST_EXTS:
+                        continue
+                    count_scan("candidate_files")
+                    full = Path(walk_dir) / name
+                    item = ingest_file(full, name, ext, count_folder=False)
+                    if item:
+                        scanned.append(item)
+                        found.append(item)
+                        note_found()
         scanned = collapse_segment_sets(scanned)
         found = kept + scanned
     else:
@@ -2508,6 +2598,9 @@ def scan_videos(
                 adopted += 1
         if adopted:
             log(f"[增量] 合集/条目继承旧元数据 {adopted} 个")
+
+    # Safety net: drop rows whose files vanished (folder-key mismatches, etc.).
+    found = prune_missing_catalog_items(found, root, log_tag="扫描")
 
     output_reused, output_changed = _final_scan_change_counts(
         found,
@@ -2845,6 +2938,22 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                     v["root"] = root_s
                     if "_folder_raw" not in v:
                         v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
+                before_n = len(videos)
+                videos = prune_missing_catalog_items(videos, root, log_tag="缓存")
+                if len(videos) != before_n:
+                    # Persist pruned catalog so soft scan does not keep ghosts.
+                    stored_n, stored_counts = read_index_counts(cache)
+                    save_index(
+                        cache,
+                        root,
+                        videos,
+                        file_count=stored_n,
+                        folder_counts=stored_counts if isinstance(stored_counts, dict) else None,
+                    )
+                    try:
+                        sync_disk_lib_memory(root_s, videos)
+                    except Exception as e:
+                        log(f"[缓存] 同步剔除后的内存索引失败: {e}")
                 from vg.diagnostics import emit
 
                 emit(

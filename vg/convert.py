@@ -796,20 +796,93 @@ def _prepare_convert_input(item: dict) -> tuple[list[str], Path, Path | None, fl
     return ["-i", str(src)], src.parent, None, duration_f
 
 
-def _convert_mp4_base_name(item: dict) -> str:
+_GENERIC_MEDIA_STEMS = frozenset({"index", "playlist", "master", "video", "stream"})
+
+
+def _folder_leaf_name(folder: str) -> str:
+    """Last useful folder segment; skip ts/media-style generic dirs."""
+    parts = [p for p in (folder or "").strip("/").replace("\\", "/").split("/") if p]
+    if not parts:
+        return ""
+    name = parts[-1]
+    if name.lower() in SEGMENT_FOLDER_GENERIC and len(parts) >= 2:
+        name = parts[-2]
+    if name.lower() in _GENERIC_MEDIA_STEMS:
+        return ""
+    return name
+
+
+def _parent_dir_base_name(src: Path | None, item: dict | None = None) -> str:
+    """Parent folder of the playlist/file; skip generic segment dirs."""
+    if src is not None:
+        parent = src.parent
+        name = parent.name if parent else ""
+        if name.lower() in SEGMENT_FOLDER_GENERIC and parent.parent and parent.parent.name:
+            name = parent.parent.name
+        if name and name.lower() not in _GENERIC_MEDIA_STEMS:
+            return name
+    if item:
+        for key in ("_folder_raw", "folder"):
+            leaf = _folder_leaf_name(str(item.get(key) or ""))
+            if leaf:
+                return leaf
+        rel_parent = Path(str(item.get("rel") or "")).parent.name
+        if rel_parent and rel_parent.lower() not in _GENERIC_MEDIA_STEMS | SEGMENT_FOLDER_GENERIC:
+            return rel_parent
+    return ""
+
+
+def _convert_mp4_base_name(item: dict, src: Path | None = None) -> str:
     """
     MP4 文件名优先用 m3u8/合集所在目录名（跳过 ts/media 等泛化目录，取上一级）；
-    没有可用目录名时再回退到条目展示名 / 文件名。
+    文件名是 index/playlist/master 时必须用父文件夹名。
     """
-    folder = (item.get("folder") or "").strip("/").replace("\\", "/")
-    if folder:
-        parts = [p for p in folder.split("/") if p]
-        name = parts[-1] if parts else ""
-        if name.lower() in SEGMENT_FOLDER_GENERIC and len(parts) >= 2:
-            name = parts[-2]
-        if name and name.lower() not in {"index", "playlist", "master"}:
-            return name
-    return item.get("name") or Path(item.get("filename") or "video").stem
+    kind = str(item.get("kind") or "").lower()
+    ext = str(item.get("ext") or (src.suffix if src else "") or "").lower()
+    stem = (
+        (src.stem if src is not None else "")
+        or Path(item.get("filename") or item.get("rel") or "").stem
+        or (item.get("name") or "")
+    )
+    stem_l = str(stem).strip().lower()
+    stream_like = kind in {"m3u8", "ts_set", "series"} or ext in {".m3u8", ".ts", ".m2ts"}
+    # HLS named index.m3u8 (etc.) → always the parent folder name.
+    if stream_like or stem_l in _GENERIC_MEDIA_STEMS:
+        parent = _parent_dir_base_name(src, item)
+        if parent:
+            return parent
+    display = (item.get("name") or "").strip()
+    if display and display.lower() not in _GENERIC_MEDIA_STEMS:
+        return display
+    if stem and stem_l not in _GENERIC_MEDIA_STEMS:
+        return str(stem)
+    return _parent_dir_base_name(src, item) or "video"
+
+
+def _transcode_output_base_name(item: dict, src: Path | None = None) -> str:
+    """Name for converted output; HLS index.m3u8 → parent folder, never 'index'."""
+    return _convert_mp4_base_name(item, src)
+
+
+def _transcode_stem_suffix(
+    *,
+    encoder: str,
+    target_fps: int | None,
+    scale: int,
+    out_ext: str,
+) -> str:
+    bits: list[str] = []
+    enc = normalize_video_encoder(encoder)
+    if enc != "auto":
+        bits.append(enc)
+    if scale:
+        bits.append(f"{int(scale)}p")
+    if target_fps:
+        bits.append(f"{int(target_fps)}fps")
+    # Do not embed out_ext in the stem (avoid name_mkv.mkv). Plain remux
+    # keeps an empty suffix so HLS→MP4 becomes FolderName.mp4, not index_conv.
+    _ = out_ext
+    return "_".join(bits)
 
 
 def _convert_worker(job_id: str, vid: str, root: str | None = None) -> None:
@@ -836,7 +909,10 @@ def _convert_worker(job_id: str, vid: str, root: str | None = None) -> None:
         if not _path_under_root(out_dir, item_root):
             _convert_job_update(job_id, status="error", msg="输出目录不在扫描根下", percent=0)
             return
-        base_name = _convert_mp4_base_name(item)
+        base_name = _convert_mp4_base_name(
+            item,
+            out_dir / Path(item.get("filename") or item.get("rel") or "index.m3u8").name,
+        )
         out_path = _unique_mp4_path(out_dir, base_name)
         if not _path_under_root(out_path, item_root):
             _convert_job_update(job_id, status="error", msg="输出路径非法", percent=0)
@@ -943,29 +1019,6 @@ def _audio_reencode_args(out_ext: str) -> list[str]:
     if ext == "webm":
         return ["-c:a", "libopus", "-b:a", "128k"]
     return ["-c:a", "aac", "-b:a", "192k"]
-
-
-def _transcode_stem_suffix(
-    *,
-    encoder: str,
-    target_fps: int | None,
-    scale: int,
-    out_ext: str,
-) -> str:
-    bits: list[str] = []
-    enc = normalize_video_encoder(encoder)
-    if enc != "auto":
-        bits.append(enc)
-    if scale:
-        bits.append(f"{int(scale)}p")
-    if target_fps:
-        bits.append(f"{int(target_fps)}fps")
-    if not bits:
-        bits.append("conv")
-    ext = (out_ext or "mp4").lstrip(".")
-    if ext and ext != "mp4":
-        bits.append(ext)
-    return "_".join(bits)
 
 
 def _run_ffmpeg_fps30(
@@ -1177,8 +1230,14 @@ def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
         suffix = _transcode_stem_suffix(
             encoder=encoder, target_fps=target, scale=scale, out_ext=out_ext,
         )
-        src_name = src.stem if src else _convert_mp4_base_name(item)
-        out_path = _unique_out_path(out_dir, f"{src_name}_{suffix}", f".{out_ext}")
+        src_name = _transcode_output_base_name(item, src)
+        out_stem = f"{src_name}_{suffix}" if suffix else src_name
+        out_path = _unique_out_path(out_dir, out_stem, f".{out_ext}")
+        raw_stem = (src.stem if src else "") or Path(item.get("filename") or "").stem
+        log(
+            f"[转码命名] job={job_id} kind={item.get('kind') or '-'} "
+            f"src_stem={raw_stem or '-'} → base={src_name} out={out_path.name}"
+        )
         if not _path_under_root(out_path, item_root):
             _convert_job_update(job_id, status="error", msg="输出路径非法", percent=0)
             return
