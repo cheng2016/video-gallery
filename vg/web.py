@@ -2869,17 +2869,53 @@ def thumb(vid: str):
         "Pragma": "no-cache",
     }
 
-    def _deferred_placeholder():
+    def _deferred_placeholder(*, temporary: bool = True, reason: str = "queued"):
+        """SVG stand-in for missing thumbs.
+
+        temporary=True  → still generating / scan in progress: Retry-After so
+                          the card loader may try again.
+        temporary=False → permanently unavailable (no catalog row, persisted
+                          failure, no video stream): no Retry-After; frontend
+                          must stop hammering the same id.
+        """
+        headers = {**placeholder_headers}
+        # HTTP header values must be latin-1. Chinese reasons (e.g. 无视频流)
+        # used to hide X-VG-Thumb-Status from fetch(), so the browser kept
+        # retrying permanently-failed thumbs.
+        reason_code = str(reason or "queued")
+        low = reason_code.casefold()
+        if "无视频" in reason_code or "no video" in low:
+            reason_code = "no_video_stream"
+        elif "损坏" in reason_code or "corrupt" in low:
+            reason_code = "corrupted"
+        else:
+            try:
+                reason_code.encode("ascii")
+            except UnicodeEncodeError:
+                reason_code = "unavailable"
+            reason_code = reason_code[:80]
+        if temporary:
+            headers["Retry-After"] = "1"
+            headers["X-VG-Thumb-Status"] = "pending"
+            cache_tag = "missing_or_generation_queued"
+        else:
+            # Brief private cache cuts WARN spam when a stuck card still polls.
+            headers["Cache-Control"] = "private, max-age=120"
+            headers["X-VG-Thumb-Status"] = "unavailable"
+            headers["X-VG-Thumb-Reason"] = reason_code
+            cache_tag = "missing_or_generation_unavailable"
         _set_request_cache_layer(
             "L3_thumb_placeholder",
-            cache="missing_or_generation_queued",
+            cache=cache_tag,
             video_id=vid,
+            thumb_status=headers.get("X-VG-Thumb-Status"),
+            thumb_reason=reason_code,
         )
         return Response(
             placeholder,
             status=503,
             mimetype="image/svg+xml",
-            headers={**placeholder_headers, "Retry-After": "1"},
+            headers=headers,
         )
 
     # Fast path: cards already pass owning root + thumb_id. Existing .vgt
@@ -2928,7 +2964,7 @@ def thumb(vid: str):
                 operation_id=getattr(g, "_diag_operation_id", ""),
             )
             diagnostic_aggregate("thumbnail_placeholder")
-            return _deferred_placeholder()
+            return _deferred_placeholder(temporary=True, reason="catalog_transition")
         else:
             item = find_video_by_id(vid, prefer_root=prefer_root)
         cache = cache_dir_for_item(item) or hint_cache or STATE.get("cache_dir")
@@ -2952,7 +2988,10 @@ def thumb(vid: str):
                     reason=item.get("thumb_failed_reason") or "persisted_failure",
                 )
                 diagnostic_aggregate("thumbnail_placeholder")
-                return _deferred_placeholder()
+                return _deferred_placeholder(
+                    temporary=False,
+                    reason="persisted_failure",
+                )
             # Metadata probing marks audio-only/corrupt containers as ``bad``.
             # They cannot produce a video frame, so queueing ffmpeg here only
             # repeats a 300-500ms failure for every thumbnail retry (and floods
@@ -2970,7 +3009,9 @@ def thumb(vid: str):
                     root=prefer_root,
                     reason=item.get("bad_reason") or "no_video_stream",
                 )
-            elif src:
+                diagnostic_aggregate("thumbnail_placeholder")
+                return _deferred_placeholder(temporary=False, reason="no_video_stream")
+            if src:
                 def generate_requested_thumb() -> bool:
                     ok = make_thumbnail(ffmpeg, src, out, background=True)
                     if not ok:
@@ -3014,30 +3055,42 @@ def thumb(vid: str):
                     priority=THUMB_PRIORITY_VISIBLE,
                 )
                 diagnostic_aggregate("thumbnail_generation_queued")
-            else:
-                diagnostic_emit(
-                    "WARN",
-                    "thumbnail_source_unresolved",
-                    force=True,
-                    video_id=vid,
-                    item_rel=item.get("rel"),
-                    root=prefer_root,
-                    operation_id=getattr(g, "_diag_operation_id", ""),
-                )
-        else:
-            diagnostic_emit(
+                diagnostic_aggregate("thumbnail_placeholder")
+                return _deferred_placeholder(temporary=True, reason="queued")
+            diagnostic_emit_rate_limited(
                 "WARN",
-                "thumbnail_generation_unavailable",
+                "thumbnail_source_unresolved",
+                key=f"{prefer_root}|{vid}",
+                interval=30.0,
                 force=True,
                 video_id=vid,
-                item_found=bool(item),
-                ffmpeg_found=bool(ffmpeg),
-                cache_found=bool(cache),
+                item_rel=item.get("rel"),
                 root=prefer_root,
                 operation_id=getattr(g, "_diag_operation_id", ""),
             )
+            diagnostic_aggregate("thumbnail_placeholder")
+            return _deferred_placeholder(temporary=False, reason="source_unresolved")
+        unavailable_reason = (
+            "item_not_found"
+            if not item
+            else ("ffmpeg_missing" if not ffmpeg else "cache_missing")
+        )
+        diagnostic_emit_rate_limited(
+            "WARN",
+            "thumbnail_generation_unavailable",
+            key=f"{prefer_root or ''}|{vid}|{unavailable_reason}",
+            interval=30.0,
+            force=True,
+            video_id=vid,
+            item_found=bool(item),
+            ffmpeg_found=bool(ffmpeg),
+            cache_found=bool(cache),
+            root=prefer_root,
+            reason=unavailable_reason,
+            operation_id=getattr(g, "_diag_operation_id", ""),
+        )
         diagnostic_aggregate("thumbnail_placeholder")
-        return _deferred_placeholder()
+        return _deferred_placeholder(temporary=False, reason=unavailable_reason)
 
     item = find_video_by_id(vid, prefer_root=prefer_root)
     # 也可能用 thumb_id（碰撞重映射后）直接请求
@@ -3079,7 +3132,10 @@ def thumb(vid: str):
                     reason=item.get("thumb_failed_reason") or "persisted_failure",
                 )
                 if defer:
-                    return _deferred_placeholder()
+                    return _deferred_placeholder(
+                        temporary=False,
+                        reason=item.get("thumb_failed_reason") or "persisted_failure",
+                    )
                 return jsonify({"ok": False, "msg": "该视频缩略图此前生成失败，已跳过重复尝试"}), 503
             bad_reason = str(item.get("bad_reason") or "").casefold()
             if item.get("bad") and ("无视频流" in bad_reason or "no video" in bad_reason):
@@ -3134,7 +3190,7 @@ def thumb(vid: str):
                 )
                 if defer:
                     diagnostic_aggregate("thumbnail_placeholder")
-                    return _deferred_placeholder()
+                    return _deferred_placeholder(temporary=True, reason="queued")
                 try:
                     future.result(timeout=75)
                 except Exception as exc:
@@ -3165,9 +3221,11 @@ def thumb(vid: str):
                     operation_id=getattr(g, "_diag_operation_id", ""),
                 )
 
-    diagnostic_emit(
+    diagnostic_emit_rate_limited(
         "WARN",
         "thumbnail_placeholder_returned",
+        key=f"{prefer_root or ''}|{vid}|final",
+        interval=30.0,
         force=True,
         video_id=vid,
         file_id=file_id,
@@ -3183,7 +3241,11 @@ def thumb(vid: str):
         video_id=vid,
         file_id=file_id,
     )
-    return Response(placeholder, mimetype="image/svg+xml", headers=placeholder_headers)
+    # Non-deferred / final fallback: treat as permanent so clients stop retrying.
+    return _deferred_placeholder(
+        temporary=False,
+        reason="unavailable" if item else "item_not_found",
+    )
 
 
 def _playback_route_failure(
@@ -3541,7 +3603,8 @@ def api_info(vid: str):
         log(
             f"[帧率探测] 已交后台线程 vid={vid} started={started_bg} "
             f"cached={item.get('width')}x{item.get('height')}@{item.get('fps')} "
-            f"vcodec={item.get('video_codec') or '-'}"
+            f"vcodec={item.get('video_codec') or '-'} "
+            f"acodec={item.get('audio_codec') or '-'}"
         )
     elif want_video_meta and not STATE.get("ffmpeg"):
         log(f"[帧率探测] 跳过：未找到 ffmpeg vid={vid}")
@@ -3553,7 +3616,9 @@ def api_info(vid: str):
             f"[帧率探测] 使用缓存 vid={vid} "
             f"{item.get('width')}x{item.get('height')}@{item.get('fps')} "
             f"vcodec={item.get('video_codec') or '-'} "
-            f"done={bool(item.get('probe_video_meta_done'))}"
+            f"acodec={item.get('audio_codec') or '-'} "
+            f"done={bool(item.get('probe_video_meta_done'))} "
+            f"audio_done={bool(item.get('probe_audio_done'))}"
         )
     if metadata_changed:
         try:
@@ -3580,6 +3645,9 @@ def api_info(vid: str):
     payload["browser_hard"] = ext in BROWSER_HARD_EXTS and kind not in ("m3u8", "ts_set")
     payload["audio_codec"] = item.get("audio_codec") or ""
     payload["audio_hard"] = bool(item.get("audio_hard"))
+    payload["probe_audio_done"] = bool(
+        item.get("probe_audio_done") or ("audio_codec" in item)
+    )
     payload["video_codec"] = item.get("video_codec") or ""
     width = item.get("width")
     height = item.get("height")
@@ -3632,6 +3700,7 @@ def api_info(vid: str):
     log(
         f"[帧率转码] 播放页判定 vid={vid} "
         f"{width or 0}x{height or 0}@{fps} vcodec={payload['video_codec'] or '-'} "
+        f"acodec={payload['audio_codec'] or '-'} audio_hard={int(payload['audio_hard'])} "
         f"hires={hires} can_fps30={payload['can_fps30']} gate={gate} "
         f"fps_class={payload['fps_class']} targets={payload['fps_targets']} "
         f"has_ffmpeg={payload['has_ffmpeg']} probe_pending={probe_pending}"

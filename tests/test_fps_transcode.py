@@ -169,7 +169,8 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
                 stream_like=False,
             )
         )
-        self.assertFalse(
+        # Video meta alone is not enough — player also wants audio codec.
+        self.assertTrue(
             wants_player_video_meta(
                 {
                     "width": 1920,
@@ -180,7 +181,80 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
                 stream_like=False,
             )
         )
+        self.assertFalse(
+            wants_player_video_meta(
+                {
+                    "width": 1920,
+                    "height": 1080,
+                    "video_codec": "hevc",
+                    "probe_video_meta_done": True,
+                    "audio_codec": "aac",
+                    "probe_audio_done": True,
+                },
+                stream_like=False,
+            )
+        )
+        self.assertFalse(
+            wants_player_video_meta(
+                {
+                    "width": 1920,
+                    "height": 1080,
+                    "video_codec": "hevc",
+                    "probe_video_meta_done": True,
+                    "audio_codec": "",
+                    "probe_audio_done": True,
+                },
+                stream_like=False,
+            )
+        )
 
+    def test_player_meta_worker_probes_audio(self) -> None:
+        from vg import media
+
+        item = {
+            "id": "vid-1",
+            "name": "clip",
+            "filename": "clip.mp4",
+            "rel": "clip.mp4",
+            "ext": ".mp4",
+        }
+        fake_path = mock.MagicMock()
+        fake_path.is_file.return_value = True
+        fake_path.suffix = ".mp4"
+        fake_path.name = "clip.mp4"
+        with (
+            mock.patch("vg.catalog_repository.find_video_by_id", return_value=item),
+            mock.patch.object(media, "_item_probe_path", return_value=fake_path),
+            mock.patch.object(
+                media,
+                "probe_media_info",
+                return_value={
+                    "ok": True,
+                    "width": 1280,
+                    "height": 720,
+                    "fps": 24.0,
+                    "video_codec": "h264",
+                    "audio_codec": "ac3",
+                    "audio_hard": True,
+                    "probe_video_meta_done": True,
+                },
+            ) as probe,
+            mock.patch("vg.disk_libs.save_library_item", return_value=True),
+            mock.patch("vg.diagnostics.emit"),
+        ):
+            media._player_video_meta_worker("vid-1", None, "ffmpeg", "k")
+        probe.assert_called_once_with(
+            "ffmpeg",
+            fake_path,
+            include_duration=False,
+            include_audio=True,
+            include_video_meta=True,
+        )
+        self.assertEqual(item.get("audio_codec"), "ac3")
+        self.assertTrue(item.get("audio_hard"))
+        self.assertTrue(item.get("probe_audio_done"))
+        self.assertEqual(item.get("video_codec"), "h264")
+        self.assertTrue(item.get("probe_video_meta_done"))
 
     def test_fps30_encoder_follows_source_codec(self) -> None:
         from vg.convert import _fps30_video_encode_args
@@ -241,6 +315,7 @@ class UiFpsControlsTests(unittest.TestCase):
         self.assertIn('id="btnStartTranscode"', html)
         self.assertIn('id="btnConvertToggle"', html)
         self.assertIn('id="playerChips"', html)
+        self.assertIn("function formatAudioCodecLabel(", html)
         self.assertIn("function startTranscode(", html)
         self.assertIn("/api/transcode/", html)
         self.assertNotIn('id="btnToMp4"', html)

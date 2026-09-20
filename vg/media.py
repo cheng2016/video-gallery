@@ -318,10 +318,13 @@ def probe_media_info(
                 result["fps"] = round(fps, 3)
             result["video_codec"] = video_codec
             result["probe_video_meta_done"] = True
+        if include_video_meta or include_audio:
             log(
                 f"[帧率探测] ffprobe ok path={path.name} "
-                f"{width or 0}x{height or 0}@{result.get('fps')} "
-                f"vcodec={video_codec or '-'}"
+                f"{width or 0}x{height or 0}@"
+                f"{result.get('fps') if include_video_meta else '-'} "
+                f"vcodec={(video_codec or '-') if include_video_meta else '(skip)'} "
+                f"acodec={(audio_codec or '-') if include_audio else '(skip)'}"
             )
         from vg.diagnostics import aggregate
 
@@ -702,15 +705,17 @@ def _player_probe_key(vid: str, root: str | None) -> str:
     return f"{(root or '').strip().casefold()}::{vid}"
 
 
-def wants_player_video_meta(item: dict, *, stream_like: bool) -> bool:
-    """True when player-open should (re)probe resolution/fps/video codec."""
-    if stream_like or not isinstance(item, dict):
-        return False
+def _player_video_meta_done(item: dict) -> bool:
     has_dims = bool(item.get("width") or item.get("height"))
     has_codec = "video_codec" in item
-    return not (
-        bool(item.get("probe_video_meta_done")) and has_dims and has_codec
-    )
+    return bool(item.get("probe_video_meta_done")) and has_dims and has_codec
+
+
+def wants_player_video_meta(item: dict, *, stream_like: bool) -> bool:
+    """True when player-open should (re)probe resolution/fps/video/audio codecs."""
+    if stream_like or not isinstance(item, dict):
+        return False
+    return not (_player_video_meta_done(item) and _audio_already_known(item))
 
 
 def player_video_meta_pending(vid: str, root: str | None) -> bool:
@@ -719,7 +724,7 @@ def player_video_meta_pending(vid: str, root: str | None) -> bool:
 
 
 def schedule_player_video_meta_probe(vid: str, root: str | None, ffmpeg: str) -> bool:
-    """Start a daemon ffprobe for width/height/fps/video_codec. Never blocks."""
+    """Start a daemon ffprobe for width/height/fps/video+audio codecs. Never blocks."""
     if not vid or not ffmpeg:
         log(f"[帧率探测] 无法启动后台线程 vid={vid or '-'} ffmpeg={bool(ffmpeg)}")
         return False
@@ -749,10 +754,16 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
             log(f"[帧率探测] 后台跳过：未找到视频 vid={vid}")
             return
         path = _item_probe_path(item)
+        want_video = not _player_video_meta_done(item)
+        want_audio = not _audio_already_known(item)
         log(
             f"[帧率探测] 后台开始 vid={vid} path={path} "
-            f"exists={bool(path and path.is_file())}"
+            f"exists={bool(path and path.is_file())} "
+            f"want_video={int(want_video)} want_audio={int(want_audio)}"
         )
+        if not want_video and not want_audio:
+            log(f"[帧率探测] 后台跳过：画面/音频均已缓存 vid={vid}")
+            return
         if not path or not path.is_file() or path.suffix.lower() == ".m3u8":
             log(f"[帧率探测] 后台跳过：无实体文件 vid={vid} path={path}")
             return
@@ -760,15 +771,15 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
             ffmpeg,
             path,
             include_duration=False,
-            include_audio=False,
-            include_video_meta=True,
+            include_audio=want_audio,
+            include_video_meta=want_video,
         )
         _apply_probe_to_item(
             item,
             info,
             include_duration=False,
-            include_audio=False,
-            include_video_meta=True,
+            include_audio=want_audio,
+            include_video_meta=want_video,
         )
         saved = False
         try:
@@ -779,7 +790,10 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
             f"[帧率探测] 后台完成 vid={vid} ok={info.get('ok')} "
             f"{item.get('width') or 0}x{item.get('height') or 0}@"
             f"{item.get('fps')} vcodec={item.get('video_codec') or '-'} "
+            f"acodec={item.get('audio_codec') or '-'} "
+            f"audio_hard={int(bool(item.get('audio_hard')))} "
             f"done={bool(item.get('probe_video_meta_done'))} "
+            f"audio_done={bool(item.get('probe_audio_done'))} "
             f"err={info.get('err') or ''} saved={int(saved)}"
         )
         from vg.diagnostics import emit
@@ -794,6 +808,8 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
             height=item.get("height") or 0,
             fps=item.get("fps"),
             video_codec=item.get("video_codec") or "",
+            audio_codec=item.get("audio_codec") or "",
+            audio_hard=bool(item.get("audio_hard")),
             err=info.get("err") or "",
             path=str(path),
             background=True,

@@ -2329,6 +2329,8 @@
         is_rm: !!info.is_rm,
         ext: info.ext || "",
         probe_pending: !!info.probe_pending,
+        probe_audio_done: !!info.probe_audio_done,
+        probe_video_meta_done: !!info.probe_video_meta_done,
       };
     }
 
@@ -2364,6 +2366,33 @@
       return map[raw] || raw.toUpperCase();
     }
 
+    function formatAudioCodecLabel(codec, opts) {
+      const raw = String(codec || "").trim().toLowerCase();
+      const done = !!(opts && opts.probe_audio_done);
+      if (!raw) return done ? "无音轨" : "";
+      const map = {
+        aac: "AAC",
+        mp3: "MP3",
+        opus: "Opus",
+        vorbis: "Vorbis",
+        ac3: "AC-3",
+        eac3: "E-AC-3",
+        dts: "DTS",
+        truehd: "TrueHD",
+        flac: "FLAC",
+        alac: "ALAC",
+        cook: "Cook",
+        sipr: "Sipro",
+        atrac3: "ATRAC3",
+        wmav1: "WMA",
+        wmav2: "WMA",
+        wmapro: "WMA Pro",
+      };
+      if (map[raw]) return map[raw];
+      if (raw.startsWith("pcm_")) return "PCM";
+      return raw.toUpperCase();
+    }
+
     function paintPlayerChips(meta) {
       const el = $("playerChips");
       if (!el) return;
@@ -2373,6 +2402,9 @@
       const h = Number(m.height || 0);
       const fps = Number(m.fps || 0);
       const codec = formatVideoCodecLabel(m.video_codec || "");
+      const audioLabel = formatAudioCodecLabel(m.audio_codec || "", {
+        probe_audio_done: !!m.probe_audio_done,
+      });
       const kind = String(m.kind || currentPlayKind || "").toLowerCase();
       let fmt = "";
       if (kind === "m3u8") fmt = "HLS";
@@ -2384,6 +2416,10 @@
       if (w || h) chips.push(`${w || "?"}×${h || "?"}`);
       if (fps) chips.push(`${Math.round(fps)}fps`);
       if (codec) chips.push(codec);
+      if (audioLabel) {
+        const warn = !!m.audio_hard || audioLabel === "无音轨";
+        chips.push(warn ? { text: audioLabel, warn: true } : audioLabel);
+      }
       if (fmt) chips.push(fmt);
       if (m.transcode_block === "no_realmedia") {
         chips.push({ text: m.transcode_block_msg || "当前 ffmpeg 不含 RealMedia，无法转 RMVB", warn: true });
@@ -2418,6 +2454,10 @@
       currentPlayMeta.fps_class = info.fps_class || 0;
       currentPlayMeta.audio_hard = !!info.audio_hard;
       currentPlayMeta.audio_codec = info.audio_codec || "";
+      if (info.probe_audio_done) currentPlayMeta.probe_audio_done = true;
+      if (typeof info.probe_video_meta_done === "boolean") {
+        currentPlayMeta.probe_video_meta_done = !!info.probe_video_meta_done;
+      }
       currentPlayMeta.can_transcode = info.can_transcode !== false;
       currentPlayMeta.transcode_block = info.transcode_block || "";
       currentPlayMeta.transcode_block_msg = info.transcode_block_msg || "";
@@ -2452,6 +2492,9 @@
             height: info.height || 0,
             fps: info.fps || 0,
             video_codec: info.video_codec || "",
+            audio_codec: info.audio_codec || "",
+            audio_hard: !!info.audio_hard,
+            probe_audio_done: !!info.probe_audio_done,
             probe_video_meta_done: !!info.probe_video_meta_done,
           }, pending && n >= 20 ? "WARN" : "INFO");
           if (pending && n < 40) {
@@ -3227,10 +3270,87 @@
     );
     const THUMB_CONCURRENCY = 8;
     const thumbsLoaded = new Set();
+    const thumbsGaveUp = new Set();
+    // Shared object URLs survive virtual-list card rebuilds so scrolling
+    // "全部" (925+) does not re-fetch every thumb that just left the DOM.
+    const thumbObjectUrls = new Map();
     const thumbWait = [];
     let thumbBusy = 0;
     let thumbObserver = null;
     let pageThumbObserver = null;
+
+    function thumbIdFromUrl(url) {
+      const s = String(url || "");
+      const m = s.match(/\/thumb\/([^/?#]+)/i);
+      if (!m) return "";
+      try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
+    }
+
+    function thumbPermanentlyFailed(idOrUrl) {
+      const raw = String(idOrUrl || "").trim();
+      if (!raw) return false;
+      if (thumbsGaveUp.has(raw)) return true;
+      const id = thumbIdFromUrl(raw);
+      return !!(id && thumbsGaveUp.has(id));
+    }
+
+    function markThumbGaveUp(idOrUrl) {
+      const raw = String(idOrUrl || "").trim();
+      if (!raw) return;
+      thumbsGaveUp.add(raw);
+      const id = thumbIdFromUrl(raw);
+      if (id) thumbsGaveUp.add(id);
+    }
+
+    function rememberThumbObjectUrl(url, objUrl) {
+      if (!url || !objUrl) return;
+      const prev = thumbObjectUrls.get(url);
+      if (prev && prev !== objUrl) {
+        try { URL.revokeObjectURL(prev); } catch (_) {}
+      }
+      thumbObjectUrls.set(url, objUrl);
+      thumbsLoaded.add(url);
+    }
+
+    function forgetThumbObjectUrl(url) {
+      if (!url) return;
+      const prev = thumbObjectUrls.get(url);
+      if (prev) {
+        try { URL.revokeObjectURL(prev); } catch (_) {}
+        thumbObjectUrls.delete(url);
+      }
+      thumbsLoaded.delete(url);
+    }
+
+    function applyThumbGaveUpDom(img) {
+      if (!img) return;
+      img.dataset.thumbExhausted = "1";
+      img.dataset.thumbReady = "1";
+      img.dataset.thumbLoading = "";
+      img.dataset.thumbWatched = "1";
+      img.onerror = null;
+      img.onload = null;
+      img.src = THUMB_PENDING_SRC;
+    }
+
+    function applyCachedThumb(img) {
+      const url = img && img.dataset.thumbUrl;
+      const cached = url && thumbObjectUrls.get(url);
+      if (!cached) return false;
+      img.onerror = null;
+      img.onload = null;
+      img.src = cached;
+      img.dataset.thumbReady = "1";
+      img.dataset.thumbExhausted = "";
+      img.dataset.thumbAttempt = "0";
+      img.dataset.thumbWatched = "1";
+      img.dataset.thumbLoading = "";
+      img.style.display = "";
+      img.style.opacity = "";
+      const ph = img.parentNode && img.parentNode.querySelector(".ph");
+      if (ph) ph.style.display = "none";
+      return true;
+    }
 
     function thumbUrlFor(id, tv, root) {
       return "/thumb/" + encodeURIComponent(id) + "?v=" + (tv || 0) + "&defer=1"
@@ -3289,8 +3409,14 @@
       root.querySelectorAll("img[data-thumb-url]").forEach((img) => {
         if (img.dataset.thumbReady === "1") return;
         const url = img.dataset.thumbUrl;
-        if (url && thumbsLoaded.has(url)) {
-          // Cached JPEG URL from a previous card — still verify via fetch path.
+        if (url && thumbPermanentlyFailed(url)) {
+          applyThumbGaveUpDom(img);
+          return;
+        }
+        if (url && (thumbObjectUrls.has(url) || thumbsLoaded.has(url))) {
+          // Virtual list rebuilds destroy cards; paint from session cache
+          // instead of re-fetching the same JPEG on every scroll tick.
+          if (applyCachedThumb(img)) return;
           img.dataset.thumbWatched = "1";
           queueThumb(img);
           return;
@@ -3306,6 +3432,11 @@
 
     function queueThumb(img) {
       if (!img || img.dataset.thumbReady === "1" || img.dataset.thumbLoading === "1") return;
+      if (img.dataset.thumbExhausted === "1") return;
+      if (thumbPermanentlyFailed(img.dataset.thumbUrl || "")) {
+        applyThumbGaveUpDom(img);
+        return;
+      }
       thumbWait.push(img);
       pumpThumbs();
     }
@@ -3379,6 +3510,16 @@
     function startThumb(img) {
       const url = img.dataset.thumbUrl;
       if (!url) return;
+      if (img.dataset.thumbExhausted === "1") return;
+      if (thumbPermanentlyFailed(url)) {
+        applyThumbGaveUpDom(img);
+        pumpThumbs();
+        return;
+      }
+      if (applyCachedThumb(img)) {
+        pumpThumbs();
+        return;
+      }
       img.dataset.thumbLoading = "1";
       thumbBusy += 1;
       const attempt = Number(img.dataset.thumbAttempt) || 0;
@@ -3387,11 +3528,27 @@
       // permanently mark the card "ready" while still showing the grey icon.
       fetch(url, { cache: "no-store", headers: { "Accept": "image/jpeg,image/*;q=0.8,*/*;q=0.5" } })
         .then((r) => {
+          const thumbStatus = String(r.headers.get("X-VG-Thumb-Status") || "").toLowerCase();
+          if (thumbStatus === "unavailable") {
+            const err = new Error("thumb_unavailable");
+            err.status = r.status;
+            err.permanent = true;
+            err.reason = String(r.headers.get("X-VG-Thumb-Reason") || "unavailable");
+            throw err;
+          }
           const ctype = String(r.headers.get("content-type") || "").toLowerCase();
           if (!r.ok || ctype.includes("svg") || !(ctype.includes("jpeg") || ctype.includes("jpg") || ctype.includes("webp") || ctype.includes("png"))) {
             const err = new Error("thumb_not_ready");
             err.status = r.status;
             err.ctype = ctype;
+            const hasRetryAfter = r.headers.has("Retry-After");
+            err.temporary = thumbStatus === "pending" || hasRetryAfter;
+            // 503 without Retry-After / pending = permanent (even if Status
+            // header was stripped). Do not keep hammering.
+            if (r.status === 503 && !err.temporary) {
+              err.permanent = true;
+              err.reason = String(r.headers.get("X-VG-Thumb-Reason") || "unavailable");
+            }
             throw err;
           }
           return r.blob();
@@ -3407,7 +3564,8 @@
             img._thumbObjectUrl = "";
           }
           const objUrl = URL.createObjectURL(blob);
-          img._thumbObjectUrl = objUrl;
+          // Cache owns the object URL across virtual-list card rebuilds.
+          rememberThumbObjectUrl(url, objUrl);
           img.onload = () => {
             img.dataset.thumbLoading = "";
             thumbBusy = Math.max(0, thumbBusy - 1);
@@ -3431,7 +3589,15 @@
           img.dataset.thumbLoading = "";
           thumbBusy = Math.max(0, thumbBusy - 1);
           if (img.isConnected) {
-            thumbLoadFailed(img, err && err.status === 503 ? "http_503" : (err && err.message) || "fetch_failed");
+            if (err && err.permanent) {
+              thumbLoadGiveUp(img, err.reason || "thumb_unavailable");
+            } else {
+              thumbLoadFailed(
+                img,
+                err && err.status === 503 ? "http_503" : (err && err.message) || "fetch_failed",
+                { temporary: !!(err && err.temporary) }
+              );
+            }
           } else {
             pumpThumbs();
           }
@@ -3442,9 +3608,15 @@
       const src = img.currentSrc || img.src || "";
       if (src.startsWith("data:image/svg+xml")) return;
       img.dataset.thumbReady = "1";
+      img.dataset.thumbExhausted = "";
       img.dataset.thumbAttempt = "0";
       img.dataset.thumbWatched = "1";
-      if (img.dataset.thumbUrl) thumbsLoaded.add(img.dataset.thumbUrl);
+      if (img.dataset.thumbUrl) {
+        thumbsLoaded.add(img.dataset.thumbUrl);
+        if (src && !src.startsWith("data:") && !thumbObjectUrls.has(img.dataset.thumbUrl)) {
+          rememberThumbObjectUrl(img.dataset.thumbUrl, src);
+        }
+      }
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img.style.display = "";
       img.style.opacity = "";
@@ -3452,8 +3624,29 @@
       if (ph) ph.style.display = "none";
     }
 
-    function thumbLoadFailed(img, reason) {
+    function thumbLoadGiveUp(img, reason) {
+      // Permanent: remember the thumb id so list rebuild / poll cannot re-arm it.
+      if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
+      const url = String(img.dataset.thumbUrl || "");
+      markThumbGaveUp(url);
+      const card = img.closest(".card");
+      if (card && card.dataset.cover) markThumbGaveUp(card.dataset.cover);
+      applyThumbGaveUpDom(img);
+      logThumbDiag("thumb_give_up", {
+        video_id: (card && card.dataset.id) || "",
+        reason: reason || "unavailable",
+        url: url.slice(0, 120),
+        attempt: Number(img.dataset.thumbAttempt) || 0,
+      }, "WARN");
+      pumpThumbs();
+    }
+
+    function thumbLoadFailed(img, reason, opts) {
       if (!img.dataset.thumbUrl && img.src && !img.src.startsWith("data:")) img.dataset.thumbUrl = img.src;
+      if (img.dataset.thumbExhausted === "1") {
+        pumpThumbs();
+        return;
+      }
       const attempt = (Number(img.dataset.thumbAttempt) || 0) + 1;
       img.dataset.thumbAttempt = String(attempt);
       img.dataset.thumbReady = "";
@@ -3463,28 +3656,11 @@
       img.src = THUMB_PENDING_SRC;
       const card = img.closest(".card");
       const videoId = (card && card.dataset.id) || "";
-      // Fast retries while the worker queue catches up; after that keep a slow
-      // heartbeat so cards that scrolled off during the backlog still recover
-      // without requiring a full page reload.
+      // Fast retries while the worker queue catches up. After that, stop —
+      // infinite 15s heartbeats used to flood /thumb for permanently missing
+      // catalog rows (item_found=False) and spam WARN forever.
       if (attempt >= THUMB_MAX_FAST_ATTEMPTS) {
-        img.dataset.thumbWatched = "";
-        logThumbDiag("thumb_retry_exhausted", {
-          video_id: videoId,
-          attempt,
-          reason: reason || "unknown",
-          url: String(img.dataset.thumbUrl || "").slice(0, 120),
-        }, "WARN");
-        const slowDelay = 15000;
-        if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
-        img._thumbRetryTimer = setTimeout(() => {
-          if (!img.isConnected || img.dataset.thumbReady === "1") return;
-          img.dataset.thumbAttempt = "0";
-          const url = new URL(img.dataset.thumbUrl, location.href);
-          url.searchParams.set("_retry", String(Date.now()));
-          img.dataset.thumbUrl = url.pathname + url.search;
-          queueThumb(img);
-        }, slowDelay);
-        pumpThumbs();
+        thumbLoadGiveUp(img, reason || "retry_exhausted");
         return;
       }
       img.dataset.thumbWatched = "1";
@@ -3493,12 +3669,13 @@
           video_id: videoId,
           attempt,
           reason: reason || "unknown",
+          temporary: !!(opts && opts.temporary),
         }, attempt >= 5 ? "WARN" : "INFO");
       }
       const delay = Math.min(5000, Math.round(500 * Math.pow(1.55, attempt - 1)));
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img._thumbRetryTimer = setTimeout(() => {
-        if (!img.isConnected) return;
+        if (!img.isConnected || img.dataset.thumbExhausted === "1") return;
         const url = new URL(img.dataset.thumbUrl, location.href);
         url.searchParams.set("_retry", String(Date.now()));
         img.dataset.thumbUrl = url.pathname + url.search;
@@ -3509,10 +3686,20 @@
 
     function requestThumbReload(img, url) {
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
+      // Soft refresh / visible refresh used to clear exhausted and hammer
+      // the same missing catalog ids. Keep a session-level give-up set.
+      if (thumbPermanentlyFailed(url) || thumbPermanentlyFailed(img.dataset.thumbUrl || "")) {
+        img.dataset.thumbUrl = url || img.dataset.thumbUrl || "";
+        applyThumbGaveUpDom(img);
+        return;
+      }
+      if (img.dataset.thumbUrl) forgetThumbObjectUrl(img.dataset.thumbUrl);
+      if (url) forgetThumbObjectUrl(url);
       img.dataset.thumbUrl = url;
       img.dataset.thumbAttempt = "0";
       img.dataset.thumbReady = "";
       img.dataset.thumbLoading = "";
+      img.dataset.thumbExhausted = "";
       img.dataset.thumbWatched = "1";
       img.src = THUMB_PENDING_SRC;
       queueThumb(img);
@@ -3549,11 +3736,16 @@
       const view = root.getBoundingClientRect ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
       let touched = 0;
       document.querySelectorAll("#grid .card img[data-thumb-url], #grid .card img").forEach((img) => {
+        if (img.dataset.thumbExhausted === "1") return;
         const card = img.closest(".card");
         if (!card) return;
         const box = card.getBoundingClientRect();
         if (box.bottom < view.top - 80 || box.top > view.bottom + 80) return;
         const id = card.dataset.cover || card.dataset.id;
+        if (thumbPermanentlyFailed(id) || thumbPermanentlyFailed(img.dataset.thumbUrl || "")) {
+          applyThumbGaveUpDom(img);
+          return;
+        }
         const rootPath = card.dataset.root || "";
         if (!id) return;
         touched += 1;
@@ -3569,10 +3761,20 @@
       const grid = $("grid");
       if (!grid) return 0;
       let touched = 0;
+      let skippedExhausted = 0;
       grid.querySelectorAll(".card img[data-thumb-url]").forEach((img) => {
         if (img.dataset.thumbReady === "1") return;
+        if (img.dataset.thumbExhausted === "1") {
+          skippedExhausted += 1;
+          return;
+        }
         const card = img.closest(".card");
         const id = (card && (card.dataset.cover || card.dataset.id)) || "";
+        if (thumbPermanentlyFailed(id) || thumbPermanentlyFailed(img.dataset.thumbUrl || "")) {
+          applyThumbGaveUpDom(img);
+          skippedExhausted += 1;
+          return;
+        }
         const rootPath = (card && card.dataset.root) || "";
         if (!id) return;
         touched += 1;
@@ -3581,10 +3783,11 @@
           "/thumb/" + id + "?v=" + Date.now() + "&defer=1" + (rootPath ? ("&root=" + encodeURIComponent(rootPath)) : "")
         );
       });
-      if (touched) {
+      if (touched || skippedExhausted) {
         clientLog("thumb_stuck_refresh", {
           reason: reason || "unspecified",
           touched,
+          skipped_exhausted: skippedExhausted,
         }, "INFO");
       }
       return touched;
@@ -5168,100 +5371,109 @@
       const loadedContentH = loadedRows * rowStride;
       const rawPadBot = Math.max(0, (totalRows - lastRow - 1) * rowStride);
       const padBot = rawPadBot;
-      const beforePadTop = state._lastVPadTop ?? -1;
-      const beforePadBot = state._lastVPadBot ?? -1;
-      state._lastVPadTop = padTop;
-      state._lastVPadBot = padBot;
-      grid.innerHTML =
-        `<div class="v-spacer" style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
-        state.loadedVideos.slice(start, end).map(cardHtml).join("") +
-        `<div class="v-spacer" style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
-      // Detect spacer jumps that would visibly "push" the scroll position.
-      //
-      // Threshold tuning rationale:
-      //   rowStride = 306 px.  A normal fast user scroll easily advances
-      //   firstRow by 2…6 rows between two rAF batches → padTop moves
-      //   612…1836 px.  Treating *any* such jump as "abnormal" caused us to
-      //   forcibly compensate scrollTop on nearly every scroll tick, pushing
-      //   the page in ways the user did not intend (the classic "the screen
-      //   rushes on its own" complaint).
-      //
-      //   New rule: only flag and compensate when something other than user
-      //   scroll activity disturbs the coordinate system — i.e. loadedBase
-      //   head-trim, loadedCount tail-append or totalCount resize.  Plain
-      //   firstRow translation due to scroll is labelled render_window_shift
-      //   and is NOT compensated.
-      const padTopJump = beforePadTop >= 0 ? padTop - beforePadTop : 0;
-      const padBotJump = beforePadBot >= 0 ? padBot - beforePadBot : 0;
-      const beforeCompScrollTop = Math.round(scrollTop);
-      let compensatedForPadTopPx = 0;
-      let compensatedForPadBotPx = 0;
-      const baseNow = Number(state.loadedBaseOffset) || 0;
-      const loadedNow = state.loadedVideos.length;
-      const baseShifted = (state._lastVBase ?? -1) !== baseNow;
-      const loadedShifted = (state._lastVLoaded ?? -1) !== loadedNow;
-      const totalShifted = (state._lastVTotal ?? -1) !== total;
-      state._lastVBase = baseNow;
-      state._lastVLoaded = loadedNow;
-      state._lastVTotal = total;
-      let jumpReason = "render_window_shift"; // user scrolled fast
-      if (baseShifted) jumpReason = "loaded_head_trim";
-      else if (loadedShifted && padTopJump !== 0) jumpReason = "loaded_tail_append";
-      else if (totalShifted) jumpReason = "total_rebound";
-      if (Math.abs(padTopJump) >= rowStride * 4 || Math.abs(padBotJump) >= rowStride * 8) {
-        clientLog("virtual_grid_spacer_jump", {
-          elapsed_ms: 0,
-          pad_top_before: beforePadTop,
-          pad_top_after: padTop,
-          pad_top_delta: padTopJump,
-          pad_bot_before: beforePadBot,
-          pad_bot_after: padBot,
-          pad_bot_delta: padBotJump,
-          loaded_base: loadedBase,
-          loaded_videos: loadedNow,
-          total_count: total,
-          first_row: firstRow,
-          last_row: lastRow,
-          scroll_top: beforeCompScrollTop,
-          scroll_height: scrollHeight,
-          client_height: viewH,
-          jump_reason: jumpReason,
-          base_shifted: baseShifted,
-          loaded_shifted: loadedShifted,
-          total_shifted: totalShifted,
-        }, "WARN");
-        // Appending a page grows the loaded-prefix height but does not change
-        // the coordinate system.  The old compensation treated any
-        // loaded-count change as a head shift and repeatedly advanced
-        // scrollTop, which in turn triggered page after page in one second.
-        // Only a real head trim (loadedBase changing) needs compensation.
-        if (baseShifted && Math.abs(padTopJump) >= rowStride * 3 && root) {
-          root.scrollTop += padTopJump;
-          compensatedForPadTopPx = padTopJump;
+      const windowKey = [
+        cols, start, end, padTop, padBot, loadedBase,
+        state.loadedVideos.length, total, state.hasMore ? 1 : 0,
+      ].join("|");
+      const windowUnchanged = state._virtualWindowKey === windowKey
+        && !!grid.querySelector(".card");
+      if (!windowUnchanged) {
+        const beforePadTop = state._lastVPadTop ?? -1;
+        const beforePadBot = state._lastVPadBot ?? -1;
+        state._lastVPadTop = padTop;
+        state._lastVPadBot = padBot;
+        state._virtualWindowKey = windowKey;
+        grid.innerHTML =
+          `<div class="v-spacer" style="grid-column:1/-1;height:${padTop}px" aria-hidden="true"></div>` +
+          state.loadedVideos.slice(start, end).map(cardHtml).join("") +
+          `<div class="v-spacer" style="grid-column:1/-1;height:${padBot}px" aria-hidden="true"></div>`;
+        // Detect spacer jumps that would visibly "push" the scroll position.
+        //
+        // Threshold tuning rationale:
+        //   rowStride = 306 px.  A normal fast user scroll easily advances
+        //   firstRow by 2…6 rows between two rAF batches → padTop moves
+        //   612…1836 px.  Treating *any* such jump as "abnormal" caused us to
+        //   forcibly compensate scrollTop on nearly every scroll tick, pushing
+        //   the page in ways the user did not intend (the classic "the screen
+        //   rushes on its own" complaint).
+        //
+        //   New rule: only flag and compensate when something other than user
+        //   scroll activity disturbs the coordinate system — i.e. loadedBase
+        //   head-trim, loadedCount tail-append or totalCount resize.  Plain
+        //   firstRow translation due to scroll is labelled render_window_shift
+        //   and is NOT compensated.
+        const padTopJump = beforePadTop >= 0 ? padTop - beforePadTop : 0;
+        const padBotJump = beforePadBot >= 0 ? padBot - beforePadBot : 0;
+        const beforeCompScrollTop = Math.round(scrollTop);
+        let compensatedForPadTopPx = 0;
+        let compensatedForPadBotPx = 0;
+        const baseNow = Number(state.loadedBaseOffset) || 0;
+        const loadedNow = state.loadedVideos.length;
+        const baseShifted = (state._lastVBase ?? -1) !== baseNow;
+        const loadedShifted = (state._lastVLoaded ?? -1) !== loadedNow;
+        const totalShifted = (state._lastVTotal ?? -1) !== total;
+        state._lastVBase = baseNow;
+        state._lastVLoaded = loadedNow;
+        state._lastVTotal = total;
+        let jumpReason = "render_window_shift"; // user scrolled fast
+        if (baseShifted) jumpReason = "loaded_head_trim";
+        else if (loadedShifted && padTopJump !== 0) jumpReason = "loaded_tail_append";
+        else if (totalShifted) jumpReason = "total_rebound";
+        if (Math.abs(padTopJump) >= rowStride * 4 || Math.abs(padBotJump) >= rowStride * 8) {
+          clientLog("virtual_grid_spacer_jump", {
+            elapsed_ms: 0,
+            pad_top_before: beforePadTop,
+            pad_top_after: padTop,
+            pad_top_delta: padTopJump,
+            pad_bot_before: beforePadBot,
+            pad_bot_after: padBot,
+            pad_bot_delta: padBotJump,
+            loaded_base: loadedBase,
+            loaded_videos: loadedNow,
+            total_count: total,
+            first_row: firstRow,
+            last_row: lastRow,
+            scroll_top: beforeCompScrollTop,
+            scroll_height: scrollHeight,
+            client_height: viewH,
+            jump_reason: jumpReason,
+            base_shifted: baseShifted,
+            loaded_shifted: loadedShifted,
+            total_shifted: totalShifted,
+          }, "WARN");
+          // Appending a page grows the loaded-prefix height but does not change
+          // the coordinate system.  The old compensation treated any
+          // loaded-count change as a head shift and repeatedly advanced
+          // scrollTop, which in turn triggered page after page in one second.
+          // Only a real head trim (loadedBase changing) needs compensation.
+          if (baseShifted && Math.abs(padTopJump) >= rowStride * 3 && root) {
+            root.scrollTop += padTopJump;
+            compensatedForPadTopPx = padTopJump;
+          }
+          // The bottom spacer grows naturally as pages are appended.  Never
+          // compensate scrollTop for padBot or appending a page would move the
+          // user backwards by an entire unloaded region.
         }
-        // The bottom spacer grows naturally as pages are appended.  Never
-        // compensate scrollTop for padBot or appending a page would move the
-        // user backwards by an entire unloaded region.
+        if (compensatedForPadTopPx || compensatedForPadBotPx) {
+          clientLog("scroll_position_compensated", {
+            elapsed_ms: 0,
+            pad_top_comp_px: compensatedForPadTopPx,
+            pad_bot_comp_px: compensatedForPadBotPx,
+            scroll_top_before: beforeCompScrollTop,
+            scroll_top_after: root ? Math.round(root.scrollTop) : beforeCompScrollTop,
+            scroll_height_before: scrollHeight,
+            scroll_height_after: root ? root.scrollHeight : scrollHeight,
+            loaded_base: loadedBase,
+            loaded_videos: state.loadedVideos.length,
+            total_count: total,
+            first_row: firstRow,
+            last_row: lastRow,
+            cols,
+          }, "INFO");
+        }
+        updateGridHint();
+        watchThumbs(grid);
       }
-      if (compensatedForPadTopPx || compensatedForPadBotPx) {
-        clientLog("scroll_position_compensated", {
-          elapsed_ms: 0,
-          pad_top_comp_px: compensatedForPadTopPx,
-          pad_bot_comp_px: compensatedForPadBotPx,
-          scroll_top_before: beforeCompScrollTop,
-          scroll_top_after: root ? Math.round(root.scrollTop) : beforeCompScrollTop,
-          scroll_height_before: scrollHeight,
-          scroll_height_after: root ? root.scrollHeight : scrollHeight,
-          loaded_base: loadedBase,
-          loaded_videos: state.loadedVideos.length,
-          total_count: total,
-          first_row: firstRow,
-          last_row: lastRow,
-          cols,
-        }, "INFO");
-      }
-      updateGridHint();
-      watchThumbs(grid);
       // Auto-load when the visible window reaches the tail of currently
       // loaded videos.  The previous `loadedFillsViewport` gate
       // (loadedContentH > viewH * 2) prevented the very first page from
@@ -5398,6 +5610,7 @@
 
       if (!state.loadedVideos.length && !append) {
         grid.innerHTML = "";
+        state._virtualWindowKey = "";
         empty.style.display = "block";
         empty.textContent = scanning
           ? "正在扫描硬盘，请稍候…（页面会自动刷新）"
@@ -5424,6 +5637,7 @@
       empty.style.display = "none";
 
       if (state.virtualEnabled) {
+        if (!append) state._virtualWindowKey = "";
         const appendScrollTop = root ? root.scrollTop : 0;
         const appendScrollHeight = root ? root.scrollHeight : 0;
         const previousOverflowAnchor = root ? root.style.overflowAnchor : "";
@@ -7285,6 +7499,7 @@
         kind: kind || "",
         audio_hard: audioHard,
         audio_codec: audioCodec,
+        probe_audio_done: !!(extra && extra.probe_audio_done),
         has_ffmpeg: typeof (extra && extra.has_ffmpeg) === "boolean"
           ? !!extra.has_ffmpeg
           : !!state.hasFfmpeg,
@@ -8699,7 +8914,7 @@
         const img = card.querySelector("img");
         if (!img) return;
         imgsHit += 1;
-        if (img.dataset.thumbUrl) thumbsLoaded.delete(img.dataset.thumbUrl);
+        if (img.dataset.thumbUrl) forgetThumbObjectUrl(img.dataset.thumbUrl);
         requestThumbReload(img, url);
       });
 
@@ -8708,7 +8923,7 @@
         continueHit += 1;
         const img = chip.querySelector("img");
         if (!img) return;
-        if (img.dataset.thumbUrl) thumbsLoaded.delete(img.dataset.thumbUrl);
+        if (img.dataset.thumbUrl) forgetThumbObjectUrl(img.dataset.thumbUrl);
         requestThumbReload(img, url);
       });
 

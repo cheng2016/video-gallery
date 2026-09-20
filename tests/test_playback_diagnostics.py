@@ -50,12 +50,14 @@ class PlaybackDiagnosticsTests(unittest.TestCase):
         with (
             mock.patch.object(web, "_cache_dir_from_root_hint", return_value=None),
             mock.patch.object(web, "find_video_by_id", return_value=None),
-            mock.patch.object(web, "diagnostic_emit") as emit,
+            mock.patch.object(web, "diagnostic_emit_rate_limited") as emit,
         ):
             response = web.app.test_client().get(
                 f"/thumb/{vid}?defer=1&root=E%3A%2FMovies&op=play-456"
             )
         self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers.get("X-VG-Thumb-Status"), "unavailable")
+        self.assertNotIn("Retry-After", response.headers)
         matches = [
             call
             for call in emit.call_args_list

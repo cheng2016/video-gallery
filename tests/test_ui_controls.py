@@ -25,7 +25,15 @@ class UiControlLayoutTests(unittest.TestCase):
 
     def test_thumbnail_images_use_non_blocking_retry_flow(self) -> None:
         html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("function thumbLoadFailed(img)", html)
+        self.assertIn("function thumbLoadFailed(img, reason, opts)", html)
+        self.assertIn("function thumbLoadGiveUp(", html)
+        self.assertIn("const thumbsGaveUp = new Set()", html)
+        self.assertIn("function thumbPermanentlyFailed(", html)
+        self.assertIn("markThumbGaveUp(url)", html)
+        self.assertIn("const thumbObjectUrls = new Map()", html)
+        self.assertIn("function applyCachedThumb(", html)
+        self.assertIn("rememberThumbObjectUrl(url, objUrl)", html)
+        self.assertIn("X-VG-Thumb-Status", html)
         self.assertIn("function requestThumbReload(img, url)", html)
         self.assertIn("function resetThumbQueue(", html)
         self.assertIn("&defer=1", html)
@@ -39,6 +47,7 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn("AbortController", html)
         self.assertNotIn("dataset.retried", html)
         self.assertNotIn("const probe = new Image()", html)
+        self.assertNotIn("const slowDelay = 15000", html)
 
     def test_multi_disk_all_videos_badge_uses_catalog_total(self) -> None:
         html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
