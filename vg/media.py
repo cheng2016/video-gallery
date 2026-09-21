@@ -1264,9 +1264,33 @@ def _bg_enrich_metadata() -> None:
             want_duration=want_duration,
             want_audio=want_audio,
         )
+
+        def _safe_rebuild() -> None:
+            # Probe fields are already on the live video dicts / SQLite. A heavy
+            # mid-scan rebuild raced ``_publish_live`` (bench: 4000←4500). Use a
+            # light rebuild while scanning so duration facets still advance.
+            scanning = bool(STATE.get("scanning"))
+            if scanning:
+                try:
+                    from vg.diagnostics import emit
+
+                    emit(
+                        "INFO",
+                        "metadata_enrichment_light_rebuild_scanning",
+                        force=True,
+                        videos=len(STATE.get("videos") or []),
+                        thread=threading.current_thread().name,
+                    )
+                except Exception:
+                    pass
+            rebuild_indexes(
+                list(STATE.get("videos") or []),
+                heavy=not scanning,
+            )
+
         if not need:
             if reused_n:
-                rebuild_indexes(list(STATE.get("videos") or []))
+                _safe_rebuild()
                 scope = _probe_scope_label(
                     want_duration=want_duration,
                     want_audio=want_audio,
@@ -1283,11 +1307,10 @@ def _bg_enrich_metadata() -> None:
             f"（本盘已缓存的会跳过{tip}）…"
         )
         ok_n, fail_n = enrich_metadata_parallel(need, label="后台")
-        current = list(STATE.get("videos") or [])
         # Incremental batches already UPSERTed; one catalog rebuild
         # advances lib_gen. Do NOT re-save every probed row here — that used to
         # rewrite the whole catalog thousands of times after "完成".
-        rebuild_indexes(current)
+        _safe_rebuild()
         reuse_tip = f"，复用 {reused_n}" if reused_n else ""
         STATE["meta_progress"] = (
             f"元数据完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}"

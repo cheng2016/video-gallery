@@ -66,6 +66,7 @@ from vg.convert import default_transcode_out_ext, schedule_ffmpeg_rm_probe
 from vg.disk_libs import (
     cache_dir_for_item,
     ensure_library,
+    memory_catalog_ready,
     offline_roots,
     read_root_library,
     resolve_item_rel,
@@ -1763,7 +1764,11 @@ def api_videos_by_ids():
         )
     else:
         for root in roots_needed:
+            if memory_catalog_ready(root):
+                continue
             ensure_library(root)
+        if roots_needed and all(memory_catalog_ready(root) for root in roots_needed):
+            ensure_skipped = True
     ensure_ms = (time.perf_counter() - t_ensure) * 1000.0
 
     out = []
@@ -2199,6 +2204,16 @@ def api_videos():
     elif not sql_roots:
         sql_skip_reason = "no_roots"
     sql_eligible = not sql_skip_reason
+    # Mid-scan SQLite facet/page queries contend with store_live/upsert
+    # (bench: facet_load_ms 0.5–4s, churn_videos_p95 ~4.6s, lock_waiting on
+    # sqlite_query_facets). The scanner already publishes live STATE["videos"].
+    if (
+        sql_eligible
+        and STATE.get("scanning")
+        and (STATE.get("videos") or [])
+    ):
+        sql_skip_reason = "scanning_prefer_memory"
+        sql_eligible = False
     # Time the segments that happen BEFORE ``sql_started``: arg parsing,
     # parse_search_query, mounted-roots lookup, ``_catalog_caches_for_roots``
     # and the include_descendants probe.  The existing api_videos_sql PERF
@@ -2229,40 +2244,68 @@ def api_videos():
             probe_count = 0
             has_children = False
             facet_rowsets: list[list[dict]] = []
-            need_facet_rows = offset == 0 or bool(folder and not folder_all)
-            facet_load_started = time.perf_counter()
+            facet_load_ms = 0.0
+            need_facet_rows = offset == 0
+            need_children_probe = bool(folder and not folder_all)
             if need_facet_rows:
+                facet_load_started = time.perf_counter()
                 facet_rowsets = [
                     load_catalog_facet_rows(cache, category=category, search=q_raw)
                     for cache in sql_caches
                 ]
+                facet_load_ms = (time.perf_counter() - facet_load_started) * 1000.0
                 probe_count = len(facet_rowsets)
-            if folder and not folder_all:
+            if need_children_probe:
+                probe_started = time.perf_counter()
                 folder_n = folder.strip("/").replace("\\", "/")
                 prefix = folder_n + "/"
-                for rows in facet_rowsets:
-                    if any(
-                        (row.get("folder") or "").startswith(prefix)
-                        for row in rows
-                    ):
-                        has_children = True
-                        break
+                if facet_rowsets:
+                    for rows in facet_rowsets:
+                        if any(
+                            (row.get("folder") or "").startswith(prefix)
+                            for row in rows
+                        ):
+                            has_children = True
+                            break
+                else:
+                    from vg.catalog_db import catalog_folder_has_child_folders
+
+                    has_children = any(
+                        catalog_folder_has_child_folders(cache, folder_n)
+                        for cache in sql_caches
+                    )
+                    probe_count = len(sql_caches)
                 include_descendants = not has_children
-            probe_ms = (time.perf_counter() - facet_load_started) * 1000.0
-            if probe_ms >= 100.0:
+                probe_ms = (time.perf_counter() - probe_started) * 1000.0
+                if probe_ms >= 100.0:
+                    diagnostic_emit(
+                        "WARN",
+                        "api_videos_sql_include_descendants_probe_slow",
+                        force=True,
+                        request_id=getattr(g, "_diag_request_id", ""),
+                        probe_ms=f"{probe_ms:.1f}",
+                        probes=probe_count,
+                        caches=len(sql_caches),
+                        folder=folder,
+                        category=category or "all",
+                        ext=ext,
+                        has_children=has_children,
+                        include_descendants=include_descendants,
+                    )
+            # First-page facet row load used to be mis-labeled as the
+            # include_descendants probe (category=all still WARN'd at 0.4–2s).
+            if facet_load_ms >= 100.0:
                 diagnostic_emit(
-                    "WARN",
-                    "api_videos_sql_include_descendants_probe_slow",
+                    "WARN" if facet_load_ms >= 500.0 else "PERF",
+                    "api_videos_sql_facet_rows_load_slow",
                     force=True,
                     request_id=getattr(g, "_diag_request_id", ""),
-                    probe_ms=f"{probe_ms:.1f}",
+                    facet_load_ms=f"{facet_load_ms:.1f}",
                     probes=probe_count,
                     caches=len(sql_caches),
                     folder=folder,
                     category=category or "all",
-                    ext=ext,
-                    has_children=has_children,
-                    include_descendants=include_descendants,
+                    offset=offset,
                 )
 
             # Total pre-sql setup time (parse + caches lookup + probe).
@@ -2421,14 +2464,15 @@ def api_videos():
                 loaded_facet_rows = sum(len(rows) for rows in facet_rowsets)
                 diagnostic_perf(
                     "api_videos_facets_single_pass",
-                    probe_ms + facets_ms + level_facet_ms,
+                    facet_load_ms + probe_ms + facets_ms + level_facet_ms,
                     force=False,
                     request_id=getattr(g, "_diag_request_id", ""),
                     caches=len(sql_caches),
                     sqlite_queries=len(facet_rowsets),
                     loaded_rows=loaded_facet_rows,
                     result_rows=total,
-                    load_ms=f"{probe_ms:.1f}",
+                    load_ms=f"{facet_load_ms:.1f}",
+                    probe_ms=f"{probe_ms:.1f}",
                     derive_ms=f"{(facets_ms + level_facet_ms):.1f}",
                     category=category or "all",
                     folder=folder,
@@ -2488,6 +2532,7 @@ def api_videos():
                 caches=len(sql_caches),
                 setup_ms=f"{setup_ms:.1f}",
                 caches_ms=f"{caches_ms:.1f}",
+                facet_load_ms=f"{facet_load_ms:.1f}",
                 probe_ms=f"{probe_ms:.1f}",
                 probe_count=probe_count,
                 sql_ms=f"{sql_ms:.1f}",
@@ -2534,8 +2579,9 @@ def api_videos():
             return response
 
     if sql_skip_reason:
+        level = "INFO" if sql_skip_reason == "scanning_prefer_memory" else "WARN"
         diagnostic_emit_rate_limited(
-            "WARN",
+            level,
             "api_videos_sql_fallback",
             key=f"{sql_skip_reason}|{view}|{lib or 'all'}",
             interval=30.0,
@@ -2949,6 +2995,7 @@ def thumb(vid: str):
         if temporary:
             headers["Retry-After"] = "1"
             headers["X-VG-Thumb-Status"] = "pending"
+            headers["X-VG-Thumb-Reason"] = reason_code
             cache_tag = "missing_or_generation_queued"
         else:
             # Brief private cache cuts WARN spam when a stuck card still polls.
@@ -3142,7 +3189,13 @@ def thumb(vid: str):
             operation_id=getattr(g, "_diag_operation_id", ""),
         )
         diagnostic_aggregate("thumbnail_placeholder")
-        return _deferred_placeholder(temporary=False, reason=unavailable_reason)
+        # item_not_found is often a cold-start / not-yet-scanned disk race
+        # (continue-watching still points at D: before that root is indexed).
+        # Keep it temporary so the card can rearm after lib_gen advances.
+        return _deferred_placeholder(
+            temporary=(unavailable_reason == "item_not_found"),
+            reason=unavailable_reason,
+        )
 
     item = find_video_by_id(vid, prefer_root=prefer_root)
     # 也可能用 thumb_id（碰撞重映射后）直接请求
@@ -3293,9 +3346,11 @@ def thumb(vid: str):
         video_id=vid,
         file_id=file_id,
     )
-    # Non-deferred / final fallback: treat as permanent so clients stop retrying.
+    # Non-deferred / final fallback. Missing catalog row can still appear after
+    # a later disk index load — keep that temporary. Real "unavailable" stays
+    # permanent so clients stop hammering.
     return _deferred_placeholder(
-        temporary=False,
+        temporary=not bool(item),
         reason="unavailable" if item else "item_not_found",
     )
 
@@ -3583,6 +3638,8 @@ def api_info(vid: str):
     if not item:
         _playback_route_failure("api_info", "video_not_found", vid, root=prefer_root)
         abort(404)
+    # Refresh has_thumb from disk/.vgt — catalog rows can lag behind bulk fill.
+    attach_thumb_meta(item)
     # Only lazily probe metadata dimensions explicitly enabled in Settings.
     # Skip if duration/audio is already in the index from a previous session.
     want_duration = probe_duration_enabled()

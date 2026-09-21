@@ -310,11 +310,43 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
 
 
 def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> None:
-    """Compatibility orchestrator for catalog computation and STATE update."""
-    selected = videos if videos is not None else (STATE.get("videos") or [])
+    """Compatibility orchestrator for catalog computation and STATE update.
+
+    Concurrent mid-scan ``_publish_live`` may grow ``STATE["videos"]`` while a
+    background rebuild (meta-enrich) is still inside ``compute_catalog``. Applying
+    the older snapshot afterwards shrinks the visible library (bench log:
+    ``apply_catalog_to_state thread=meta-enrich videos_len=4000 prev_videos_len=4500``).
+    Always re-check live length before publishing.
+    """
+    import threading
+
+    selected = list(videos) if videos is not None else list(STATE.get("videos") or [])
     started = time.perf_counter()
     indexes = compute_catalog(selected, heavy=heavy)
     compute_ms = (time.perf_counter() - started) * 1000.0
+    live = list(STATE.get("videos") or [])
+    if len(live) > len(selected):
+        try:
+            from vg.diagnostics import emit
+
+            emit(
+                "WARN",
+                "catalog_rebuild_adopt_live_grown",
+                force=True,
+                stale_n=len(selected),
+                live_n=len(live),
+                scanning=bool(STATE.get("scanning")),
+                heavy=heavy,
+                thread=threading.current_thread().name,
+            )
+        except Exception:
+            pass
+        selected = live
+        # Live list already carries in-place probe fields; skip another heavy
+        # duplicate pass so we do not stall the scanner again.
+        remake_started = time.perf_counter()
+        indexes = compute_catalog(selected, heavy=False)
+        compute_ms += (time.perf_counter() - remake_started) * 1000.0
     apply_started = time.perf_counter()
     apply_catalog_to_state(selected, indexes)
     apply_ms = (time.perf_counter() - apply_started) * 1000.0

@@ -87,6 +87,8 @@ def thumb_cache_invalidate(vid: str | None = None, cache: Path | None = None) ->
         else:
             _thumb_jpeg_cache.clear()
             _state._thumb_jpeg_cache_bytes = 0
+    # A regenerated .vgt must not stay stuck behind an earlier disk-miss.
+    thumb_neg_cache_clear(vid)
 
 
 def _ensure_vault_key() -> bytes:
@@ -594,6 +596,15 @@ _thumb_neg_cache: dict[str, bool] = {}
 _thumb_neg_cache_gen: int = -1
 _thumb_neg_cache_lock = threading.Lock()
 _THUMB_NEG_CACHE_MAX = 8192
+
+
+def thumb_neg_cache_clear(vid: str | None = None) -> None:
+    """Drop negative has_thumb answers so a newly written .vgt is visible."""
+    with _thumb_neg_cache_lock:
+        if vid:
+            _thumb_neg_cache.pop(vid, None)
+        else:
+            _thumb_neg_cache.clear()
 
 
 def attach_thumb_meta(v: dict) -> dict:

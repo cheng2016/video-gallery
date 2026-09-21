@@ -709,18 +709,25 @@ def publish_unified_library(
 
     used_ids: dict[str, str] = {}
     merged: list[dict] = []
+    ensure_ms = fetch_ms = copy_ms = 0.0
 
     for root_s in roots:
+        stage_started = time.perf_counter()
         ensure_library(root_s)
+        ensure_ms += (time.perf_counter() - stage_started) * 1000.0
         cache = None
         try:
             cache = ensure_cache_dir(Path(root_s))
         except OSError:
             pass
         label = root_label(root_s)
-        for raw in _videos_from_root(root_s):
+        stage_started = time.perf_counter()
+        rows = _videos_from_root(root_s)
+        fetch_ms += (time.perf_counter() - stage_started) * 1000.0
+        stage_started = time.perf_counter()
+        batch: list[dict] = []
+        for raw in rows:
             item = dict(raw)
-            stamp_lib_meta([item], root=root_s, cache=cache)
             folder = _restore_folder(item, root_s, label)
             item["_folder_raw"] = folder
             item["folder"] = folder
@@ -728,7 +735,26 @@ def publish_unified_library(
             item["lib_label"] = label
             item["root"] = root_s
             _dedupe_id(item, root_s, used_ids)
-            merged.append(item)
+            batch.append(item)
+        stamp_lib_meta(batch, root=root_s, cache=cache)
+        merged.extend(batch)
+        copy_ms += (time.perf_counter() - stage_started) * 1000.0
+    try:
+        from vg.diagnostics import emit as _merge_emit
+
+        _merge_emit(
+            "PERF",
+            "publish_unified_merge_breakdown",
+            force=True,
+            reason=reason,
+            roots=len(roots),
+            merged_count=len(merged),
+            ensure_ms=f"{ensure_ms:.1f}",
+            fetch_ms=f"{fetch_ms:.1f}",
+            copy_ms=f"{copy_ms:.1f}",
+        )
+    except Exception:
+        pass
 
     # 保留刚扫描/当前正在看的盘为 primary，不要总踢回第一块盘
     primary_s = roots[0]
@@ -770,13 +796,32 @@ def publish_unified_library(
             except Exception:
                 pass
 
-        if merged:
-            workers = meta_worker_count(len(merged))
-            if workers > 1 and len(merged) > 64:
+        need = [
+            v
+            for v in merged
+            if int(v.get("taxonomy_ver") or 0) != TAXONOMY_VERSION
+            or int(v.get("genres_ver") or 0) != GENRES_VERSION
+        ]
+        try:
+            from vg.diagnostics import emit as _cls_emit
+
+            _cls_emit(
+                "PERF",
+                "publish_unified_classify_filter",
+                force=True,
+                reason=reason,
+                merged_count=len(merged),
+                need_classify=len(need),
+            )
+        except Exception:
+            pass
+        if need:
+            workers = meta_worker_count(len(need))
+            if workers > 1 and len(need) > 64:
                 with ThreadPoolExecutor(max_workers=workers) as ex:
-                    list(ex.map(_classify_one, merged, chunksize=16))
+                    list(ex.map(_classify_one, need, chunksize=16))
             else:
-                for v in merged:
+                for v in need:
                     _classify_one(v)
     except Exception:
         pass
@@ -794,8 +839,47 @@ def publish_unified_library(
     except Exception:
         pass
     tree_refresh_started = time.perf_counter()
+    tree_from_disk = False
     if refresh_tree:
-        STATE["tree"] = tree_for_scope(None)
+        loaded_tree = None
+        tree_cache_stats: dict = {}
+        try:
+            from vg.catalog_cache import emit_load_log, load_tree_disk_cache
+
+            loaded_tree, tree_cache_stats = load_tree_disk_cache("", len(merged))
+        except Exception:
+            loaded_tree = None
+            tree_cache_stats = {}
+        try:
+            from vg.catalog_cache import emit_load_log
+
+            ev = tree_cache_stats.pop("event", "tree_disk_cache_load")
+            emit_load_log(
+                "PERF",
+                ev,
+                force=True,
+                from_publish_unified=True,
+                reason=reason,
+                **tree_cache_stats,
+            )
+        except Exception:
+            pass
+        if loaded_tree is not None:
+            STATE["tree"] = loaded_tree
+            tree_from_disk = True
+        else:
+            STATE["tree"] = tree_for_scope(None)
+        from vg.diagnostics import emit as _tree_emit
+
+        _tree_emit(
+            "PERF",
+            "publish_unified_library_tree_refresh",
+            force=True,
+            reason=reason,
+            from_disk=tree_from_disk,
+            merged_count=len(merged),
+            elapsed_ms=(time.perf_counter() - tree_refresh_started) * 1000.0,
+        )
     else:
         # Thumbnail finalization changes card metadata, not folder membership.
         # Keep the already published tree and record that the rebuild was
@@ -959,6 +1043,7 @@ def publish_unified_library(
     try:
         from vg.catalog_cache import (
             emit_save_log,
+            load_tree_disk_cache,
             save_tree_disk_cache,
         )
         import time as _cache_t
@@ -975,7 +1060,7 @@ def publish_unified_library(
         # needlessly changed the cache file mtime.  Keep the write on cache
         # misses/signature changes, while emitting the skip reason below so a
         # future regression is visible in startup logs.
-        if refresh_tree and all_tree and merged_count:
+        if refresh_tree and all_tree and merged_count and not tree_from_disk:
             st = save_tree_disk_cache("", all_tree, merged_count, only_if_missing=True)
             warm_stats_list.append(st)
         # (b) per lib (take unique libs from merged videos to cover only the
@@ -1002,15 +1087,25 @@ def publish_unified_library(
                 ]
             if not scoped_vids:
                 continue
+            per_lib_tree = None
             try:
-                per_lib_tree = tree_for_scope(lib_s)
+                per_lib_tree, lib_stats = load_tree_disk_cache(lib_s, len(scoped_vids))
+                if lib_stats.get("hit"):
+                    warm_stats_list.append(
+                        {"skip_reason": "already_valid", "lib": lib_s, **lib_stats}
+                    )
             except Exception:
                 per_lib_tree = None
-            if per_lib_tree:
-                st = save_tree_disk_cache(
-                    lib_s, per_lib_tree, len(scoped_vids), only_if_missing=True
-                )
-                warm_stats_list.append(st)
+            if per_lib_tree is None:
+                try:
+                    per_lib_tree = tree_for_scope(lib_s)
+                except Exception:
+                    per_lib_tree = None
+                if per_lib_tree:
+                    st = save_tree_disk_cache(
+                        lib_s, per_lib_tree, len(scoped_vids), only_if_missing=True
+                    )
+                    warm_stats_list.append(st)
         overall_ms = (_cache_t.perf_counter() - _warm_started) * 1000.0
         # Aggregate stats into a single PERF line so log scanning tools can
         # answer "did the cache layer save work on this restart?" with one

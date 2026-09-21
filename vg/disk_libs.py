@@ -122,13 +122,61 @@ def _root_key(root: Path | str) -> str:
     return os.path.normcase(os.path.normpath(value))
 
 
+_norm_root_cache: dict[str, str] = {}
+
+
 def _norm_root_str(root: str | Path | None) -> str:
     if not root:
         return ""
+    key = root if isinstance(root, str) else str(root)
+    cached = _norm_root_cache.get(key)
+    if cached is not None:
+        return cached
     try:
-        return str(Path(root).expanduser().resolve())
+        resolved = str(Path(key).expanduser().resolve())
     except OSError:
-        return str(root).strip()
+        resolved = key.strip()
+    _norm_root_cache[key] = resolved
+    return resolved
+
+
+def _disk_lib_entry(root: str | Path | None) -> dict | None:
+    """Find an in-memory disk_libs slot without reloading SQLite."""
+    if not root:
+        return None
+    libs = STATE.get("disk_libs") or {}
+    if not libs:
+        return None
+    raw = str(root).strip()
+    hit = libs.get(raw)
+    if hit and hit.get("by_id"):
+        return hit
+    raw_l = raw.lower()
+    for key, val in libs.items():
+        if val and val.get("by_id") and str(key).lower() == raw_l:
+            return val
+    try:
+        resolved = _norm_root_str(raw)
+    except Exception:
+        return None
+    if resolved and resolved != raw:
+        hit = libs.get(resolved)
+        if hit and hit.get("by_id"):
+            return hit
+        resolved_l = resolved.lower()
+        for key, val in libs.items():
+            if val and val.get("by_id") and str(key).lower() == resolved_l:
+                return val
+    return None
+
+
+def memory_catalog_ready(root: str | Path | None) -> bool:
+    """True when this root already has a usable in-memory catalog.
+
+    ``ensure_library`` used to archive the whole active library (Path.resolve
+    per row) on every /api/videos-by-ids even when disk_libs was populated.
+    """
+    return bool(_disk_lib_entry(root))
 
 
 def stamp_lib_meta(
@@ -151,6 +199,31 @@ def stamp_lib_meta(
             v["_lib_root"] = root_s
         if cache_s and (overwrite or not (v.get("_lib_cache") or "").strip()):
             v["_lib_cache"] = cache_s
+
+
+def _adopt_catalog_item(
+    item: dict,
+    root_s: str,
+    cache: Path,
+    *,
+    rename_acc: list[str] | None = None,
+) -> dict:
+    """Hydrate a SQLite catalog row in place (no serialize copy)."""
+    item["root"] = root_s
+    item["_lib_root"] = root_s
+    item["_lib_cache"] = str(cache)
+    if "_folder_raw" not in item:
+        item["_folder_raw"] = (item.get("folder") or "").replace("\\", "/").strip("/")
+    from vg.segments import apply_hls_display_name
+
+    old_name = (item.get("name") or "").strip()
+    try:
+        if apply_hls_display_name(item):
+            if rename_acc is not None:
+                rename_acc.append(f"{old_name}→{item.get('name')}")
+    except Exception as exc:
+        log(f"[HLS标题] 改写失败 id={item.get('id') or '-'} rel={item.get('rel') or '-'}: {exc}")
+    return item
 
 
 def _disk_item(
@@ -251,7 +324,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
             return None
         renames: list[str] = []
         clean = [
-            _disk_item(v, root_s, cache, rename_acc=renames)
+            _adopt_catalog_item(v, root_s, cache, rename_acc=renames)
             for v in videos
             if isinstance(v, dict) and v.get("id") and item_belongs_to_root(v, root_s)
         ]
@@ -359,9 +432,11 @@ def save_root_library(root: Path | str, videos: list[dict]) -> list[dict]:
         clean.append(_disk_item(item, root_s, cache))
 
     by_id = {v["id"]: v for v in clean if v.get("id")}
+    # Persist SQLite outside the global disk_libs lock so mid-scan
+    # store_live / HTTP readers are not blocked for seconds.
+    if not save_index(cache, Path(root_s), list(by_id.values())):
+        raise OSError(f"保存片库索引失败: {cache}")
     with _libs_guard("disk_libs_save_index"):
-        if not save_index(cache, Path(root_s), list(by_id.values())):
-            raise OSError(f"保存片库索引失败: {cache}")
         _store_lib(root_s, cache, by_id)
     return list(by_id.values())
 
@@ -415,15 +490,17 @@ def save_library_item(
         return False
     root_s = _norm_root_str(raw_root)
     cache = ensure_cache_dir(Path(root_s))
+    # SQLite I/O must not hold the global disk_libs lock — mid-scan
+    # ``store_live_library`` waited 1–3s on this (bench lock_waiting).
+    n = upsert_catalog_videos(
+        cache,
+        root_s,
+        [item],
+        allow_insert=allow_insert,
+    )
+    if n <= 0:
+        return False
     with _libs_guard("disk_libs_upsert_one"):
-        n = upsert_catalog_videos(
-            cache,
-            root_s,
-            [item],
-            allow_insert=allow_insert,
-        )
-        if n <= 0:
-            return False
         # Keep memory archive in sync without a full reload.
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         source_id = (item.get("_thumb_id") or item.get("id") or "").strip()
@@ -482,16 +559,17 @@ def save_library_items(
     saved = 0
     for root_s, batch in groups.items():
         cache = ensure_cache_dir(Path(root_s))
+        # Keep SQLite off the global disk_libs lock (see save_library_item).
+        n = upsert_catalog_videos(
+            cache,
+            root_s,
+            batch,
+            allow_insert=allow_insert,
+        )
+        if n <= 0:
+            continue
+        saved += n
         with _libs_guard("disk_libs_upsert_batch"):
-            n = upsert_catalog_videos(
-                cache,
-                root_s,
-                batch,
-                allow_insert=allow_insert,
-            )
-            if n <= 0:
-                continue
-            saved += n
             existing = (STATE.get("disk_libs") or {}).get(root_s)
             if existing and isinstance(existing.get("by_id"), dict):
                 by_id = existing["by_id"]
@@ -648,6 +726,10 @@ def load_library_from_index(root: Path | str) -> bool:
     """Load a disk's saved catalog into disk_libs without switching the active UI root."""
     from vg.catalog_db import catalog_exists, catalog_mtime, load_catalog_videos
 
+    # Hot path: by-ids / thumb already have this disk in RAM. Do not archive
+    # thousands of rows or reopen SQLite on every request.
+    if memory_catalog_ready(root):
+        return True
     try:
         root_p = Path(root).expanduser().resolve()
     except OSError as exc:
@@ -669,6 +751,8 @@ def load_library_from_index(root: Path | str) -> bool:
         )
         return False
     root_s = str(root_p)
+    if memory_catalog_ready(root_s):
+        return True
     # already the active root
     cur = STATE.get("root")
     if (
@@ -681,12 +765,14 @@ def load_library_from_index(root: Path | str) -> bool:
 
     cache = ensure_cache_dir(root_p)
     cache_s = str(cache)
-    # Cooldown: if we recently found no catalog for this root, skip the
-    # re-stat and the rate-limited WARN until it expires.
-    missing_until = _catalog_missing_until.get(cache_s)
-    if missing_until and missing_until > time.time():
-        return False
-    if not catalog_exists(cache):
+    # A sibling mount often probes this root before its first scan writes
+    # catalog.sqlite. If a later scan created the file, ignore the cooldown.
+    if catalog_exists(cache):
+        _catalog_missing_until.pop(cache_s, None)
+    else:
+        missing_until = _catalog_missing_until.get(cache_s)
+        if missing_until and missing_until > time.time():
+            return False
         _catalog_missing_until[cache_s] = time.time() + _CATALOG_MISSING_COOLDOWN_S
         from vg.catalog_db import catalog_db_path
         from vg.diagnostics import emit_rate_limited
@@ -798,15 +884,19 @@ def load_library_from_index(root: Path | str) -> bool:
     try:
         if _disk_lib_snapshot(root_s):
             return True
+        stage_started = time.perf_counter()
         videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
+        sql_ms = (time.perf_counter() - stage_started) * 1000.0
         clean = []
         renames: list[str] = []
+        stage_started = time.perf_counter()
         for raw in videos:
             if not isinstance(raw, dict) or not raw.get("id"):
                 continue
             if not item_belongs_to_root(raw, root_s):
                 continue
-            clean.append(_disk_item(raw, root_s, cache, rename_acc=renames))
+            clean.append(_adopt_catalog_item(raw, root_s, cache, rename_acc=renames))
+        adopt_ms = (time.perf_counter() - stage_started) * 1000.0
         by_id = {v["id"]: v for v in clean}
         if not by_id:
             from vg.diagnostics import emit
@@ -830,13 +920,33 @@ def load_library_from_index(root: Path | str) -> bool:
             return False
         _clear_catalog_empty(cache_s)
         final_mtime = catalog_mtime(cache)
+        stage_started = time.perf_counter()
         _store_lib(root_s, cache, by_id, index_mtime=final_mtime or index_mtime)
+        store_ms = (time.perf_counter() - stage_started) * 1000.0
+        stage_started = time.perf_counter()
         _log_hls_title_rewrites(root_s, renames)
         now = time.time()
         last = float(_load_log_ts.get(root_s) or 0)
         if now - last >= 5.0:
             _load_log_ts[root_s] = now
             log(f"[跨盘] 已加载历史盘索引: {root_s}（{len(by_id)} 部）")
+        log_ms = (time.perf_counter() - stage_started) * 1000.0
+        try:
+            from vg.diagnostics import emit
+
+            emit(
+                "PERF",
+                "disk_library_hydrate_breakdown",
+                force=True,
+                root=root_s,
+                rows=len(by_id),
+                sql_wall_ms=f"{sql_ms:.1f}",
+                adopt_ms=f"{adopt_ms:.1f}",
+                store_ms=f"{store_ms:.1f}",
+                log_ms=f"{log_ms:.1f}",
+            )
+        except Exception:
+            pass
         return True
     finally:
         _end_catalog_flight(flight_key, flight)
@@ -983,7 +1093,8 @@ def find_in_disk_libs(vid: str, prefer_root: str | None = None) -> dict | None:
         except Exception:
             pass
     elif prefer:
-        ensure_library(prefer)
+        if not memory_catalog_ready(prefer):
+            ensure_library(prefer)
     with _libs_guard("disk_libs_lookup_by_id"):
         libs = STATE.get("disk_libs") or {}
         if prefer:

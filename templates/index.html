@@ -1938,6 +1938,15 @@
       "player_opened",
       "player_probe_poll",
       "fps30_button_update",
+      // Cover seek UI: always ship so "截了但列表不换图" is diagnosable.
+      "cover_seek_start",
+      "cover_seek_done",
+      "cover_seek_failed",
+      "cover_upload_done",
+      "cover_upload_failed",
+      "cover_local_applied",
+      // Catalog race: item_not_found → wait for owning root ready → up to 3 rearms.
+      "thumb_catalog_rearm",
       // LAN share button regressions: always ship these even without full logging.
       "lan_share_ui_sync",
       "lan_share_boot",
@@ -2963,6 +2972,7 @@
       let lastScanProgress = "";
       let lastLibGen = state._libGen || 0;
       let lastScanFound = -1;
+      let lastScanning = !!state._lastScanning;
       let thumbRefreshTimer = 0;
       // lastFullRefresh now lives on state._lastFullRefresh so every caller
       // (polling, click handlers, filter changes) shares the same throttle
@@ -2993,8 +3003,20 @@
         try {
           const r = await fetch("/api/status");
           const d = await r.json();
-          state._lastScanning = !!d.scanning;
+          const scanningNow = !!d.scanning;
+          const scanJustCleared = lastScanning && !scanningNow;
+          lastScanning = scanningNow;
+          state._lastScanning = scanningNow;
           state._updating = !!d.updating;
+          state._lastThumbStatus = {
+            scanning: scanningNow,
+            scan_root: d.scan_root || "",
+            thumb_bulk_roots: Array.isArray(d.thumb_bulk_roots) ? d.thumb_bulk_roots : [],
+            lib_gen: d.lib_gen || 0,
+          };
+          if (scanJustCleared && thumbsAwaitCatalog.size) {
+            try { rearmThumbsAfterCatalog("scan_cleared", state._lastThumbStatus); } catch (_) {}
+          }
           if (typeof d.full_logging === "boolean") {
             state._fullLogging = d.full_logging;
           }
@@ -3107,6 +3129,7 @@
               state._libGen = gen;
               // Scan finished → lib_gen is about to bump; sync sidebar.
               await refresh({ soft: true, nav: true });
+              try { rearmThumbsAfterCatalog("poll_scan_done", state._lastThumbStatus); } catch (_) {}
             } else if (d.thumb_progress && d.thumb_progress !== lastThumbProgress) {
               lastThumbProgress = d.thumb_progress;
               const thumbNeed = countGridThumbPending();
@@ -3213,6 +3236,7 @@
               }, "INFO");
             }
             refreshVisibleThumbs();
+            try { rearmThumbsAfterCatalog("poll_idle", state._lastThumbStatus); } catch (_) {}
             try { refreshStuckThumbs("poll_idle"); } catch (_) {}
             try { summarizeGridCardCoverage("poll_idle"); } catch (_) {}
           } else if (genChanged) {
@@ -3220,6 +3244,7 @@
             const canFull = now - state._lastFullRefresh >= 1000;
             lastLibGen = gen;
             state._libGen = gen;
+            try { rearmThumbsAfterCatalog("poll_idle_gen", state._lastThumbStatus); } catch (_) {}
             clientLog("poll_decision", {
               action: canFull ? "idle_gen_refresh" : "idle_gen_throttled",
               lib_gen: gen,
@@ -3271,6 +3296,15 @@
     const THUMB_CONCURRENCY = 8;
     const thumbsLoaded = new Set();
     const thumbsGaveUp = new Set();
+    // item_not_found during cold start / unscanned disk: stop hammering, but
+    // remember the id so we can rearm when that owning root is catalog-ready.
+    // Up to THUMB_AWAIT_MAX_REARMS tries; delays double after each fired rearm.
+    const thumbsAwaitCatalog = new Map();
+    const THUMB_AWAIT_MAX_REARMS = 3;
+    const THUMB_AWAIT_BASE_MS = 2000;
+    // Parked ids are viewport failures, not the whole 6000-row catalog.
+    const THUMB_AWAIT_MAX_IDS = 128;
+    let thumbAwaitSweepTimer = 0;
     // Shared object URLs survive virtual-list card rebuilds so scrolling
     // "全部" (925+) does not re-fetch every thumb that just left the DOM.
     const thumbObjectUrls = new Map();
@@ -3284,6 +3318,52 @@
       const m = s.match(/\/thumb\/([^/?#]+)/i);
       if (!m) return "";
       try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
+    }
+
+    function rootFromThumbUrl(url) {
+      try {
+        return new URL(String(url || ""), location.href).searchParams.get("root") || "";
+      } catch (_) {
+        return "";
+      }
+    }
+
+    function isThumbRootCatalogReady(root, status) {
+      const st = status || state._lastThumbStatus || {};
+      if (!st.scanning) return true;
+      const scanRoot = String(st.scan_root || "");
+      if (!root) return false;
+      if (!scanRoot) return false;
+      // Another disk is scanning — this root's catalog is already published.
+      return !sameLibPath(scanRoot, root);
+    }
+
+    function forgetThumbAwaitCatalog(id) {
+      const key = String(id || "").trim();
+      if (!key) return;
+      thumbsAwaitCatalog.delete(key);
+    }
+
+    function scheduleThumbAwaitSweep() {
+      if (thumbAwaitSweepTimer) {
+        try { clearTimeout(thumbAwaitSweepTimer); } catch (_) {}
+        thumbAwaitSweepTimer = 0;
+      }
+      if (!thumbsAwaitCatalog.size) return;
+      const now = Date.now();
+      const st = state._lastThumbStatus || {};
+      let earliest = Infinity;
+      thumbsAwaitCatalog.forEach((meta) => {
+        if (!meta || (Number(meta.attempts) || 0) >= THUMB_AWAIT_MAX_REARMS) return;
+        if (!isThumbRootCatalogReady(meta.root || "", st)) return;
+        const at = Number(meta.nextAt) || 0;
+        if (at < earliest) earliest = at;
+      });
+      if (!Number.isFinite(earliest)) return;
+      thumbAwaitSweepTimer = setTimeout(() => {
+        thumbAwaitSweepTimer = 0;
+        try { rearmThumbsAfterCatalog("backoff_timer", state._lastThumbStatus); } catch (_) {}
+      }, Math.max(0, earliest - now));
     }
 
     function thumbPermanentlyFailed(idOrUrl) {
@@ -3300,6 +3380,152 @@
       thumbsGaveUp.add(raw);
       const id = thumbIdFromUrl(raw);
       if (id) thumbsGaveUp.add(id);
+    }
+
+    function clearThumbGaveUp(idOrUrl) {
+      // Explicit cover replace / user retry must re-arm the thumb; session
+      // give-up from an earlier item_not_found would otherwise leave the card
+      // blank forever even after cover_set_ok.
+      const raw = String(idOrUrl || "").trim();
+      if (!raw) return;
+      thumbsGaveUp.delete(raw);
+      const id = thumbIdFromUrl(raw);
+      if (id) thumbsGaveUp.delete(id);
+    }
+
+    function noteThumbAwaitCatalog(idOrUrl, reason, rootHint) {
+      const raw = String(idOrUrl || "").trim();
+      if (!raw) return;
+      const id = thumbIdFromUrl(raw) || raw;
+      if (!id) return;
+      const prev = thumbsAwaitCatalog.get(id);
+      const attempts = prev ? (Number(prev.attempts) || 0) : 0;
+      if (attempts >= THUMB_AWAIT_MAX_REARMS) {
+        clientLog("thumb_catalog_rearm", {
+          reason: "await_exhausted",
+          video_id: id,
+          attempts,
+          pending: thumbsAwaitCatalog.size,
+          note: String(reason || ""),
+        }, "WARN");
+        return;
+      }
+      if (!prev && thumbsAwaitCatalog.size >= THUMB_AWAIT_MAX_IDS) return;
+      const root = String(rootHint || rootFromThumbUrl(raw) || (prev && prev.root) || "").trim();
+      thumbsAwaitCatalog.set(id, {
+        url: raw || (prev && prev.url) || "",
+        reason: String(reason || (prev && prev.reason) || "item_not_found"),
+        root,
+        attempts,
+        nextAt: prev && Number(prev.nextAt) > Date.now() ? Number(prev.nextAt) : 0,
+        lastDelayMs: prev ? (Number(prev.lastDelayMs) || 0) : 0,
+      });
+      scheduleThumbAwaitSweep();
+    }
+
+    function thumbAwaitDomIndex() {
+      const byId = new Map();
+      const add = (key, img, root) => {
+        if (!key || !img) return;
+        const list = byId.get(key);
+        const row = { img, root: root || "" };
+        if (list) list.push(row);
+        else byId.set(key, [row]);
+      };
+      document.querySelectorAll("#grid .card").forEach((card) => {
+        const img = card.querySelector("img");
+        const root = card.dataset.root || "";
+        add(card.dataset.cover || "", img, root);
+        add(card.dataset.id || "", img, root);
+      });
+      document.querySelectorAll("#continueBar .continue-chip").forEach((chip) => {
+        add(chip.dataset.playId || "", chip.querySelector("img"), chip.dataset.root || "");
+      });
+      return byId;
+    }
+
+    function rearmThumbsAfterCatalog(reason, status) {
+      if (!thumbsAwaitCatalog.size) return 0;
+      if (status && typeof status === "object") state._lastThumbStatus = status;
+      const st = state._lastThumbStatus || {};
+      const now = Date.now();
+      let armed = 0;
+      let dropped = 0;
+      let deferred = 0;
+      let skippedRoot = 0;
+      let skippedWait = 0;
+      let due = 0;
+      const entries = Array.from(thumbsAwaitCatalog.entries());
+      for (const [id, meta] of entries) {
+        if (!meta || (Number(meta.attempts) || 0) >= THUMB_AWAIT_MAX_REARMS) {
+          thumbsAwaitCatalog.delete(id);
+          dropped += 1;
+          continue;
+        }
+        if (!isThumbRootCatalogReady(meta.root || "", st)) {
+          skippedRoot += 1;
+          continue;
+        }
+        if (Number(meta.nextAt || 0) > now) {
+          skippedWait += 1;
+          continue;
+        }
+        due += 1;
+      }
+      const byId = due ? thumbAwaitDomIndex() : null;
+      for (const [id, meta] of entries) {
+        if (!meta || !thumbsAwaitCatalog.has(id)) continue;
+        if ((Number(meta.attempts) || 0) >= THUMB_AWAIT_MAX_REARMS) continue;
+        if (!isThumbRootCatalogReady(meta.root || "", st)) continue;
+        if (Number(meta.nextAt || 0) > now) continue;
+        const rootHint = meta.root || rootFromThumbUrl(meta.url || "") || "";
+        const rows = byId.get(id) || [];
+        let hit = 0;
+        rows.forEach((row) => {
+          const img = row && row.img;
+          if (!img) return;
+          img.dataset.thumbExhausted = "";
+          img.dataset.thumbReady = "";
+          img.dataset.thumbAttempt = "0";
+          const root = row.root || rootHint || "";
+          const url =
+            "/thumb/" +
+            encodeURIComponent(id) +
+            "?v=" +
+            Date.now() +
+            "&defer=1" +
+            (root ? ("&root=" + encodeURIComponent(root)) : "");
+          requestThumbReload(img, url, { force: true });
+          hit += 1;
+        });
+        if (hit > 0) {
+          clearThumbGaveUp(id);
+          clearThumbGaveUp(meta.url || "");
+          meta.attempts = (Number(meta.attempts) || 0) + 1;
+          meta.lastDelayMs = THUMB_AWAIT_BASE_MS * Math.pow(2, Math.max(0, meta.attempts - 1));
+          meta.nextAt = now + meta.lastDelayMs;
+          armed += hit;
+        } else {
+          deferred += 1;
+          meta.nextAt = now + (meta.lastDelayMs || THUMB_AWAIT_BASE_MS);
+        }
+      }
+      scheduleThumbAwaitSweep();
+      if (armed || dropped || deferred || skippedRoot || reason !== "backoff_timer") {
+        clientLog("thumb_catalog_rearm", {
+          reason: reason || "lib_gen",
+          armed,
+          dropped,
+          deferred,
+          skipped_root: skippedRoot,
+          skipped_wait: skippedWait,
+          pending: thumbsAwaitCatalog.size,
+          scanning: !!st.scanning,
+          scan_root: st.scan_root || "",
+          skipped: false,
+        }, (armed || dropped) ? "WARN" : "INFO");
+      }
+      return armed;
     }
 
     function rememberThumbObjectUrl(url, objUrl) {
@@ -3529,11 +3755,12 @@
       fetch(url, { cache: "no-store", headers: { "Accept": "image/jpeg,image/*;q=0.8,*/*;q=0.5" } })
         .then((r) => {
           const thumbStatus = String(r.headers.get("X-VG-Thumb-Status") || "").toLowerCase();
+          const thumbReason = String(r.headers.get("X-VG-Thumb-Reason") || "");
           if (thumbStatus === "unavailable") {
             const err = new Error("thumb_unavailable");
             err.status = r.status;
             err.permanent = true;
-            err.reason = String(r.headers.get("X-VG-Thumb-Reason") || "unavailable");
+            err.reason = thumbReason || "unavailable";
             throw err;
           }
           const ctype = String(r.headers.get("content-type") || "").toLowerCase();
@@ -3541,13 +3768,14 @@
             const err = new Error("thumb_not_ready");
             err.status = r.status;
             err.ctype = ctype;
+            err.reason = thumbReason || "";
             const hasRetryAfter = r.headers.has("Retry-After");
             err.temporary = thumbStatus === "pending" || hasRetryAfter;
             // 503 without Retry-After / pending = permanent (even if Status
             // header was stripped). Do not keep hammering.
             if (r.status === 503 && !err.temporary) {
               err.permanent = true;
-              err.reason = String(r.headers.get("X-VG-Thumb-Reason") || "unavailable");
+              err.reason = thumbReason || "unavailable";
             }
             throw err;
           }
@@ -3594,8 +3822,13 @@
             } else {
               thumbLoadFailed(
                 img,
-                err && err.status === 503 ? "http_503" : (err && err.message) || "fetch_failed",
-                { temporary: !!(err && err.temporary) }
+                err && err.reason
+                  ? err.reason
+                  : (err && err.status === 503 ? "http_503" : (err && err.message) || "fetch_failed"),
+                {
+                  temporary: !!(err && err.temporary),
+                  reason: (err && err.reason) || "",
+                }
               );
             }
           } else {
@@ -3616,6 +3849,15 @@
         if (src && !src.startsWith("data:") && !thumbObjectUrls.has(img.dataset.thumbUrl)) {
           rememberThumbObjectUrl(img.dataset.thumbUrl, src);
         }
+        const tid = thumbIdFromUrl(img.dataset.thumbUrl);
+        if (tid) forgetThumbAwaitCatalog(tid);
+      }
+      const card = img.closest(".card");
+      if (card) {
+        const cid = card.dataset.id || "";
+        const cover = card.dataset.cover || "";
+        if (cid) forgetThumbAwaitCatalog(cid);
+        if (cover) forgetThumbAwaitCatalog(cover);
       }
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       img.style.display = "";
@@ -3628,13 +3870,32 @@
       // Permanent: remember the thumb id so list rebuild / poll cannot re-arm it.
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
       const url = String(img.dataset.thumbUrl || "");
+      const reasonCode = String(reason || "unavailable");
+      const catalogSoft =
+        reasonCode === "item_not_found"
+        || reasonCode === "catalog_transition"
+        || reasonCode === "catalog_pending";
       markThumbGaveUp(url);
       const card = img.closest(".card");
       if (card && card.dataset.cover) markThumbGaveUp(card.dataset.cover);
+      if (catalogSoft) {
+        const rootHint = (card && card.dataset.root) || rootFromThumbUrl(url) || "";
+        noteThumbAwaitCatalog(url, reasonCode, rootHint);
+        if (card) {
+          noteThumbAwaitCatalog(card.dataset.cover || "", reasonCode, rootHint);
+          noteThumbAwaitCatalog(card.dataset.id || "", reasonCode, rootHint);
+        }
+      }
       applyThumbGaveUpDom(img);
       logThumbDiag("thumb_give_up", {
         video_id: (card && card.dataset.id) || "",
-        reason: reason || "unavailable",
+        reason: reasonCode,
+        await_catalog: catalogSoft,
+        await_attempts: (() => {
+          const tid = thumbIdFromUrl(url) || (card && (card.dataset.cover || card.dataset.id)) || "";
+          const meta = tid ? thumbsAwaitCatalog.get(tid) : null;
+          return meta ? (Number(meta.attempts) || 0) : 0;
+        })(),
         url: url.slice(0, 120),
         attempt: Number(img.dataset.thumbAttempt) || 0,
       }, "WARN");
@@ -3656,11 +3917,17 @@
       img.src = THUMB_PENDING_SRC;
       const card = img.closest(".card");
       const videoId = (card && card.dataset.id) || "";
-      // Fast retries while the worker queue catches up. After that, stop —
-      // infinite 15s heartbeats used to flood /thumb for permanently missing
-      // catalog rows (item_found=False) and spam WARN forever.
-      if (attempt >= THUMB_MAX_FAST_ATTEMPTS) {
-        thumbLoadGiveUp(img, reason || "retry_exhausted");
+      const reasonCode = String((opts && opts.reason) || reason || "unknown");
+      const catalogSoft =
+        reasonCode === "item_not_found"
+        || reasonCode === "catalog_transition"
+        || reasonCode === "catalog_pending";
+      // Catalog-missing races: a few fast tries, then park until owning root
+      // is catalog-ready (up to 3 delayed rearms with doubling backoff).
+      // Other temporary failures keep the longer fast-retry budget.
+      const maxAttempts = catalogSoft ? 3 : THUMB_MAX_FAST_ATTEMPTS;
+      if (attempt >= maxAttempts) {
+        thumbLoadGiveUp(img, reasonCode);
         return;
       }
       img.dataset.thumbWatched = "1";
@@ -3668,7 +3935,7 @@
         logThumbDiag("thumb_retry", {
           video_id: videoId,
           attempt,
-          reason: reason || "unknown",
+          reason: reasonCode,
           temporary: !!(opts && opts.temporary),
         }, attempt >= 5 ? "WARN" : "INFO");
       }
@@ -3684,11 +3951,21 @@
       pumpThumbs();
     }
 
-    function requestThumbReload(img, url) {
+    function requestThumbReload(img, url, opts) {
       if (img._thumbRetryTimer) clearTimeout(img._thumbRetryTimer);
+      const force = !!(opts && opts.force);
+      if (force) {
+        clearThumbGaveUp(url);
+        clearThumbGaveUp(img.dataset.thumbUrl || "");
+        const card = img.closest(".card");
+        if (card) {
+          clearThumbGaveUp(card.dataset.id || "");
+          clearThumbGaveUp(card.dataset.cover || "");
+        }
+      }
       // Soft refresh / visible refresh used to clear exhausted and hammer
       // the same missing catalog ids. Keep a session-level give-up set.
-      if (thumbPermanentlyFailed(url) || thumbPermanentlyFailed(img.dataset.thumbUrl || "")) {
+      if (!force && (thumbPermanentlyFailed(url) || thumbPermanentlyFailed(img.dataset.thumbUrl || ""))) {
         img.dataset.thumbUrl = url || img.dataset.thumbUrl || "";
         applyThumbGaveUpDom(img);
         return;
@@ -6606,6 +6883,7 @@
           .then(() => refreshLoadedCardMeta("soft_refresh_silent"))
           .then(() => {
             if (cardMetaToken !== refreshToken) return;
+            try { rearmThumbsAfterCatalog("soft_refresh_silent", state._lastThumbStatus); } catch (_) {}
             try { refreshStuckThumbs("soft_refresh_silent"); } catch (_) {}
             summarizeGridCardCoverage("soft_refresh_silent");
           })
@@ -8904,6 +9182,10 @@
       let rowsHit = 0;
       let continueHit = 0;
 
+      clearThumbGaveUp(videoId);
+      clearThumbGaveUp(thumbId);
+      clearThumbGaveUp(url);
+
       document.querySelectorAll("#grid .card").forEach((card) => {
         const id = card.dataset.id || "";
         const cover = card.dataset.cover || "";
@@ -8915,7 +9197,7 @@
         if (!img) return;
         imgsHit += 1;
         if (img.dataset.thumbUrl) forgetThumbObjectUrl(img.dataset.thumbUrl);
-        requestThumbReload(img, url);
+        requestThumbReload(img, url, { force: true });
       });
 
       document.querySelectorAll("#continueBar .continue-chip").forEach((chip) => {
@@ -8924,7 +9206,7 @@
         const img = chip.querySelector("img");
         if (!img) return;
         if (img.dataset.thumbUrl) forgetThumbObjectUrl(img.dataset.thumbUrl);
-        requestThumbReload(img, url);
+        requestThumbReload(img, url, { force: true });
       });
 
       if (Array.isArray(state.loadedVideos)) {
@@ -9078,6 +9360,7 @@
       $("modalInfo").textContent = "正在截取封面…";
       const root = (currentPlayMeta && currentPlayMeta.root) || "";
       const videoId = currentPlayId;
+      clearThumbGaveUp(videoId);
       const scroll = $("contentScroll");
       clientLog("cover_seek_start", {
         video_id: videoId,
@@ -9086,6 +9369,7 @@
         scroll_top: scroll ? Math.round(scroll.scrollTop) : 0,
         offset: state.offset || 0,
         loaded: state.loadedVideos ? state.loadedVideos.length : 0,
+        cleared_give_up: true,
       });
       try {
         const url = "/api/thumb/" + encodeURIComponent(videoId) + (root ? ("?root=" + encodeURIComponent(root)) : "");

@@ -137,7 +137,7 @@ def _is_linkish_dir(path: Path) -> bool:
 def _scandir_files_and_dirs(
     path: Path,
     on_walk_error=None,
-) -> tuple[list[str], list[Path]]:
+) -> tuple[list[str], list[Path], bool]:
     files: list[str] = []
     dirs: list[Path] = []
     try:
@@ -159,9 +159,9 @@ def _scandir_files_and_dirs(
     except OSError as err:
         if on_walk_error is not None:
             on_walk_error(err)
-        return files, dirs
+        return files, dirs, False
     dirs.sort(key=lambda p: p.name.casefold())
-    return files, dirs
+    return files, dirs, True
 
 
 class _DirStealQueue:
@@ -222,6 +222,8 @@ def _run_stolen_directory_walk(
     on_walk_error=None,
     on_heartbeat=None,
     on_steal=None,
+    on_plan=None,
+    on_observed=None,
 ) -> int:
     """Walk ``seeds`` with work stealing. ``visit(dirpath, filenames)`` per dir.
 
@@ -245,10 +247,16 @@ def _run_stolen_directory_walk(
                 stack = [Path(start)]
                 while stack:
                     dirpath = stack.pop()
-                    filenames, child_dirs = _scandir_files_and_dirs(
-                        dirpath,
-                        on_walk_error,
-                    )
+                    planned = on_plan(dirpath) if on_plan is not None else None
+                    if planned is None:
+                        filenames, child_dirs, listed_ok = _scandir_files_and_dirs(
+                            dirpath,
+                            on_walk_error,
+                        )
+                        if listed_ok and on_observed is not None:
+                            on_observed(dirpath, filenames, child_dirs)
+                    else:
+                        filenames, child_dirs = planned
                     visit(dirpath, filenames)
                     local_dirs += 1
                     if on_heartbeat is not None and local_dirs % 256 == 0:
@@ -1009,6 +1017,25 @@ def changed_folder_keys(stored: dict[str, int] | None, live: dict[str, int]) -> 
     return {key for key in set(old) | set(new) if old.get(key, 0) != new.get(key, 0)}
 
 
+def _lower_thread_priority() -> None:
+    """Background catalog checks should not compete with the UI thread."""
+    if os.name != "nt":
+        try:
+            os.nice(10)
+        except (AttributeError, OSError):
+            pass
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentThread.restype = ctypes.c_void_p
+        # THREAD_PRIORITY_BELOW_NORMAL
+        kernel32.SetThreadPriority(kernel32.GetCurrentThread(), -1)
+    except Exception:
+        pass
+
+
 def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
     """Reopen: count files per folder; scan only folders whose counts changed.
 
@@ -1043,6 +1070,7 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
     updating_started = False
     lock_held = False
     try:
+        _lower_thread_priority()
         if STATE.get("scanning"):
             outcome = "skipped_scanning"
             emit(
@@ -1114,6 +1142,79 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
                     folder_counts=stored_counts,
                 )
             _start_metadata_after_scan(root)
+            return
+        from vg.dir_snapshot import DirSnapshot
+
+        dir_snap = DirSnapshot.load(cache)
+        if dir_snap.dirs and dir_snap.volume_usn_unchanged(root):
+            outcome = "usn_unchanged"
+            emit(
+                "INFO",
+                "background_catalog_validation_skipped",
+                force=True,
+                root=root,
+                reason=outcome,
+            )
+            try:
+                from vg.catalog_db import write_catalog_validation_time
+
+                write_catalog_validation_time(cache)
+            except Exception:
+                pass
+            return
+        if dir_snap.dirs:
+            # Cached directory mtimes already know which subtrees changed.
+            # Verify on this low-priority thread instead of counting every file.
+            if not try_acquire_scan_lock(f"bg_snapshot_verify:{root}"):
+                outcome = "skipped_scan_lock_busy"
+                emit(
+                    "WARN",
+                    "background_catalog_validation_skipped",
+                    force=True,
+                    root=root,
+                    reason=outcome,
+                    **scan_lock_status(),
+                )
+                return
+            lock_held = True
+            try:
+                scan_videos(root, do_thumbs=False, incremental=True, quiet=True)
+                outcome = "snapshot_incremental"
+            finally:
+                release_scan_lock()
+                lock_held = False
+            try:
+                from vg.catalog_db import write_catalog_validation_time
+
+                write_catalog_validation_time(cache)
+            except Exception:
+                pass
+            if do_thumbs:
+                from vg.disk_libs import item_belongs_to_root
+
+                stored_n, stored_counts = read_index_counts(cache)
+                scoped = [
+                    v
+                    for v in (STATE.get("videos") or [])
+                    if item_belongs_to_root(v, root)
+                ]
+                fill_thumbs_for_videos(
+                    scoped,
+                    burst=False,
+                    cache=cache,
+                    root=root,
+                    file_count=stored_n,
+                    folder_counts=stored_counts,
+                )
+            _start_metadata_after_scan(root)
+            emit(
+                "INFO",
+                "background_catalog_validation_complete",
+                force=True,
+                root=root,
+                outcome=outcome,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
+            )
             return
         count_started = time.perf_counter()
         emit(
@@ -1923,7 +2024,10 @@ def scan_videos(
     if not quiet:
         STATE["thumb_progress"] = ""
     ffmpeg = STATE["ffmpeg"]
-    cache = STATE["cache_dir"] or ensure_cache_dir(root)
+    # Always bind cache to *this* scan root. Reusing STATE["cache_dir"] from a
+    # previous disk on the same volume overwrites the other root's catalog
+    # (two D:\ folders hashed apart, but the second scan wrote into the first).
+    cache = ensure_cache_dir(root)
     STATE["cache_dir"] = cache
     try:
         root_s = str(Path(root).resolve())
@@ -2250,6 +2354,18 @@ def scan_videos(
 
     def note_found() -> None:
         n = len(found)
+        # Incremental: the UI already has the cached library. Publishing every
+        # 100 files rewrites disk_libs and dominates a no-op rescan. Progress
+        # text only; one publish happens after the walk.
+        if incremental:
+            if n == 25 or n % 500 == 0:
+                STATE["scan_progress"] = f"已发现 {n} 个视频…"
+            if n % 500 == 0:
+                log(
+                    f"[扫描] 已发现 {n} 个…"
+                    f"（候选复用 {reused} / 候选需重建 {added}）"
+                )
+            return
         if n % 100 == 0:
             _publish_live(force_tree=(n % 500 == 0))
             if n % 200 == 0:
@@ -2261,6 +2377,8 @@ def scan_videos(
             _publish_live(force_tree=True)
 
     scanned: list[dict] = []
+    dir_snap = None
+    usn_hit = False
     if target_folders is not None:
         prior_index = _load_index_videos(cache, root)
         kept = [
@@ -2309,8 +2427,43 @@ def scan_videos(
         scanned = collapse_segment_sets(scanned)
         found = kept + scanned
     else:
+        from vg.dir_snapshot import DirSnapshot
+
+        dir_snap = DirSnapshot.load(cache)
+        usn_hit = bool(
+            incremental
+            and previous_catalog_snapshot
+            and dir_snap.volume_usn_unchanged(root)
+        )
+        if usn_hit:
+            found = [dict(v) for v in previous_catalog_snapshot]
+            log(
+                f"[扫描] 卷 USN 未变化，跳过目录遍历，沿用目录 {len(found)} 条"
+            )
+            from vg.diagnostics import emit as _usn_emit
+
+            _usn_emit(
+                "INFO",
+                "scan_usn_unchanged_skip_walk",
+                force=True,
+                root=root,
+                videos=len(found),
+            )
         walk_heartbeat_lock = threading.Lock()
         walk_last_heartbeat = time.perf_counter()
+
+        def _plan_dir(dirpath: Path):
+            if not incremental or usn_hit:
+                return None
+            reused_dir = dir_snap.try_reuse(root, dirpath)
+            if reused_dir is None:
+                return None
+            files, kids = reused_dir
+            count_scan("dir_snapshot_hit")
+            return files, [Path(dirpath) / kid for kid in kids]
+
+        def _record_dir(dirpath: Path, filenames: list[str], child_dirs: list[Path]) -> None:
+            dir_snap.observe(root, dirpath, list(filenames), child_dirs)
 
         def _walk_tree(start: Path, *, children: list[str] | None = None) -> None:
             nonlocal walk_last_heartbeat
@@ -2329,6 +2482,7 @@ def scan_videos(
                         continue
                     kept.append(name)
                 dirnames[:] = kept
+                _record_dir(Path(dirpath), list(filenames), [Path(dirpath) / name for name in dirnames])
                 if children is not None:
                     try:
                         at_start = Path(dirpath).resolve() == start_resolved
@@ -2376,11 +2530,14 @@ def scan_videos(
         cpus = max(1, os.cpu_count() or 4)
         max_workers = max(1, cpus - 2)
         target_jobs = min(SCAN_WALK_JOB_CAP, max(max_workers, 8))
-        shallow_jobs, leaf_jobs = expand_scan_walk_jobs(
-            root,
-            top_kept,
-            target_jobs=target_jobs,
-        )
+        if usn_hit or incremental:
+            shallow_jobs, leaf_jobs = [], []
+        else:
+            shallow_jobs, leaf_jobs = expand_scan_walk_jobs(
+                root,
+                top_kept,
+                target_jobs=target_jobs,
+            )
         walk_workers = 1
         if max_workers > 1 and top_kept:
             walk_workers = max_workers
@@ -2472,7 +2629,46 @@ def scan_videos(
                 workers=walk_workers,
             )
 
-        if walk_workers <= 1:
+        if usn_hit:
+            pass
+        elif incremental:
+            pool_started = time.perf_counter()
+            from vg.diagnostics import emit as _pool_emit
+
+            _pool_emit(
+                "INFO",
+                "scan_walk_pool_start",
+                force=True,
+                root=root,
+                workers=walk_workers,
+                jobs=1,
+                thread=threading.current_thread().name,
+                mode="dir_snapshot",
+            )
+            steal_n = _run_stolen_directory_walk(
+                [root],
+                workers=walk_workers,
+                visit=_scan_visit,
+                on_walk_error=on_walk_error,
+                on_heartbeat=_scan_heartbeat,
+                on_steal=_scan_steal,
+                on_plan=_plan_dir,
+                on_observed=_record_dir,
+            )
+            _pool_emit(
+                "INFO",
+                "scan_walk_pool_done",
+                force=True,
+                root=root,
+                workers=walk_workers,
+                jobs=1,
+                steals=steal_n,
+                elapsed_ms=f"{(time.perf_counter() - pool_started) * 1000.0:.0f}",
+                directories=int(scan_counts.get("directories_scanned", 0) or 0),
+                snapshot_hits=int(scan_counts.get("dir_snapshot_hit", 0) or 0),
+                found=len(found),
+            )
+        elif walk_workers <= 1:
             _walk_tree(root)
         else:
             _walk_tree(root, children=[])
@@ -2497,6 +2693,7 @@ def scan_videos(
                 on_walk_error=on_walk_error,
                 on_heartbeat=_scan_heartbeat,
                 on_steal=_scan_steal,
+                on_observed=_record_dir,
             )
             _pool_emit(
                 "INFO",
@@ -2510,7 +2707,8 @@ def scan_videos(
                 directories=int(scan_counts.get("directories_scanned", 0) or 0),
                 found=len(found),
             )
-        found = collapse_segment_sets(found)
+        if not usn_hit:
+            found = collapse_segment_sets(found)
 
     # --- 计时：主循环结束 ---
     _walk_end_ms = (time.perf_counter() - scan_started) * 1000.0
@@ -2600,13 +2798,43 @@ def scan_videos(
             log(f"[增量] 合集/条目继承旧元数据 {adopted} 个")
 
     # Safety net: drop rows whose files vanished (folder-key mismatches, etc.).
-    found = prune_missing_catalog_items(found, root, log_tag="扫描")
+    if not usn_hit:
+        found = prune_missing_catalog_items(found, root, log_tag="扫描")
 
     output_reused, output_changed = _final_scan_change_counts(
         found,
         old_by_id,
         incremental=incremental,
     )
+    catalog_unchanged = bool(
+        incremental
+        and not errors
+        and target_folders is None
+        and previous_catalog_n > 0
+        and len(found) == previous_catalog_n
+        and output_changed == 0
+    )
+
+    def _memory_matches_found() -> bool:
+        if not found:
+            return False
+        root_key = root_s.casefold().rstrip("\\/")
+        n = 0
+        for video in STATE.get("videos") or []:
+            tagged = str(video.get("_lib_root") or video.get("root") or "")
+            tagged = tagged.rstrip("\\/").casefold()
+            if tagged == root_key:
+                n += 1
+        return n == len(found)
+
+    skip_republish = catalog_unchanged and _memory_matches_found()
+    if dir_snap is not None and getattr(dir_snap, "dirty", False) and not errors:
+        dir_snap.save(cache, root)
+        log(
+            f"[扫描] 目录快照已更新  dirs={len(dir_snap.dirs)}  hits={dir_snap.hits}"
+        )
+    elif dir_snap is not None and dir_snap.hits:
+        log(f"[扫描] 目录快照命中 {dir_snap.hits} 个目录，未改写快照")
 
     _post_t0 = time.perf_counter()
     found.sort(key=lambda x: (x.get("rel") or "").lower())
@@ -2634,25 +2862,30 @@ def scan_videos(
     )
     STATE["scan_live"] = found
 
-    _store_t0 = time.perf_counter()
-    try:
-        store_live_library(root_s, found)
-    except Exception as _exc:
-        log(f"[扫描] 最终 store_live_library 失败: {_exc}")
-    _store_final_ms = (time.perf_counter() - _store_t0) * 1000.0
+    _store_final_ms = 0.0
+    _tree_ms = 0.0
+    if skip_republish:
+        log("[扫描] 目录与内存片库一致，跳过实时发布与统一合并")
+    else:
+        _store_t0 = time.perf_counter()
+        try:
+            store_live_library(root_s, found)
+        except Exception as _exc:
+            log(f"[扫描] 最终 store_live_library 失败: {_exc}")
+        _store_final_ms = (time.perf_counter() - _store_t0) * 1000.0
 
-    _tree_t0 = time.perf_counter()
-    try:
-        from vg.roots import get_mounted_roots, tree_for_scope
+        _tree_t0 = time.perf_counter()
+        try:
+            from vg.roots import get_mounted_roots, tree_for_scope
 
-        if len(get_mounted_roots()) > 1:
-            STATE["tree"] = tree_for_scope(None)
-        else:
+            if len(get_mounted_roots()) > 1:
+                STATE["tree"] = tree_for_scope(None)
+            else:
+                STATE["tree"] = build_tree(root, found)
+        except Exception as _exc:
+            log(f"[扫描] tree_for_scope(最终) 失败，回退 build_tree: {_exc}")
             STATE["tree"] = build_tree(root, found)
-    except Exception as _exc:
-        log(f"[扫描] tree_for_scope(最终) 失败，回退 build_tree: {_exc}")
-        STATE["tree"] = build_tree(root, found)
-    _tree_ms = (time.perf_counter() - _tree_t0) * 1000.0
+        _tree_ms = (time.perf_counter() - _tree_t0) * 1000.0
     log(f"[计时] 后处理: sort={_sort_ms:.1f}ms, stamp_lib_meta={_stamp_ms:.1f}ms, "
         f"store_live={_store_final_ms:.1f}ms, build_tree={_tree_ms:.1f}ms")
 
@@ -2666,7 +2899,9 @@ def scan_videos(
         log(f"[扫描] 检测多根失败，按单根处理: {_exc}")
         multi = False
 
-    if multi:
+    if skip_republish:
+        pass
+    elif multi:
         # Leave other disks intact; unified publish happens after save_index.
         pass
     else:
@@ -2722,29 +2957,43 @@ def scan_videos(
     if shrink_blocked:
         _save_ok = True
         log(f"[计时] save_index: skipped_shrink_guard, 视频={len(found)}, ok=True")
+    elif catalog_unchanged:
+        _save_ok = True
+        log(f"[计时] save_index: skipped_unchanged, 视频={len(found)}, ok=True")
+        emit(
+            "INFO",
+            "scan_catalog_write_skipped",
+            force=True,
+            root=root,
+            videos=len(found),
+            reason="no_add_delete_or_mtime_change",
+        )
     else:
         _save_ok = save_index(cache, root, found, file_count=saved_n, folder_counts=saved_counts)
         _save_ms = (time.perf_counter() - _save_t0) * 1000.0
         if not _save_ok:
             log(f"[扫描] save_index 返回失败！缓存可能未持久化，下次启动将重新扫描")
         log(f"[计时] save_index: {_save_ms:.1f}ms, 视频={len(found)}, ok={_save_ok}")
-    try:
-        sync_disk_lib_memory(root_s, found)
-    except Exception as e:
-        log(f"[扫描] 同步内存索引失败: {e}")
-    save_prefs(last_root=str(root))
-    try:
-        from vg.roots import on_scan_finished
+    if skip_republish:
+        log("[扫描] 无变化，跳过统一片库发布")
+    else:
+        try:
+            sync_disk_lib_memory(root_s, found)
+        except Exception as e:
+            log(f"[扫描] 同步内存索引失败: {e}")
+        save_prefs(last_root=str(root))
+        try:
+            from vg.roots import on_scan_finished
 
-        on_scan_finished(root)
-        log(
-            f"[扫描] 目录索引已发布到网页：{root_s}，{len(found)} 个；"
-            "预览图和元数据后台处理不阻塞目录浏览"
-        )
-    except Exception as e:
-        log(f"[多根] 扫描收尾失败: {e}")
-        if not multi:
-            rebuild_indexes(found)
+            on_scan_finished(root)
+            log(
+                f"[扫描] 目录索引已发布到网页：{root_s}，{len(found)} 个；"
+                "预览图和元数据后台处理不阻塞目录浏览"
+            )
+        except Exception as e:
+            log(f"[多根] 扫描收尾失败: {e}")
+            if not multi:
+                rebuild_indexes(found)
 
     if do_thumbs and ffmpeg and found:
         fill_thumbs_for_videos(

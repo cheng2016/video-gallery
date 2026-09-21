@@ -26,6 +26,7 @@ import re
 import sys
 import atexit
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +94,7 @@ def _read_last_index(d: Path) -> int:
     best = -1
     latest_idx: int | None = None
     scanned_matches = 0
+    scan_started = time.perf_counter()
     latest = d / "latest.txt"
     if latest.is_file():
         try:
@@ -129,7 +131,8 @@ def _read_last_index(d: Path) -> int:
     )
     print(
         f"[bootlog:index_scan] log_dir={d} latest_index={latest_idx} "
-        f"disk_indexed_matches={scanned_matches} best={best} next={best + 1}",
+        f"disk_indexed_matches={scanned_matches} best={best} next={best + 1} "
+        f"elapsed_ms={(time.perf_counter() - scan_started) * 1000.0:.1f}",
         flush=True,
     )
     return best
@@ -299,6 +302,7 @@ def init(reset: bool = False) -> Path:
     session ========）重新写入一遍，方便在日志里看到"这是启动阶段的头"。
     """
     global _INIT, _LOG_PATH, _PATH_STAMP, _LATEST_COMMITTED
+    init_started = time.perf_counter()
     if _INIT and _LOG_PATH is not None and not reset:
         # 注意：多次 init(reset=False) 不再重写 latest.txt。
         # latest.txt 只能由显式的 commit_latest_pointer() 写入，
@@ -321,10 +325,14 @@ def init(reset: bool = False) -> Path:
             f"[bootlog:logs_dir_created] path={d} fallback=cwd"
         )
     # 迁移老 startup.log（如果存在）
+    migrate_started = time.perf_counter()
     _migrate_legacy_log()
+    migrate_ms = (time.perf_counter() - migrate_started) * 1000.0
     # 为本会话确定路径 —— 注意这一步使用 _PATH_STAMP 缓存，和早于 init()
     # 的 log_path() / write() 调用链上的值完全一致，不会生成两文件。
+    path_started = time.perf_counter()
     session_path = _determine_session_path(d)
+    path_ms = (time.perf_counter() - path_started) * 1000.0
     _LOG_PATH = session_path
     current_index = _extract_index_from_name(_LOG_PATH.name)
     _PENDING_DIAG.append(
@@ -345,7 +353,9 @@ def init(reset: bool = False) -> Path:
             f.write("")
     except Exception:
         pass
+    prune_started = time.perf_counter()
     _prune_old_logs()
+    prune_ms = (time.perf_counter() - prune_started) * 1000.0
     _INIT = True
     _ensure_flush_thread()
     write("", urgent=True)
@@ -384,6 +394,11 @@ def init(reset: bool = False) -> Path:
         write(f"_MEIPASS={meipass!r}", urgent=True)
         internal = Path(sys.executable).resolve().parent / "_internal"
         write(f"_internal_exists={internal.is_dir()}", urgent=True)
+    print(
+        f"[bootlog:init_done] elapsed_ms={(time.perf_counter() - init_started) * 1000.0:.1f} "
+        f"migrate_ms={migrate_ms:.1f} path_ms={path_ms:.1f} prune_ms={prune_ms:.1f}",
+        flush=True,
+    )
     return _LOG_PATH
 
 

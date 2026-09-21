@@ -29,6 +29,12 @@ _db_locks_guard = threading.Lock()
 _db_locks: dict[str, threading.RLock] = {}
 _schema_ready: set[str] = set()
 _schema_ready_lock = threading.Lock()
+# (cache_key, category, search) -> (catalog_mtime, rows). Avoids re-reading
+# thousands of facet rows on every offset=0 /api/videos (bench WARN
+# api_videos_sql_facet_rows_load_slow at 0.5–4s under lock contention).
+_facet_rows_memo: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
+_facet_rows_memo_lock = threading.Lock()
+_FACET_ROWS_MEMO_MAX = 32
 
 
 def catalog_db_path(cache: Path | None) -> Path | None:
@@ -557,9 +563,11 @@ def load_catalog_videos(
                             item["_q"] = search_text
                             restored_search_text += 1
                         out.append(item)
+                built_ms = (time.perf_counter() - started) * 1000.0
+                emit_started = time.perf_counter()
                 perf(
                     "catalog_load_all",
-                    (time.perf_counter() - started) * 1000.0,
+                    built_ms,
                     force=True,
                     cache=cache,
                     rows=len(out),
@@ -567,6 +575,13 @@ def load_catalog_videos(
                     search_text_restored=restored_search_text,
                     search_text_missing=max(0, len(out) - restored_search_text),
                 )
+                emit_ms = (time.perf_counter() - emit_started) * 1000.0
+                if emit_ms >= 20.0:
+                    print(
+                        f"[PERF] catalog_load_emit_overhead elapsed_ms={emit_ms:.1f} "
+                        f"decode_ms={built_ms:.1f} rows={len(out)} cache={cache}",
+                        flush=True,
+                    )
                 return out
             finally:
                 conn.close()
@@ -833,17 +848,41 @@ def load_catalog_facet_rows(
             category=_norm_rel(category) or "all",
         )
         return []
+    category_n = _norm_rel(category)
+    search_n = str(search or "")
+    try:
+        cache_key = str(Path(cache).resolve()).casefold()
+    except OSError:
+        cache_key = str(cache).casefold()
+    mtime = float(catalog_mtime(cache) or 0.0)
+    memo_key = (cache_key, category_n, search_n.casefold())
+    with _facet_rows_memo_lock:
+        hit = _facet_rows_memo.get(memo_key)
+        if hit is not None and hit[0] == mtime:
+            try:
+                from vg.diagnostics import perf
+
+                perf(
+                    "sqlite_query_facets_memo_hit",
+                    0.0,
+                    cache=cache,
+                    source_rows=len(hit[1]),
+                    category=category_n or "all",
+                )
+            except Exception:
+                pass
+            return hit[1]
+
     clauses: list[str] = []
     params: list[object] = []
-    category_n = _norm_rel(category)
     if category_n == "__root__":
         clauses.append("category=''")
     elif category_n:
         clauses.append("category=?")
         params.append(category_n)
-    if search:
+    if search_n:
         clauses.append("search_text LIKE ?")
-        params.append("%" + search.casefold() + "%")
+        params.append("%" + search_n.casefold() + "%")
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     started = time.perf_counter()
     from vg.diagnostics import timed_lock
@@ -893,12 +932,60 @@ def load_catalog_facet_rows(
         (time.perf_counter() - started) * 1000.0,
         cache=cache,
         source_rows=len(rows),
-        category=category_n or "all",
-        search=bool(search),
-        query_ms=f"{(time.perf_counter() - started) * 1000.0:.1f}",
-        build_ms="0.0",
     )
+    with _facet_rows_memo_lock:
+        _facet_rows_memo[memo_key] = (mtime, rows)
+        if len(_facet_rows_memo) > _FACET_ROWS_MEMO_MAX:
+            # Drop an arbitrary old entry; mtime mismatch already self-heals.
+            _facet_rows_memo.pop(next(iter(_facet_rows_memo)), None)
     return rows
+
+
+def catalog_folder_has_child_folders(cache: Path, folder: str) -> bool:
+    """True when any row lives strictly under ``folder/`` (cheap EXISTS).
+
+    Used for include_descendants decisions without loading every facet row
+    (bench: ``api_videos_sql_include_descendants_probe_slow`` at 0.4–2s).
+    """
+    folder_n = _norm_rel(folder)
+    if not folder_n or not catalog_exists(cache):
+        return False
+    prefix = folder_n + "/"
+    glob_prefix = (
+        prefix.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]") + "*"
+    )
+    started = time.perf_counter()
+    from vg.diagnostics import timed_lock
+
+    row = None
+    with timed_lock(_lock_for(cache), "sqlite_folder_has_children", cache=cache):
+        try:
+            conn = _connect(cache)
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM videos WHERE folder GLOB ? LIMIT 1",
+                    (glob_prefix,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            from vg.diagnostics import error
+
+            error("sqlite_folder_has_children_failed", exc, cache=cache, folder=folder_n)
+            return False
+    try:
+        from vg.diagnostics import perf
+
+        perf(
+            "sqlite_folder_has_children",
+            (time.perf_counter() - started) * 1000.0,
+            cache=cache,
+            folder=folder_n,
+            hit=bool(row),
+        )
+    except Exception:
+        pass
+    return bool(row)
 
 
 def facets_from_rows(

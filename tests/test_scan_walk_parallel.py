@@ -22,8 +22,18 @@ class ScanWalkParallelTests(unittest.TestCase):
             folder = self.root / name
             folder.mkdir()
             (folder / f"{name}.mp4").write_bytes(b"x" * 200_000)
-        self._old = {key: STATE.get(key) for key in ("cache_dir", "ffmpeg", "videos", "scanning")}
-        STATE.update({"cache_dir": self.cache, "ffmpeg": None, "videos": [], "scanning": False})
+        self._old = {
+            key: STATE.get(key)
+            for key in ("cache_dir", "ffmpeg", "videos", "scanning", "disk_libs", "mounted_roots")
+        }
+        STATE.update({
+            "cache_dir": self.cache,
+            "ffmpeg": None,
+            "videos": [],
+            "scanning": False,
+            "disk_libs": {},
+            "mounted_roots": [],
+        })
 
     def tearDown(self) -> None:
         STATE.update(self._old)
@@ -117,6 +127,26 @@ class ScanWalkParallelTests(unittest.TestCase):
             capped_labels,
         )
         self.assertTrue(shallow or shallow_capped)
+
+    def test_incremental_rescan_skips_sqlite_when_tree_unchanged(self) -> None:
+        saves: list[int] = []
+        real_save = __import__("vg.scan", fromlist=["save_index"]).save_index
+
+        def _counting_save(*args, **kwargs):
+            saves.append(1)
+            return real_save(*args, **kwargs)
+
+        with mock.patch("vg.scan.save_index", side_effect=_counting_save):
+            scan_videos(self.root, do_thumbs=False, incremental=False, quiet=True)
+            self.assertGreaterEqual(len(saves), 1)
+            before = len(saves)
+            scan_videos(self.root, do_thumbs=False, incremental=True, quiet=True)
+            self.assertEqual(len(saves), before)
+            self.assertEqual(self._names(), {"alpha", "beta", "gamma"})
+            (self.root / "alpha" / "extra.mp4").write_bytes(b"y" * 200_000)
+            scan_videos(self.root, do_thumbs=False, incremental=True, quiet=True)
+            self.assertGreater(len(saves), before)
+            self.assertIn("extra", self._names())
 
     def test_steal_walk_finds_videos_in_deep_fat_tree(self) -> None:
         work = self.root / "work" / "layer1" / "layer2"
