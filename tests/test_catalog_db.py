@@ -14,6 +14,7 @@ from vg.catalog_db import (
     load_catalog_facet_rows,
     load_catalog_videos,
     catalog_mtime,
+    catalog_structure_mtime,
     query_catalog_facets,
     query_catalog_page,
     read_catalog_counts,
@@ -111,6 +112,25 @@ class CatalogDbTests(unittest.TestCase):
         self.assertEqual(len(by_rel), 2)
         self.assertEqual(by_rel["a.mp4"]["duration"], 12.5)
         self.assertEqual(by_rel["b.mp4"]["id"], "bbbbbbbbbbbbbbbb")
+
+    def test_probe_upsert_does_not_change_structure_mtime(self) -> None:
+        root = self.base / "struct-lib"
+        cache = self.base / "struct-cache"
+        root.mkdir()
+        item = self._item(vid="s" * 16, rel="clip.mp4")
+        self.assertTrue(save_catalog(cache, root, [item], file_count=1, folder_counts={"": 1}))
+        structure_before = catalog_structure_mtime(cache)
+        file_before = catalog_mtime(cache)
+        self.assertGreater(structure_before, 0.0)
+
+        item["duration"] = 12.0
+        item["probe_duration_done"] = True
+        item["width"] = 1280
+        item["genres_ver"] = 1
+        self.assertEqual(upsert_catalog_videos(cache, root, [item], allow_insert=False), 1)
+
+        self.assertEqual(catalog_structure_mtime(cache), structure_before)
+        self.assertGreaterEqual(catalog_mtime(cache), file_before)
 
     def test_upsert_repairs_zero_byte_catalog_after_cached_schema_hint(self) -> None:
         root = self.base / "lib"

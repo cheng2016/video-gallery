@@ -110,33 +110,51 @@ class MetadataSettingsTests(unittest.TestCase):
             self.assertNotIn("duration", item)
             self.assertNotIn("probe_duration_done", item)
 
-    def test_info_endpoint_does_not_probe_when_settings_are_off(self) -> None:
-        item = {
-            "id": "video-id",
-            "name": "video",
-            "filename": "video.mp4",
-            "rel": "video.mp4",
-            "ext": ".mp4",
-            "size": 1000,
-        }
-        old_ffmpeg = STATE.get("ffmpeg")
-        STATE["ffmpeg"] = "ffmpeg"
-        try:
-            with (
-                mock.patch.object(web, "find_video_by_id", return_value=item),
-                mock.patch.object(web, "probe_duration_enabled", return_value=False),
-                mock.patch.object(web, "probe_audio_enabled", return_value=False),
-                mock.patch.object(web, "probe_media_info") as probe,
-                mock.patch.object(web, "schedule_player_video_meta_probe", return_value=True) as scheduled,
-                mock.patch.object(web, "_local_path_for_item", return_value=None),
-            ):
-                response = web.app.test_client().get("/api/info/video-id")
-            self.assertEqual(response.status_code, 200)
-            probe.assert_not_called()
-            scheduled.assert_called_once()
-            self.assertTrue(response.get_json().get("probe_pending"))
-        finally:
-            STATE["ffmpeg"] = old_ffmpeg
+    def test_info_endpoint_probes_all_when_settings_are_off(self) -> None:
+        with TemporaryDirectory() as td:
+            path = Path(td) / "video.mp4"
+            path.write_bytes(b"video")
+            item = {
+                "id": "video-id",
+                "name": "video",
+                "filename": "video.mp4",
+                "rel": "video.mp4",
+                "ext": ".mp4",
+                "size": 1000,
+            }
+            old_ffmpeg = STATE.get("ffmpeg")
+            STATE["ffmpeg"] = "ffmpeg"
+            try:
+                with (
+                    mock.patch.object(web, "find_video_by_id", return_value=item),
+                    mock.patch.object(web, "_item_probe_path", return_value=path),
+                    mock.patch.object(
+                        web,
+                        "probe_media_info",
+                        return_value={
+                            "ok": True,
+                            "duration": 9.0,
+                            "audio_codec": "aac",
+                            "width": 1280,
+                            "height": 720,
+                            "fps": 30.0,
+                            "video_codec": "h264",
+                        },
+                    ) as probe,
+                    mock.patch.object(web, "save_library_item"),
+                    mock.patch.object(web, "_local_path_for_item", return_value=None),
+                ):
+                    response = web.app.test_client().get("/api/info/video-id")
+                self.assertEqual(response.status_code, 200)
+                probe.assert_called_once_with(
+                    "ffmpeg",
+                    path,
+                    include_duration=True,
+                    include_audio=True,
+                    include_video_meta=True,
+                )
+            finally:
+                STATE["ffmpeg"] = old_ffmpeg
 
     def test_info_endpoint_requests_only_enabled_duration(self) -> None:
         with TemporaryDirectory() as td:
@@ -155,8 +173,6 @@ class MetadataSettingsTests(unittest.TestCase):
             try:
                 with (
                     mock.patch.object(web, "find_video_by_id", return_value=item),
-                    mock.patch.object(web, "probe_duration_enabled", return_value=True),
-                    mock.patch.object(web, "probe_audio_enabled", return_value=False),
                     mock.patch.object(web, "_item_probe_path", return_value=path),
                     mock.patch.object(
                         web,
@@ -164,7 +180,6 @@ class MetadataSettingsTests(unittest.TestCase):
                         return_value={"ok": True, "duration": 9.0},
                     ) as probe,
                     mock.patch.object(web, "save_library_item"),
-                    mock.patch.object(web, "schedule_player_video_meta_probe", return_value=True),
                     mock.patch.object(web, "_local_path_for_item", return_value=None),
                 ):
                     response = web.app.test_client().get("/api/info/video-id")
@@ -173,16 +188,16 @@ class MetadataSettingsTests(unittest.TestCase):
                     "ffmpeg",
                     path,
                     include_duration=True,
-                    include_audio=False,
-                    include_video_meta=False,
+                    include_audio=True,
+                    include_video_meta=True,
                 )
                 self.assertEqual(response.get_json()["duration"], 9.0)
                 self.assertTrue(item["probe_duration_done"])
-                self.assertNotIn("probe_audio_done", item)
+                self.assertTrue(item["probe_audio_done"])
             finally:
                 STATE["ffmpeg"] = old_ffmpeg
 
-    def test_info_endpoint_skips_probe_when_duration_already_cached(self) -> None:
+    def test_info_endpoint_skips_probe_when_media_info_cached(self) -> None:
         item = {
             "id": "video-id",
             "name": "video",
@@ -192,22 +207,30 @@ class MetadataSettingsTests(unittest.TestCase):
             "size": 200 * 1024,
             "duration": 42.0,
             "duration_h": "0:42",
+            "probe_duration_done": True,
+            "audio_codec": "aac",
+            "probe_audio_done": True,
+            "width": 1920,
+            "height": 1080,
+            "fps": 24.0,
+            "video_codec": "h264",
+            "probe_video_meta_done": True,
         }
         old_ffmpeg = STATE.get("ffmpeg")
         STATE["ffmpeg"] = "ffmpeg"
         try:
             with (
                 mock.patch.object(web, "find_video_by_id", return_value=item),
-                mock.patch.object(web, "probe_duration_enabled", return_value=True),
-                mock.patch.object(web, "probe_audio_enabled", return_value=False),
                 mock.patch.object(web, "probe_media_info") as probe,
-                mock.patch.object(web, "schedule_player_video_meta_probe", return_value=True),
                 mock.patch.object(web, "_local_path_for_item", return_value=None),
             ):
                 response = web.app.test_client().get("/api/info/video-id")
             self.assertEqual(response.status_code, 200)
             probe.assert_not_called()
-            self.assertEqual(response.get_json()["duration"], 42.0)
+            body = response.get_json()
+            self.assertEqual(body["duration"], 42.0)
+            self.assertEqual(body["video_codec"], "h264")
+            self.assertEqual(body["audio_codec"], "aac")
         finally:
             STATE["ffmpeg"] = old_ffmpeg
 

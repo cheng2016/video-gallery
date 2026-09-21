@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from vg.media import (
+    _probe_log_tag,
     classify_high_fps,
     fps_can_halve_to_30,
     fps_gate_reason,
@@ -89,6 +90,21 @@ class FpsHelpersTests(unittest.TestCase):
         )
 
 
+class ProbeLogTagTests(unittest.TestCase):
+    def test_prefix_matches_requested_dimensions(self) -> None:
+        self.assertEqual(_probe_log_tag(include_audio=True), "[音轨探测]")
+        self.assertEqual(_probe_log_tag(include_duration=True), "[时长探测]")
+        self.assertEqual(
+            _probe_log_tag(include_duration=True, include_audio=True),
+            "[元数据探测]",
+        )
+        self.assertEqual(_probe_log_tag(include_video_meta=True), "[帧率探测]")
+        self.assertEqual(
+            _probe_log_tag(include_video_meta=True, include_audio=True),
+            "[媒体探测]",
+        )
+
+
 class ProbeVideoMetaFlagTests(unittest.TestCase):
     def test_bulk_probe_does_not_request_video_meta_by_default(self) -> None:
         with mock.patch("vg.media._ffprobe_path", return_value="ffprobe"), mock.patch(
@@ -104,6 +120,38 @@ class ProbeVideoMetaFlagTests(unittest.TestCase):
             joined = " ".join(cmd)
             self.assertNotIn("width", joined)
             self.assertNotIn("r_frame_rate", joined)
+
+    def test_combined_probe_requests_picture_and_codecs(self) -> None:
+        with mock.patch("vg.media._ffprobe_path", return_value="ffprobe"), mock.patch(
+            "vg.media.subprocess.run"
+        ) as run, mock.patch.object(Path, "is_file", return_value=True):
+            run.return_value = mock.Mock(
+                returncode=0,
+                stdout=(
+                    '{"streams":['
+                    '{"codec_type":"video","codec_name":"hevc","width":1920,"height":1080,'
+                    '"r_frame_rate":"30/1","avg_frame_rate":"30/1"},'
+                    '{"codec_type":"audio","codec_name":"aac"}'
+                    '],"format":{"duration":"12.5"}}'
+                ),
+                stderr="",
+            )
+            info = probe_media_info(
+                "ffmpeg",
+                Path("x.mp4"),
+                include_duration=True,
+                include_audio=True,
+                include_video_meta=True,
+            )
+            cmd = " ".join(run.call_args.args[0])
+            self.assertIn("width", cmd)
+            self.assertIn("codec_name", cmd)
+            self.assertIn("format=duration", cmd)
+            self.assertEqual(info.get("duration"), 12.5)
+            self.assertEqual(info.get("width"), 1920)
+            self.assertEqual(info.get("fps"), 30.0)
+            self.assertEqual(info.get("video_codec"), "hevc")
+            self.assertEqual(info.get("audio_codec"), "aac")
 
     def test_player_probe_can_request_video_meta(self) -> None:
         with mock.patch("vg.media._ffprobe_path", return_value="ffprobe"), mock.patch(
@@ -246,7 +294,7 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
         probe.assert_called_once_with(
             "ffmpeg",
             fake_path,
-            include_duration=False,
+            include_duration=True,
             include_audio=True,
             include_video_meta=True,
         )

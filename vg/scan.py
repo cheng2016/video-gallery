@@ -40,7 +40,7 @@ from vg.disk_libs import (
     sync_disk_lib_memory,
 )
 from vg.drives import save_prefs
-from vg.genres import detect_genres, ensure_video_genres
+from vg.genres import ensure_video_genres
 from vg.segments import collapse_segment_sets
 from vg import state as runtime_state
 from vg.state import STATE, release_scan_lock, scan_lock_status, try_acquire_scan_lock
@@ -2338,7 +2338,6 @@ def scan_videos(
                 "duration_h": "",
                 "thumb": f"{vid}{THUMB_EXT}",
                 "has_thumb": False,
-                "genres": detect_genres(rel, full.stem),
             }
             if ext in PLAYLIST_EXTS:
                 item["kind"] = "m3u8"
@@ -2347,6 +2346,7 @@ def scan_videos(
         item["root"] = root_s
         item["_lib_root"] = root_s
         ensure_video_taxonomy(item)
+        ensure_video_genres(item)
         if cache:
             item["_lib_cache"] = str(cache)
         item["_folder_raw"] = folder

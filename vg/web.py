@@ -79,13 +79,13 @@ from vg.http_helpers import filter_videos_by_scope, resolve_local_path
 from vg.lan_service import lan_urls
 from vg.privacy import (
     privacy_snapshot,
-    probe_audio_enabled,
-    probe_duration_enabled,
 )
 from vg.media import (
     _apply_probe_to_item,
+    _audio_already_known,
+    _duration_already_known,
     _item_probe_path,
-    _needs_metadata_probe,
+    _player_video_meta_done,
     _video_file_for_thumb,
     classify_high_fps,
     fps_can_halve_to_30,
@@ -97,8 +97,6 @@ from vg.media import (
     player_video_meta_pending,
     probe_media_info,
     save_thumbnail_jpeg,
-    schedule_player_video_meta_probe,
-    wants_player_video_meta,
 )
 from vg.roots import (
     filter_videos_by_lib,
@@ -3640,59 +3638,52 @@ def api_info(vid: str):
         abort(404)
     # Refresh has_thumb from disk/.vgt — catalog rows can lag behind bulk fill.
     attach_thumb_meta(item)
-    # Only lazily probe metadata dimensions explicitly enabled in Settings.
-    # Skip if duration/audio is already in the index from a previous session.
-    want_duration = probe_duration_enabled()
-    want_audio = probe_audio_enabled()
+    # Player open always fills missing duration, audio codec, resolution, fps
+    # and video codec in one ffprobe. Settings switches only gate bulk scan.
+    # A complete catalog row is not probed again.
     kind = item.get("kind") or ""
     ext = (item.get("ext") or "").lower()
-    # Resolution/fps/codec are probed in a background thread on player open.
     stream_like = kind in ("m3u8", "ts_set") or ext == ".m3u8"
-    want_video_meta = wants_player_video_meta(item, stream_like=stream_like)
-    need_duration = bool(STATE.get("ffmpeg")) and want_duration and _needs_metadata_probe(
-        item, want_duration=True, want_audio=False
+    inc_duration = not _duration_already_known(item)
+    inc_audio = not _audio_already_known(item)
+    inc_video = (not stream_like) and not _player_video_meta_done(item)
+    need_sync = bool(STATE.get("ffmpeg")) and not item.get("bad") and (
+        inc_duration or inc_audio or inc_video
     )
-    need_audio = bool(STATE.get("ffmpeg")) and want_audio and _needs_metadata_probe(
-        item, want_duration=False, want_audio=True
-    )
-    need_video_meta = bool(STATE.get("ffmpeg")) and want_video_meta
-    # Duration/audio stay on-request (settings-gated). Video meta never blocks this handler.
-    need_probe = need_duration or need_audio
     metadata_changed = False
     probe_pending = False
-    if need_probe:
+    if need_sync:
         path = _item_probe_path(item)
         log(
-            f"[帧率探测] 打开播放页(同步时长/声音) vid={vid} "
-            f"need_duration={need_duration} need_audio={need_audio} "
-            f"path={path} exists={bool(path and path.is_file())}"
+            f"[媒体探测] 打开播放页 vid={vid} "
+            f"duration={int(inc_duration)} audio={int(inc_audio)} "
+            f"video={int(inc_video)} path={path} "
+            f"exists={bool(path and path.is_file())}"
         )
         if path and path.is_file() and path.suffix.lower() != ".m3u8":
             info = probe_media_info(
                 STATE["ffmpeg"],
                 path,
-                include_duration=need_duration,
-                include_audio=need_audio,
-                include_video_meta=False,
+                include_duration=inc_duration,
+                include_audio=inc_audio,
+                include_video_meta=inc_video,
             )
             _apply_probe_to_item(
                 item,
                 info,
-                include_duration=need_duration,
-                include_audio=need_audio,
-                include_video_meta=False,
+                include_duration=inc_duration,
+                include_audio=inc_audio,
+                include_video_meta=inc_video,
             )
             metadata_changed = True
         elif not path or not path.is_file():
             if not stream_like:
                 item["probe_ver"] = PROBE_META_VER
-                if need_duration:
-                    item["probe_duration_done"] = True
-                if need_audio:
-                    item["probe_audio_done"] = True
+                item["probe_duration_done"] = True
+                item["probe_audio_done"] = True
                 item["bad"] = True
                 item["bad_reason"] = "文件不存在"
-                log(f"[帧率探测] 源文件不存在 vid={vid} path={path}")
+                log(f"[媒体探测] 源文件不存在 vid={vid} path={path}")
                 diagnostic_emit(
                     "WARN",
                     "video_marked_bad",
@@ -3704,30 +3695,18 @@ def api_info(vid: str):
                     operation_id=getattr(g, "_diag_operation_id", ""),
                 )
                 metadata_changed = True
-    if need_video_meta:
-        started_bg = schedule_player_video_meta_probe(
-            vid, prefer_root or item.get("_lib_root") or item.get("root"), STATE["ffmpeg"]
-        )
-        probe_pending = True
-        log(
-            f"[帧率探测] 已交后台线程 vid={vid} started={started_bg} "
-            f"cached={item.get('width')}x{item.get('height')}@{item.get('fps')} "
-            f"vcodec={item.get('video_codec') or '-'} "
-            f"acodec={item.get('audio_codec') or '-'}"
-        )
-    elif want_video_meta and not STATE.get("ffmpeg"):
-        log(f"[帧率探测] 跳过：未找到 ffmpeg vid={vid}")
+    elif not STATE.get("ffmpeg") and (inc_duration or inc_audio or inc_video):
+        log(f"[媒体探测] 跳过：未找到 ffmpeg vid={vid}")
     elif player_video_meta_pending(vid, prefer_root or item.get("_lib_root") or item.get("root")):
         probe_pending = True
-        log(f"[帧率探测] 后台进行中 vid={vid}")
+        log(f"[媒体探测] 后台进行中 vid={vid}")
     else:
         log(
-            f"[帧率探测] 使用缓存 vid={vid} "
+            f"[媒体探测] 使用缓存 vid={vid} "
             f"{item.get('width')}x{item.get('height')}@{item.get('fps')} "
             f"vcodec={item.get('video_codec') or '-'} "
             f"acodec={item.get('audio_codec') or '-'} "
-            f"done={bool(item.get('probe_video_meta_done'))} "
-            f"audio_done={bool(item.get('probe_audio_done'))}"
+            f"duration={item.get('duration')}"
         )
     if metadata_changed:
         try:
@@ -3845,7 +3824,7 @@ def api_info(vid: str):
         thumb_id=item.get("thumb_id") or thumb_id_for_item(item),
         browser_ok=payload["browser_ok"],
         browser_hard=payload["browser_hard"],
-        need_probe=need_probe,
+        need_probe=need_sync,
         metadata_changed=metadata_changed,
         probe_pending=probe_pending,
         video_codec=payload.get("video_codec") or "",

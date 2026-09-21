@@ -198,6 +198,26 @@ def fps_gate_reason(
     return "ok"
 
 
+def _probe_log_tag(
+    *,
+    include_duration: bool = False,
+    include_audio: bool = False,
+    include_video_meta: bool = False,
+) -> str:
+    """Log prefix for the actual ffprobe dimensions, not a catch-all."""
+    if include_video_meta and (include_duration or include_audio):
+        return "[媒体探测]"
+    if include_video_meta:
+        return "[帧率探测]"
+    if include_duration and include_audio:
+        return "[元数据探测]"
+    if include_duration:
+        return "[时长探测]"
+    if include_audio:
+        return "[音轨探测]"
+    return "[媒体探测]"
+
+
 def probe_media_info(
     ffmpeg: str,
     path: Path,
@@ -206,10 +226,11 @@ def probe_media_info(
     include_audio: bool = True,
     include_video_meta: bool = False,
 ) -> dict:
-    """ffprobe detection, limited to the metadata dimensions requested.
+    """Run one ffprobe for the requested dimensions.
 
-    ``include_video_meta`` (width/height/fps) is for on-demand playback use only;
-    bulk scan/probe paths must leave it False.
+    Duration, audio codec, and video width/height/fps/codec can be collected in
+    the same process. Callers that already decided to probe should request every
+    missing dimension together.
     """
     from vg.diagnostics import emit, error
 
@@ -318,14 +339,24 @@ def probe_media_info(
                 result["fps"] = round(fps, 3)
             result["video_codec"] = video_codec
             result["probe_video_meta_done"] = True
-        if include_video_meta or include_audio:
-            log(
-                f"[帧率探测] ffprobe ok path={path.name} "
-                f"{width or 0}x{height or 0}@"
-                f"{result.get('fps') if include_video_meta else '-'} "
-                f"vcodec={(video_codec or '-') if include_video_meta else '(skip)'} "
-                f"acodec={(audio_codec or '-') if include_audio else '(skip)'}"
-            )
+        if include_duration or include_audio or include_video_meta:
+            parts = [f"{_probe_log_tag(include_duration=include_duration, include_audio=include_audio, include_video_meta=include_video_meta)} ffprobe ok path={path.name}"]
+            if include_video_meta:
+                parts.append(
+                    f"{width or 0}x{height or 0}@"
+                    f"{result.get('fps') if result.get('fps') is not None else '-'} "
+                    f"vcodec={video_codec or '-'}"
+                )
+            else:
+                parts.append("video=(skip)")
+            if include_audio:
+                parts.append(f"acodec={audio_codec or '-'}")
+            else:
+                parts.append("audio=(skip)")
+            if include_duration:
+                dur = result.get("duration")
+                parts.append(f"duration={dur if dur else '-'}")
+            log(" ".join(parts))
         from vg.diagnostics import aggregate
 
         aggregate("media_probe_ok", (time.perf_counter() - started) * 1000.0)
@@ -679,10 +710,11 @@ def _apply_probe_to_item(
         if include_video_meta:
             # Failed on-demand fps probe: do NOT stick "done", so next open retries.
             item.pop("probe_video_meta_done", None)
-            log(
-                f"[帧率探测] 失败 vid={item.get('id') or ''} "
-                f"rel={item.get('rel') or ''} err={info.get('err') or 'unknown'}"
-            )
+        log(
+            f"{_probe_log_tag(include_duration=include_duration, include_audio=include_audio, include_video_meta=include_video_meta)} "
+            f"失败 vid={item.get('id') or ''} "
+            f"rel={item.get('rel') or ''} err={info.get('err') or 'unknown'}"
+        )
 
 
 def _item_probe_path(item: dict) -> Path | None:
@@ -754,15 +786,17 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
             log(f"[帧率探测] 后台跳过：未找到视频 vid={vid}")
             return
         path = _item_probe_path(item)
-        want_video = not _player_video_meta_done(item)
+        want_duration = not _duration_already_known(item)
         want_audio = not _audio_already_known(item)
+        want_video = not _player_video_meta_done(item)
         log(
-            f"[帧率探测] 后台开始 vid={vid} path={path} "
+            f"[媒体探测] 后台开始 vid={vid} path={path} "
             f"exists={bool(path and path.is_file())} "
-            f"want_video={int(want_video)} want_audio={int(want_audio)}"
+            f"want_duration={int(want_duration)} want_video={int(want_video)} "
+            f"want_audio={int(want_audio)}"
         )
-        if not want_video and not want_audio:
-            log(f"[帧率探测] 后台跳过：画面/音频均已缓存 vid={vid}")
+        if not want_duration and not want_video and not want_audio:
+            log(f"[媒体探测] 后台跳过：时长/画面/音轨均已缓存 vid={vid}")
             return
         if not path or not path.is_file() or path.suffix.lower() == ".m3u8":
             log(f"[帧率探测] 后台跳过：无实体文件 vid={vid} path={path}")
@@ -770,14 +804,14 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
         info = probe_media_info(
             ffmpeg,
             path,
-            include_duration=False,
+            include_duration=want_duration,
             include_audio=want_audio,
             include_video_meta=want_video,
         )
         _apply_probe_to_item(
             item,
             info,
-            include_duration=False,
+            include_duration=want_duration,
             include_audio=want_audio,
             include_video_meta=want_video,
         )
@@ -843,15 +877,21 @@ def _audio_already_known(item: dict) -> bool:
     return "audio_codec" in item
 
 
-def _probe_scope_label(*, want_duration: bool, want_audio: bool) -> str:
+def _probe_scope_label(
+    *,
+    want_duration: bool,
+    want_audio: bool,
+    want_video_meta: bool = False,
+) -> str:
     """Human-readable probe target for logs / UI progress."""
-    if want_duration and want_audio:
-        return "时长+声音"
+    parts: list[str] = []
     if want_duration:
-        return "时长"
+        parts.append("时长")
     if want_audio:
-        return "声音"
-    return "无"
+        parts.append("音轨")
+    if want_video_meta:
+        parts.append("画面/编码")
+    return "+".join(parts) if parts else "无"
 
 
 def _probe_cpu_label(workers: int) -> str:
@@ -1105,7 +1145,7 @@ def adopt_metadata_from_catalog(
 
 
 def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tuple[int, int]:
-    """并行 ffprobe：补时长 + 损坏标记。返回 (成功, 失败)。"""
+    """并行 ffprobe：一次补时长、音轨编码、分辨率/帧率/视频编码。返回 (成功, 失败)。"""
     ffmpeg = STATE.get("ffmpeg")
     if not items or not ffmpeg:
         return 0, 0
@@ -1113,9 +1153,17 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
     include_audio = probe_audio_enabled()
     if not include_duration and not include_audio:
         return 0, 0
+    # Same process also fills codecs + picture meta; extra JSON fields are cheap.
+    include_duration = True
+    include_audio = True
+    include_video_meta = True
     total = len(items)
     workers = meta_worker_count(total)
-    scope = _probe_scope_label(want_duration=include_duration, want_audio=include_audio)
+    scope = _probe_scope_label(
+        want_duration=include_duration,
+        want_audio=include_audio,
+        want_video_meta=include_video_meta,
+    )
     cpu = _probe_cpu_label(workers)
     STATE["meta_progress"] = f"{label}探测{scope} 0/{total}（{cpu}）…"
     log(f"[元数据] {label}探测{scope}：共 {total} 个，占用 {cpu}")
@@ -1161,12 +1209,14 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
             path,
             include_duration=include_duration,
             include_audio=include_audio,
+            include_video_meta=include_video_meta and not is_stream,
         )
         _apply_probe_to_item(
             item,
             info,
             include_duration=include_duration,
             include_audio=include_audio,
+            include_video_meta=include_video_meta and not is_stream,
         )
         return item, bool(info.get("ok")), name
 
@@ -1206,7 +1256,7 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
 
 
 def start_metadata_enrichment() -> None:
-    """后台补时长 / 损坏检测（不阻塞浏览）。"""
+    """后台一次补时长、音轨/视频编码和画面元数据（不阻塞浏览）。"""
     if not probe_duration_enabled() and not probe_audio_enabled():
         STATE["meta_progress"] = ""
         return

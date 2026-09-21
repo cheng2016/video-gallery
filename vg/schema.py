@@ -60,6 +60,7 @@ class VideoItem(TypedDict, total=False):
     probe_video_meta_done: bool
     audio_codec: str
     audio_hard: bool
+    video_codec: str
     width: int
     height: int
     fps: float

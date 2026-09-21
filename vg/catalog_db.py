@@ -16,10 +16,11 @@ from vg.util import _clear_path_attrs_windows, log
 
 CATALOG_DB_NAME = "catalog.sqlite"
 # Keep the folder-validation TTL marker outside ``catalog.sqlite``.  Updating
-# a SQLite meta row changes the DB mtime, which is part of the unified tree
-# cache signature and forced an otherwise unchanged tree cache to be rewritten
-# on the next restart.
+# a SQLite meta row changes the DB file mtime; the tree cache now keys off
+# ``structure_mtime`` (membership writes only) so probe UPSERTs do not drop
+# a still-valid folder tree. The marker stays out of sqlite anyway.
 CATALOG_VALIDATION_MARKER_NAME = "catalog_validation.marker"
+STRUCTURE_MTIME_META_KEY = "structure_mtime"
 # Search text now uses the same pinyin/actor-aware builder as the in-memory
 # query path.  Bump the DB schema so old rows are rebuilt once instead of
 # restoring the narrower legacy SQL search string as ``_q``.
@@ -182,6 +183,38 @@ def catalog_mtime(cache: Path | None) -> float:
         return path.stat().st_mtime if path.is_file() else 0.0
     except OSError:
         return 0.0
+
+
+def catalog_structure_mtime(cache: Path | None) -> float:
+    """Membership epoch for the tree/facets disk-cache signature.
+
+    Full ``save_catalog`` (scan add/delete/replace) bumps this. Probe UPSERT
+    only rewrites JSON fields and must not change it — otherwise a warm
+    start while ffprobe is still running treats the folder tree as stale
+    and reclassifies thousands of rows.
+    """
+    if not catalog_exists(cache):
+        return 0.0
+    with _db_guard(cache, "catalog_structure_mtime"):
+        try:
+            conn = _connect(cache)
+            try:
+                raw = _meta_get(conn, STRUCTURE_MTIME_META_KEY)
+                if raw:
+                    try:
+                        value = float(raw)
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    if value > 0.0:
+                        return value
+                file_mt = catalog_mtime(cache)
+                if file_mt > 0.0:
+                    _meta_set(conn, STRUCTURE_MTIME_META_KEY, f"{file_mt:.9f}")
+                return file_mt
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return catalog_mtime(cache)
 
 
 def catalog_exists(cache: Path | None) -> bool:
@@ -1208,6 +1241,7 @@ def save_catalog(
                     json.dumps(use_folders, ensure_ascii=False, separators=(",", ":")),
                 )
                 _meta_set(conn, "updated", datetime.now().isoformat())
+                _meta_set(conn, STRUCTURE_MTIME_META_KEY, f"{time.time():.9f}")
                 conn.execute("COMMIT")
                 from vg.diagnostics import note_catalog_db_op, perf
 
@@ -1264,6 +1298,14 @@ def upsert_catalog_videos(
                 now = time.time()
                 changed = 0
                 conn.execute("BEGIN IMMEDIATE")
+                if not _meta_get(conn, STRUCTURE_MTIME_META_KEY):
+                    file_mt = catalog_mtime(cache)
+                    if file_mt > 0.0:
+                        _meta_set(
+                            conn,
+                            STRUCTURE_MTIME_META_KEY,
+                            f"{file_mt:.9f}",
+                        )
                 for raw in items:
                     if not isinstance(raw, dict) or not raw.get("id"):
                         continue

@@ -25,9 +25,13 @@ and recomputed):
 * ``count``              : len(videos) in the scope
 * ``genres_ver``         : vg.genres.GENRES_VERSION
 * ``taxonomy_ver``       : vg.taxonomy.TAXONOMY_VERSION
-* ``catalogs``           : mapping of ``{root_str: catalog_mtime}`` for every
-                           mounted catalog.  A single SQLite write bumps the
-                           mtime on one root and automatically invalidates.
+* ``catalogs``           : mapping of ``{root_str: structure_mtime}`` for
+                           every mounted root that already has a catalog.
+                           This is the membership epoch from sqlite meta,
+                           not the DB file mtime. Probe UPSERTs change the
+                           file mtime but must not drop the folder tree. A
+                           mount with no catalog is omitted (an empty
+                           ``D:\\`` must not show up as the key ``D:``).
 
 Every cache read/write/invalidate emits a structured PERF line so regressions
 due to the cache layer are visible in startup logs without needing a debugger.
@@ -81,47 +85,84 @@ def _tree_lock(lib_key: str) -> threading.Lock:
 # Validation signature
 # ---------------------------------------------------------------------------
 
+def _signature_root_key(root: str | Path | None) -> str:
+    """Stable catalog key.
+
+    ``str(path).rstrip("\\\\/")`` turns the drive root ``D:\\`` into ``D:``,
+    which is a different dict key from ``D:\\`` and from every real library
+    under that drive. Keep a trailing slash only for bare drive roots so
+    ``D:`` and ``D:\\`` compare as one mount.
+    """
+    s = str(root or "").strip().replace("/", "\\")
+    if not s:
+        return ""
+    if len(s) == 2 and s[1] == ":":
+        return s + "\\"
+    s = s.rstrip("\\")
+    if len(s) == 2 and s[1] == ":":
+        return s + "\\"
+    return s
+
+
 def _collect_catalog_signatures(
     roots: Iterable[str | Path],
 ) -> dict[str, float]:
-    """Return ``{root_str: catalog_mtime}`` for every mounted root.
+    """Return ``{root_str: catalog_mtime}`` for mounted roots that have a catalog.
 
-    A missing catalog mtime is reported as ``0.0`` so a root whose catalog
-    has not yet been written always causes a cache miss.
+    A mount with no ``catalog.sqlite`` (mtime 0) does not change the folder
+    tree. Recording it used to make the key set flap: ``D:\\`` was stored as
+    ``D:`` whenever that empty drive root sat in ``mounted_roots``, and the
+    next startup without it missed with ``catalog_roots_diverge``.
     """
-    from vg.catalog_db import catalog_mtime
+    from vg.catalog_db import catalog_structure_mtime
     from vg.cache import ensure_cache_dir
 
     sig: dict[str, float] = {}
     for r in roots:
-        r_s = str(r).rstrip("\\/")
+        r_s = _signature_root_key(r)
+        if not r_s:
+            continue
         try:
-            cache_dir = ensure_cache_dir(Path(r))
+            cache_dir = ensure_cache_dir(Path(r_s))
         except Exception:
             cache_dir = None
-        sig[r_s] = float(catalog_mtime(cache_dir)) if cache_dir else 0.0
+        mtime = float(catalog_structure_mtime(cache_dir)) if cache_dir else 0.0
+        if mtime <= 0.0:
+            continue
+        sig[r_s] = mtime
     return sig
+
+
+def _catalogs_for_compare(cats: dict | None) -> dict[str, float]:
+    """Drop empty catalogs and fold ``D:`` / ``D:\\`` onto one key."""
+    out: dict[str, float] = {}
+    for key, mtime in (cats or {}).items():
+        canon = _signature_root_key(key)
+        if not canon:
+            continue
+        try:
+            mt = float(mtime)
+        except (TypeError, ValueError):
+            mt = 0.0
+        if mt <= 0.0:
+            continue
+        out[canon] = mt
+    return out
 
 
 def _mounted_roots_for_signature() -> list[str]:
     """Roots used to scope the catalog signature.
 
-    Precedence: the live unified lib (STATE["mounted_roots"]) if published,
-    otherwise all currently-mounted roots from ``vg.roots.get_mounted_roots``.
-    If neither source has data we return an empty list and cache writes will
-    be skipped (signature would be trivially broken on the next run).
+    Always the deduped mount list from ``get_mounted_roots``. Raw
+    ``STATE["mounted_roots"]`` can contain both a library path and a bare
+    ``D:\\`` that rstrip turned into a second key.
     """
-    from vg.state import STATE
+    try:
+        from vg.roots import get_mounted_roots
 
-    mounted = [str(r) for r in (STATE.get("mounted_roots") or []) if r]
-    if not mounted:
-        try:
-            from vg.roots import get_mounted_roots
-
-            mounted = [str(r) for r in get_mounted_roots() if r]
-        except Exception:
-            mounted = []
-    return mounted
+        return [str(r) for r in get_mounted_roots() if r]
+    except Exception:
+        return []
 
 
 def _current_signature(videos_count: int) -> dict[str, Any]:
@@ -139,8 +180,8 @@ def _signatures_equal(a: dict, b: dict) -> tuple[bool, str]:
     for field in ("schema", "count", "genres_ver", "taxonomy_ver"):
         if a.get(field) != b.get(field):
             return False, f"field={field} want={a.get(field)} got={b.get(field)}"
-    a_cats: dict = a.get("catalogs") or {}
-    b_cats: dict = b.get("catalogs") or {}
+    a_cats = _catalogs_for_compare(a.get("catalogs") or {})
+    b_cats = _catalogs_for_compare(b.get("catalogs") or {})
     if set(a_cats.keys()) != set(b_cats.keys()):
         missing = set(a_cats) ^ set(b_cats)
         return False, f"catalog_roots_diverge sample={sorted(missing)[:4]}"
