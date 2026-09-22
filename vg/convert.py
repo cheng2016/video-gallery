@@ -124,6 +124,7 @@ def _convert_job_public(job: dict) -> dict:
         "out_ext": job.get("out_ext") or "",
         "scale": int(job.get("scale") or 0) or 0,
         "video_encoder": job.get("video_encoder") or "",
+        "audio_encoder": job.get("audio_encoder") or "",
     }
 
 
@@ -143,6 +144,9 @@ def convert_kind_label(job: dict) -> str:
         enc = (job.get("video_encoder") or "auto").lower()
         if enc in ("h264", "h265"):
             parts.append(enc.upper())
+        aenc = (job.get("audio_encoder") or "auto").lower()
+        if aenc in ("aac", "mp3", "opus", "ac3"):
+            parts.append({"aac": "AAC", "mp3": "MP3", "opus": "Opus", "ac3": "AC-3"}[aenc])
         ext = (job.get("out_ext") or "").lstrip(".")
         if ext:
             parts.append(f"转{ext}")
@@ -238,6 +242,35 @@ def normalize_video_encoder(raw) -> str:
     return "auto"
 
 
+def normalize_audio_encoder(raw) -> str:
+    """auto = keep source stream when possible; else force a common codec."""
+    enc = str(raw or "auto").strip().lower()
+    if enc in ("auto", "copy", "original", "src", "source"):
+        return "auto"
+    if enc in ("aac", "mp3", "opus", "ac3"):
+        return enc
+    # tolerate ffprobe-style aliases
+    if enc in ("libmp3lame", "mp3float"):
+        return "mp3"
+    if enc in ("libopus",):
+        return "opus"
+    if enc in ("eac3", "ac-3", "dolby"):
+        return "ac3"
+    return "auto"
+
+
+def resolve_audio_encoder_for_container(
+    audio_encoder: str,
+    out_ext: str,
+) -> tuple[str, str]:
+    """Return (audio_encoder, note). WebM only reliably carries Opus."""
+    enc = normalize_audio_encoder(audio_encoder)
+    ext = (out_ext or "mp4").lstrip(".").lower()
+    if ext == "webm" and enc in {"aac", "mp3", "ac3"}:
+        return "opus", "WebM 仅支持 Opus，音频已改为 Opus"
+    return enc, ""
+
+
 def normalize_scale(raw, height=None) -> int:
     try:
         value = int(raw or 0)
@@ -302,6 +335,7 @@ def enqueue_convert_job(
     out_ext: str | None = None,
     scale: int | None = None,
     video_encoder: str | None = None,
+    audio_encoder: str | None = None,
 ) -> tuple[bool, str, str]:
     """Enqueue convert/fix-audio/fps30/transcode job. Returns (ok, msg, job_id)."""
     kind = (kind or "mp4").strip().lower()
@@ -318,6 +352,7 @@ def enqueue_convert_job(
     elif kind == "fps30":
         stored_target = 30
     stored_encoder = normalize_video_encoder(video_encoder) if kind == "transcode" else ""
+    stored_audio = normalize_audio_encoder(audio_encoder) if kind == "transcode" else ""
     stored_scale = normalize_scale(scale) if kind == "transcode" else 0
     stored_ext = ""
     if kind == "transcode":
@@ -325,6 +360,7 @@ def enqueue_convert_job(
         stored_ext = ext if ext in TRANSCODE_OUT_EXTS else "mp4"
         if stored_ext == "webm" and stored_encoder in {"h264", "h265"}:
             stored_ext = "mkv"
+        stored_audio, _ = resolve_audio_encoder_for_container(stored_audio, stored_ext)
     try:
         root = str(Path(root).expanduser().resolve()) if root else None
     except OSError:
@@ -332,7 +368,8 @@ def enqueue_convert_job(
     log(
         f"[转换队列] 入队请求 kind={kind} vid={vid} root={root or ''} "
         f"name={name or ''} target_fps={stored_target or '-'} "
-        f"out_ext={stored_ext or '-'} scale={stored_scale or 0} encoder={stored_encoder or '-'}"
+        f"out_ext={stored_ext or '-'} scale={stored_scale or 0} "
+        f"encoder={stored_encoder or '-'} audio={stored_audio or '-'}"
     )
     with _convert_lock:
         for jid, job in STATE["convert_jobs"].items():
@@ -350,6 +387,7 @@ def enqueue_convert_job(
                     and (job.get("out_ext") or "") == stored_ext
                     and int(job.get("scale") or 0) == int(stored_scale or 0)
                     and (job.get("video_encoder") or "auto") == (stored_encoder or "auto")
+                    and (job.get("audio_encoder") or "auto") == (stored_audio or "auto")
                 )
             if (
                 job.get("vid") == vid
@@ -378,6 +416,7 @@ def enqueue_convert_job(
             "out_ext": stored_ext,
             "scale": stored_scale,
             "video_encoder": stored_encoder,
+            "audio_encoder": stored_audio,
         }
     pump_convert_queue()
     return True, "已加入转换队列", job_id
@@ -834,20 +873,20 @@ def _parent_dir_base_name(src: Path | None, item: dict | None = None) -> str:
 
 def _convert_mp4_base_name(item: dict, src: Path | None = None) -> str:
     """
-    MP4 文件名优先用 m3u8/合集所在目录名（跳过 ts/media 等泛化目录，取上一级）；
-    文件名是 index/playlist/master 时必须用父文件夹名。
+    默认保留源文件名。
+    仅当文件名是 index/playlist/master 等泛化名时，才用父文件夹名
+    （并跳过 ts/media 等泛化目录，取上一级）。
+    不要对任意 .ts / m3u8 / ts_set 一律用目录名，否则 Downloads/foo.ts
+    会错误变成 Downloads.mp4。
     """
-    kind = str(item.get("kind") or "").lower()
-    ext = str(item.get("ext") or (src.suffix if src else "") or "").lower()
     stem = (
         (src.stem if src is not None else "")
         or Path(item.get("filename") or item.get("rel") or "").stem
         or (item.get("name") or "")
     )
     stem_l = str(stem).strip().lower()
-    stream_like = kind in {"m3u8", "ts_set", "series"} or ext in {".m3u8", ".ts", ".m2ts"}
-    # HLS named index.m3u8 (etc.) → always the parent folder name.
-    if stream_like or stem_l in _GENERIC_MEDIA_STEMS:
+    # Only generic stems (index.m3u8 / index.ts, etc.) take the parent folder.
+    if stem_l in _GENERIC_MEDIA_STEMS:
         parent = _parent_dir_base_name(src, item)
         if parent:
             return parent
@@ -870,11 +909,15 @@ def _transcode_stem_suffix(
     target_fps: int | None,
     scale: int,
     out_ext: str,
+    audio_encoder: str = "auto",
 ) -> str:
     bits: list[str] = []
     enc = normalize_video_encoder(encoder)
     if enc != "auto":
         bits.append(enc)
+    aenc = normalize_audio_encoder(audio_encoder)
+    if aenc != "auto":
+        bits.append(aenc)
     if scale:
         bits.append(f"{int(scale)}p")
     if target_fps:
@@ -1014,11 +1057,23 @@ def _container_tail(out_ext: str) -> list[str]:
     return []
 
 
-def _audio_reencode_args(out_ext: str) -> list[str]:
+def _audio_reencode_args(out_ext: str, audio_encoder: str = "auto") -> list[str]:
+    """FFmpeg audio args. ``auto`` picks a container-friendly default for re-encode."""
+    enc = normalize_audio_encoder(audio_encoder)
     ext = (out_ext or "mp4").lstrip(".").lower()
-    if ext == "webm":
+    if enc == "auto":
+        if ext == "webm":
+            return ["-c:a", "libopus", "-b:a", "128k"]
+        return ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    if enc == "aac":
+        return ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    if enc == "mp3":
+        return ["-c:a", "libmp3lame", "-b:a", "192k", "-ac", "2"]
+    if enc == "opus":
         return ["-c:a", "libopus", "-b:a", "128k"]
-    return ["-c:a", "aac", "-b:a", "192k"]
+    if enc == "ac3":
+        return ["-c:a", "ac3", "-b:a", "192k", "-ac", "2"]
+    return ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
 
 
 def _run_ffmpeg_fps30(
@@ -1099,6 +1154,7 @@ def _run_ffmpeg_transcode(
     duration_hint: float | None = None,
     *,
     encoder: str = "auto",
+    audio_encoder: str = "auto",
     src_codec: str = "",
     out_ext: str = "mp4",
     target_fps: int | None = None,
@@ -1107,14 +1163,23 @@ def _run_ffmpeg_transcode(
     force_reencode: bool = False,
 ) -> tuple[bool, str]:
     vf = _vf_args(target_fps, scale)
+    audio_enc = normalize_audio_encoder(audio_encoder)
+    force_audio = audio_enc != "auto"
     must_reencode = bool(vf) or force_reencode or normalize_video_encoder(encoder) != "auto"
     if (out_ext or "").lstrip(".").lower() == "webm" and normalize_video_encoder(encoder) == "auto":
         must_reencode = True
     v_label, v_args = _video_encode_args(encoder, src_codec, out_ext)
     container = _container_tail(out_ext)
-    audio_re = _audio_reencode_args(out_ext)
+    audio_re = _audio_reencode_args(out_ext, audio_enc)
+    a_label = {
+        "auto": "原音频",
+        "aac": "AAC",
+        "mp3": "MP3",
+        "opus": "Opus",
+        "ac3": "AC-3",
+    }.get(audio_enc, audio_enc)
     attempts: list[tuple[str, list[str]]] = []
-    if not must_reencode:
+    if not must_reencode and not force_audio:
         attempts.append((
             "封装",
             input_args + ["-c", "copy", *container, str(out_path)],
@@ -1123,14 +1188,25 @@ def _run_ffmpeg_transcode(
             "封装(音频重编码)",
             input_args + ["-c:v", "copy", *audio_re, *container, str(out_path)],
         ))
-    attempts.append((
-        f"转码({v_label})",
-        input_args + ["-map", "0:v:0", "-map", "0:a?", *vf, *v_args, "-c:a", "copy", *container, str(out_path)],
-    ))
-    attempts.append((
-        f"转码({v_label}+音频)",
-        input_args + ["-map", "0:v:0", "-map", "0:a?", *vf, *v_args, *audio_re, *container, str(out_path)],
-    ))
+    elif not must_reencode and force_audio:
+        attempts.append((
+            f"封装({a_label})",
+            input_args + ["-c:v", "copy", *audio_re, *container, str(out_path)],
+        ))
+    if force_audio:
+        attempts.append((
+            f"转码({v_label}+{a_label})",
+            input_args + ["-map", "0:v:0", "-map", "0:a?", *vf, *v_args, *audio_re, *container, str(out_path)],
+        ))
+    else:
+        attempts.append((
+            f"转码({v_label})",
+            input_args + ["-map", "0:v:0", "-map", "0:a?", *vf, *v_args, "-c:a", "copy", *container, str(out_path)],
+        ))
+        attempts.append((
+            f"转码({v_label}+音频)",
+            input_args + ["-map", "0:v:0", "-map", "0:a?", *vf, *v_args, *audio_re, *container, str(out_path)],
+        ))
     return _run_ffmpeg_attempts(
         job_id, ffmpeg, attempts, out_path, duration_hint, log_tag="转换", src_ext=src_ext,
     )
@@ -1144,9 +1220,11 @@ def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
         requested_scale = int(job.get("scale") or 0)
         requested_ext = job.get("out_ext") or ""
         requested_encoder = job.get("video_encoder") or "auto"
+        requested_audio = job.get("audio_encoder") or "auto"
     log(
         f"[转换] 开始 job={job_id} vid={vid} fps={requested_fps or '-'} "
-        f"scale={requested_scale or 0} ext={requested_ext or '-'} encoder={requested_encoder}"
+        f"scale={requested_scale or 0} ext={requested_ext or '-'} "
+        f"encoder={requested_encoder} audio={requested_audio}"
     )
     try:
         item = find_video_by_id(vid, prefer_root=root)
@@ -1171,8 +1249,12 @@ def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
             return
         encoder = normalize_video_encoder(requested_encoder)
         out_ext, remap_note = resolve_transcode_out_ext(requested_ext, item, encoder)
-        if remap_note:
-            log(f"[转换] {remap_note} job={job_id}")
+        audio_encoder, audio_note = resolve_audio_encoder_for_container(
+            requested_audio, out_ext
+        )
+        notes = [n for n in (remap_note, audio_note) if n]
+        if notes:
+            log(f"[转换] {'；'.join(notes)} job={job_id}")
         _convert_job_update(job_id, status="running", msg="正在分析片源…", percent=0)
         input_args, out_dir, tmp_path, duration_hint = _prepare_convert_input(item)
         src = resolve_item_rel(item, item.get("rel") or "")
@@ -1228,7 +1310,11 @@ def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
             _convert_job_update(job_id, status="error", msg="输出目录不在扫描根下", percent=0)
             return
         suffix = _transcode_stem_suffix(
-            encoder=encoder, target_fps=target, scale=scale, out_ext=out_ext,
+            encoder=encoder,
+            target_fps=target,
+            scale=scale,
+            out_ext=out_ext,
+            audio_encoder=audio_encoder,
         )
         src_name = _transcode_output_base_name(item, src)
         out_stem = f"{src_name}_{suffix}" if suffix else src_name
@@ -1248,13 +1334,20 @@ def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
         if scale:
             msg_bits.append(f"{scale}p")
         msg_bits.append(out_ext)
+        if audio_encoder != "auto":
+            msg_bits.append({
+                "aac": "AAC", "mp3": "MP3", "opus": "Opus", "ac3": "AC-3",
+            }.get(audio_encoder, audio_encoder))
+        note_text = "；".join(notes)
         _convert_job_update(
             job_id,
             status="running",
-            msg=("开始转换（" + " ".join(msg_bits) + "）…") + (f" {remap_note}" if remap_note else ""),
+            msg=("开始转换（" + " ".join(msg_bits) + "）…")
+            + (f" {note_text}" if note_text else ""),
             percent=0,
             out_path=str(out_path),
             out_ext=out_ext,
+            audio_encoder=audio_encoder,
         )
         ok, msg = _run_ffmpeg_transcode(
             job_id,
@@ -1263,6 +1356,7 @@ def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
             out_path,
             duration_hint,
             encoder=encoder,
+            audio_encoder=audio_encoder,
             src_codec=video_codec,
             out_ext=out_ext,
             target_fps=target,
@@ -1272,7 +1366,7 @@ def _transcode_worker(job_id: str, vid: str, root: str | None = None) -> None:
         )
         if ok:
             added = _register_converted_mp4(out_path, item)
-            extra = f"；{remap_note}" if remap_note else ""
+            extra = f"；{note_text}" if note_text else ""
             _convert_job_update(
                 job_id,
                 status="done",

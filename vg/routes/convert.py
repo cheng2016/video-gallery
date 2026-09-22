@@ -15,6 +15,7 @@ from vg.convert import (
     normalize_scale,
     normalize_video_encoder,
     pump_convert_queue,
+    resolve_audio_encoder_for_container,
     resolve_transcode_out_ext,
     schedule_ffmpeg_rm_probe,
 )
@@ -278,6 +279,9 @@ def register(
 
         encoder = normalize_video_encoder(body.get("video_encoder"))
         out_ext, remap_note = resolve_transcode_out_ext(body.get("out_ext"), item, encoder)
+        audio_encoder, audio_note = resolve_audio_encoder_for_container(
+            body.get("audio_encoder"), out_ext
+        )
         src_fps = item.get("fps")
         target_raw = body.get("target_fps")
         target_fps = None
@@ -305,12 +309,15 @@ def register(
             out_ext=out_ext,
             scale=scale,
             video_encoder=encoder,
+            audio_encoder=audio_encoder,
         )
-        if remap_note and ok:
-            msg = f"{msg}（{remap_note}）"
+        notes = [n for n in (remap_note, audio_note) if n]
+        if notes and ok:
+            msg = f"{msg}（{'；'.join(notes)}）"
         _log(
             f"[转换] 入队 ok={ok} job={job_id} vid={vid} ext={out_ext} "
-            f"fps={target_fps} scale={scale} encoder={encoder} msg={msg}"
+            f"fps={target_fps} scale={scale} encoder={encoder} "
+            f"audio={audio_encoder} msg={msg}"
         )
         return jsonify({
             "ok": ok,
@@ -322,6 +329,7 @@ def register(
             "target_fps": target_fps,
             "scale": scale,
             "video_encoder": encoder,
+            "audio_encoder": audio_encoder,
         })
 
     @app.route("/api/convert/queue")

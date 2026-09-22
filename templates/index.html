@@ -1621,11 +1621,20 @@
             <option value="720">720p</option>
           </select>
         </label>
-        <label class="convert-field">编码
+        <label class="convert-field">画面编码
           <select id="transcodeEncoder" title="画面编码">
             <option value="auto">原格式</option>
             <option value="h264">H.264</option>
             <option value="h265">H.265</option>
+          </select>
+        </label>
+        <label class="convert-field">音频
+          <select id="transcodeAudio" title="音频编码">
+            <option value="auto">原音频</option>
+            <option value="aac">AAC</option>
+            <option value="mp3">MP3</option>
+            <option value="opus">Opus</option>
+            <option value="ac3">AC-3</option>
           </select>
         </label>
         <div class="convert-actions">
@@ -7448,6 +7457,20 @@
       if (sel.options[sel.selectedIndex] && sel.options[sel.selectedIndex].disabled) sel.value = "0";
     }
 
+    function fillTranscodeAudio(extra) {
+      const sel = $("transcodeAudio");
+      if (!sel) return;
+      const codec = String((extra && extra.audio_codec) || "").trim().toLowerCase();
+      const label = formatAudioCodecLabel(codec, {
+        probe_audio_done: !!(extra && extra.probe_audio_done),
+      });
+      const autoOpt = Array.from(sel.options).find((o) => o.value === "auto");
+      if (autoOpt) {
+        autoOpt.textContent = label ? (`原音频（${label}）`) : "原音频";
+      }
+      if (!sel.dataset.userPicked) sel.value = "auto";
+    }
+
     function updatePlayerConvertUi(extra) {
       extra = extra || currentPlayMeta || {};
       if (extra && typeof extra.has_ffmpeg === "boolean") {
@@ -7468,6 +7491,7 @@
       }
       fillTranscodeFpsSelect(Number(extra.fps || 0), extra);
       fillTranscodeScale(extra);
+      fillTranscodeAudio(extra);
       if (startBtn) {
         startBtn.disabled = !can || busy;
         startBtn.textContent = busy ? "转换中…" : "开始转换";
@@ -7647,6 +7671,7 @@
       const outExt = ($("transcodeExt") && $("transcodeExt").value) || "mp4";
       const scale = Number(($("transcodeScale") && $("transcodeScale").value) || 0) || 0;
       const encoder = ($("transcodeEncoder") && $("transcodeEncoder").value) || "auto";
+      const audioEncoder = ($("transcodeAudio") && $("transcodeAudio").value) || "auto";
       const fpsSel = $("transcodeFps");
       if (fpsSel && fpsSel.value === "custom" && !(targetFps >= 1)) {
         $("modalInfo").textContent = "请在自定义帧率框输入低于片源的整数 fps";
@@ -7660,6 +7685,7 @@
       const body = {
         out_ext: outExt,
         video_encoder: encoder,
+        audio_encoder: audioEncoder,
         scale: scale,
       };
       if (targetFps >= 1) body.target_fps = targetFps;
@@ -8884,6 +8910,9 @@
     if ($("btnCancelTranscode")) $("btnCancelTranscode").addEventListener("click", () => cancelConvertMp4());
     if ($("transcodeExt")) $("transcodeExt").addEventListener("change", () => {
       $("transcodeExt").dataset.userPicked = "1";
+    });
+    if ($("transcodeAudio")) $("transcodeAudio").addEventListener("change", () => {
+      $("transcodeAudio").dataset.userPicked = "1";
     });
     if ($("transcodeFps")) $("transcodeFps").addEventListener("change", () => {
       syncCustomFpsField();

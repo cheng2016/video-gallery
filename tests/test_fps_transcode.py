@@ -319,9 +319,12 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
 
     def test_video_encode_and_vf_helpers(self) -> None:
         from vg.convert import (
+            _audio_reencode_args,
             _vf_args,
             _video_encode_args,
+            normalize_audio_encoder,
             probe_ffmpeg_realmedia,
+            resolve_audio_encoder_for_container,
             resolve_transcode_out_ext,
         )
 
@@ -344,6 +347,14 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
         ext, note = resolve_transcode_out_ext("webm", {"ext": ".mkv"}, "h264")
         self.assertEqual(ext, "mkv")
         self.assertIn("MKV", note)
+        self.assertEqual(normalize_audio_encoder("AAC"), "aac")
+        self.assertEqual(normalize_audio_encoder("original"), "auto")
+        self.assertEqual(_audio_reencode_args("mp4", "auto")[1], "aac")
+        self.assertEqual(_audio_reencode_args("mp4", "mp3")[1], "libmp3lame")
+        self.assertEqual(_audio_reencode_args("webm", "auto")[1], "libopus")
+        aenc, anote = resolve_audio_encoder_for_container("aac", "webm")
+        self.assertEqual(aenc, "opus")
+        self.assertIn("Opus", anote)
         with mock.patch("vg.convert.subprocess.run") as run:
             run.return_value = mock.Mock(stdout=" D  rm              RealMedia\n", stderr="")
             self.assertTrue(probe_ffmpeg_realmedia("ffmpeg"))
@@ -360,7 +371,10 @@ class UiFpsControlsTests(unittest.TestCase):
         self.assertIn('id="transcodeFps"', html)
         self.assertIn('id="transcodeScale"', html)
         self.assertIn('id="transcodeEncoder"', html)
+        self.assertIn('id="transcodeAudio"', html)
         self.assertIn('id="btnStartTranscode"', html)
+        self.assertIn("audio_encoder", html)
+        self.assertIn("fillTranscodeAudio", html)
         self.assertIn('id="btnConvertToggle"', html)
         self.assertIn('id="playerChips"', html)
         self.assertIn("function formatAudioCodecLabel(", html)
@@ -522,6 +536,38 @@ class TranscodeNamingTests(unittest.TestCase):
         }
         src = Path(r"D:\lib\Shows\clip.mkv")
         self.assertEqual(_transcode_output_base_name(item, src), "clip")
+
+    def test_named_ts_keeps_stem_not_parent(self) -> None:
+        """Named .ts must keep its own stem; parent-folder naming is only for index."""
+        from vg.convert import _transcode_output_base_name, _convert_mp4_base_name
+
+        item = {
+            "kind": "file",
+            "ext": ".ts",
+            "folder": "Downloads",
+            "name": "MyShow",
+            "filename": "MyShow.ts",
+            "rel": "Downloads/MyShow.ts",
+        }
+        src = Path(r"C:\Users\me\Downloads\MyShow.ts")
+        self.assertEqual(_transcode_output_base_name(item, src), "MyShow")
+        # Old convert-to-mp4 path also builds src as out_dir/filename.
+        fake_src = Path(r"C:\Users\me\Downloads") / "MyShow.ts"
+        self.assertEqual(_convert_mp4_base_name(item, fake_src), "MyShow")
+
+    def test_index_ts_uses_parent_folder(self) -> None:
+        from vg.convert import _transcode_output_base_name
+
+        item = {
+            "kind": "file",
+            "ext": ".ts",
+            "folder": "CoolMovie",
+            "name": "index",
+            "filename": "index.ts",
+            "rel": "CoolMovie/index.ts",
+        }
+        src = Path(r"D:\lib\CoolMovie\index.ts")
+        self.assertEqual(_transcode_output_base_name(item, src), "CoolMovie")
 
 
 if __name__ == "__main__":
