@@ -63,8 +63,12 @@ def thumb_worker_count(total: int = 0, *, burst: bool = False) -> int:
 
 
 def meta_worker_count(total: int = 0) -> int:
-    """Full-CPU ffprobe pool — same burst sizing as first-scan thumbnails."""
-    return thumb_worker_count(total, burst=True)
+    """ffprobe pool: logical CPUs minus 2."""
+    cpus = max(1, os.cpu_count() or 4)
+    n = max(1, cpus - 2)
+    if total > 0:
+        n = max(1, min(n, total))
+    return n
 
 
 def _fmt_bytes(n: int) -> str:

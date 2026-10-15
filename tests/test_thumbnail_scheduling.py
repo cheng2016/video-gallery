@@ -17,7 +17,7 @@ class ThumbnailSchedulingTests(unittest.TestCase):
     def test_worker_count_keeps_cpu_headroom_and_caps_background_work(self) -> None:
         with mock.patch("vg.util.os.cpu_count", return_value=64):
             self.assertEqual(thumb_worker_count(500), 4)
-            # Burst leaves 2 cores free for waitress / UI thumb reads.
+            # Burst follows logical CPUs minus 2. A 200-file batch was fastest there.
             self.assertEqual(thumb_worker_count(500, burst=True), 62)
         with mock.patch("vg.util.os.cpu_count", return_value=1):
             self.assertEqual(thumb_worker_count(500), 1)
@@ -26,7 +26,7 @@ class ThumbnailSchedulingTests(unittest.TestCase):
             self.assertEqual(thumb_worker_count(1), 1)
             self.assertEqual(thumb_worker_count(1, burst=True), 1)
 
-    def test_meta_worker_count_matches_thumb_burst(self) -> None:
+    def test_meta_worker_count_uses_cpu_minus_two(self) -> None:
         from vg.util import meta_worker_count
 
         with mock.patch("vg.util.os.cpu_count", return_value=16):

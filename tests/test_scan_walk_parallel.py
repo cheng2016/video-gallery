@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vg.scan import expand_scan_walk_jobs, scan_videos
+from vg.scan import directory_walk_workers, expand_scan_walk_jobs, scan_videos
 from vg.state import STATE
 
 
@@ -147,6 +147,51 @@ class ScanWalkParallelTests(unittest.TestCase):
             scan_videos(self.root, do_thumbs=False, incremental=True, quiet=True)
             self.assertGreater(len(saves), before)
             self.assertIn("extra", self._names())
+
+    def test_background_walk_uses_cpu_minus_four(self) -> None:
+        self.assertEqual(directory_walk_workers(12, top_dirs=29, background=True), 8)
+        self.assertEqual(directory_walk_workers(4, top_dirs=3, background=True), 1)
+        self.assertEqual(directory_walk_workers(2, top_dirs=3, background=True), 1)
+        self.assertEqual(directory_walk_workers(12, top_dirs=0, background=True), 1)
+
+    def test_foreground_walk_uses_cpu_minus_two(self) -> None:
+        self.assertEqual(directory_walk_workers(12, top_dirs=29, background=False), 10)
+        self.assertEqual(directory_walk_workers(16, top_dirs=8, background=False), 14)
+        self.assertEqual(directory_walk_workers(4, top_dirs=3, background=False), 2)
+
+    def test_background_incremental_walk_uses_cpu_minus_four(self) -> None:
+        calls: list[int] = []
+        real = __import__(
+            "vg.scan", fromlist=["_run_stolen_directory_walk"]
+        )._run_stolen_directory_walk
+
+        def spy(*args, **kwargs):
+            calls.append(int(kwargs.get("workers") or 0))
+            return real(*args, **kwargs)
+
+        with mock.patch("vg.scan.os.cpu_count", return_value=12), mock.patch(
+            "vg.scan._run_stolen_directory_walk", side_effect=spy
+        ):
+            scan_videos(self.root, do_thumbs=False, incremental=True, quiet=True)
+        self.assertEqual(calls, [8])
+        self.assertEqual(self._names(), {"alpha", "beta", "gamma"})
+
+    def test_quiet_full_scan_uses_cpu_minus_two(self) -> None:
+        calls: list[int] = []
+        real = __import__(
+            "vg.scan", fromlist=["_run_stolen_directory_walk"]
+        )._run_stolen_directory_walk
+
+        def spy(*args, **kwargs):
+            calls.append(int(kwargs.get("workers") or 0))
+            return real(*args, **kwargs)
+
+        with mock.patch("vg.scan.os.cpu_count", return_value=12), mock.patch(
+            "vg.scan._run_stolen_directory_walk", side_effect=spy
+        ):
+            scan_videos(self.root, do_thumbs=False, incremental=False, quiet=True)
+        self.assertEqual(calls, [10])
+        self.assertEqual(self._names(), {"alpha", "beta", "gamma"})
 
     def test_steal_walk_finds_videos_in_deep_fat_tree(self) -> None:
         work = self.root / "work" / "layer1" / "layer2"

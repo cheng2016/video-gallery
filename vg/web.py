@@ -86,6 +86,7 @@ from vg.media import (
     _duration_already_known,
     _item_probe_path,
     _player_video_meta_done,
+    remember_cached_bitrate,
     _video_file_for_thumb,
     classify_high_fps,
     fps_can_halve_to_30,
@@ -3187,11 +3188,10 @@ def thumb(vid: str):
             operation_id=getattr(g, "_diag_operation_id", ""),
         )
         diagnostic_aggregate("thumbnail_placeholder")
-        # item_not_found is often a cold-start / not-yet-scanned disk race
-        # (continue-watching still points at D: before that root is indexed).
-        # Keep it temporary so the card can rearm after lib_gen advances.
+        # No catalog row, ffmpeg, or cache: stop Retry-After. A later library
+        # generation rearms the card; polling the same missing id does not.
         return _deferred_placeholder(
-            temporary=(unavailable_reason == "item_not_found"),
+            temporary=False,
             reason=unavailable_reason,
         )
 
@@ -3638,19 +3638,21 @@ def api_info(vid: str):
         abort(404)
     # Refresh has_thumb from disk/.vgt — catalog rows can lag behind bulk fill.
     attach_thumb_meta(item)
-    # Player open always fills missing duration, audio codec, resolution, fps
-    # and video codec in one ffprobe. Settings switches only gate bulk scan.
+    # Player open always fills missing duration, audio codec, resolution, fps,
+    # bitrate and video codec in one ffprobe. Settings switches only gate bulk scan.
     # A complete catalog row is not probed again.
     kind = item.get("kind") or ""
     ext = (item.get("ext") or "").lower()
     stream_like = kind in ("m3u8", "ts_set") or ext == ".m3u8"
+    # Picture meta plus size/duration can yield bitrate with no ffprobe and
+    # without invalidating the list/tree caches. Playlists have no single file size.
+    metadata_changed = False if stream_like else remember_cached_bitrate(item)
     inc_duration = not _duration_already_known(item)
     inc_audio = not _audio_already_known(item)
     inc_video = (not stream_like) and not _player_video_meta_done(item)
     need_sync = bool(STATE.get("ffmpeg")) and not item.get("bad") and (
         inc_duration or inc_audio or inc_video
     )
-    metadata_changed = False
     probe_pending = False
     if need_sync:
         path = _item_probe_path(item)
@@ -3705,12 +3707,15 @@ def api_info(vid: str):
             f"[媒体探测] 使用缓存 vid={vid} "
             f"{item.get('width')}x{item.get('height')}@{item.get('fps')} "
             f"vcodec={item.get('video_codec') or '-'} "
+            f"bitrate={item.get('bitrate') or '-'} "
             f"acodec={item.get('audio_codec') or '-'} "
             f"duration={item.get('duration')}"
         )
     if metadata_changed:
         try:
-            save_library_item(item)
+            # Probe fields are not list/tree data. Bumping lib_gen here drops
+            # the cached pages for the whole library after every first open.
+            save_library_item(item, bump_gen=False)
         except Exception as exc:
             diagnostic_error(
                 "video_metadata_save_failed",
@@ -3743,6 +3748,10 @@ def api_info(vid: str):
     payload["width"] = width or 0
     payload["height"] = height or 0
     payload["fps"] = fps if fps is not None else None
+    try:
+        payload["bitrate"] = max(0, int(item.get("bitrate") or 0))
+    except (TypeError, ValueError):
+        payload["bitrate"] = 0
     hires = is_2k_or_4k(width, height)
     payload["is_hires"] = hires
     gate = fps_gate_reason(
@@ -3788,6 +3797,7 @@ def api_info(vid: str):
     log(
         f"[帧率转码] 播放页判定 vid={vid} "
         f"{width or 0}x{height or 0}@{fps} vcodec={payload['video_codec'] or '-'} "
+        f"bitrate={payload.get('bitrate') or '-'} "
         f"acodec={payload['audio_codec'] or '-'} audio_hard={int(payload['audio_hard'])} "
         f"hires={hires} can_fps30={payload['can_fps30']} gate={gate} "
         f"fps_class={payload['fps_class']} targets={payload['fps_targets']} "

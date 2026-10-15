@@ -120,6 +120,7 @@ class ProbeVideoMetaFlagTests(unittest.TestCase):
             joined = " ".join(cmd)
             self.assertNotIn("width", joined)
             self.assertNotIn("r_frame_rate", joined)
+            self.assertNotIn("bit_rate", joined)
 
     def test_combined_probe_requests_picture_and_codecs(self) -> None:
         with mock.patch("vg.media._ffprobe_path", return_value="ffprobe"), mock.patch(
@@ -130,9 +131,9 @@ class ProbeVideoMetaFlagTests(unittest.TestCase):
                 stdout=(
                     '{"streams":['
                     '{"codec_type":"video","codec_name":"hevc","width":1920,"height":1080,'
-                    '"r_frame_rate":"30/1","avg_frame_rate":"30/1"},'
+                    '"r_frame_rate":"30/1","avg_frame_rate":"30/1","bit_rate":"2400000"},'
                     '{"codec_type":"audio","codec_name":"aac"}'
-                    '],"format":{"duration":"12.5"}}'
+                    '],"format":{"duration":"12.5","bit_rate":"2520000"}}'
                 ),
                 stderr="",
             )
@@ -146,12 +147,14 @@ class ProbeVideoMetaFlagTests(unittest.TestCase):
             cmd = " ".join(run.call_args.args[0])
             self.assertIn("width", cmd)
             self.assertIn("codec_name", cmd)
-            self.assertIn("format=duration", cmd)
+            self.assertIn("bit_rate", cmd)
+            self.assertIn("format=duration,bit_rate", cmd)
             self.assertEqual(info.get("duration"), 12.5)
             self.assertEqual(info.get("width"), 1920)
             self.assertEqual(info.get("fps"), 30.0)
             self.assertEqual(info.get("video_codec"), "hevc")
             self.assertEqual(info.get("audio_codec"), "aac")
+            self.assertEqual(info.get("bitrate"), 2520000)
 
     def test_player_probe_can_request_video_meta(self) -> None:
         with mock.patch("vg.media._ffprobe_path", return_value="ffprobe"), mock.patch(
@@ -161,7 +164,8 @@ class ProbeVideoMetaFlagTests(unittest.TestCase):
                 returncode=0,
                 stdout=(
                     '{"streams":[{"codec_type":"video","codec_name":"hevc","width":3840,"height":2160,'
-                    '"r_frame_rate":"60/1","avg_frame_rate":"60/1"}],"format":{}}'
+                    '"r_frame_rate":"60/1","avg_frame_rate":"60/1","bit_rate":"8000000"}],'
+                    '"format":{"bit_rate":"N/A"}}'
                 ),
                 stderr="",
             )
@@ -177,9 +181,37 @@ class ProbeVideoMetaFlagTests(unittest.TestCase):
             self.assertEqual(info.get("height"), 2160)
             self.assertEqual(info.get("fps"), 60.0)
             self.assertEqual(info.get("video_codec"), "hevc")
+            self.assertEqual(info.get("bitrate"), 8000000)
             cmd = " ".join(run.call_args.args[0])
             self.assertIn("codec_name", cmd)
             self.assertIn("width", cmd)
+            self.assertIn("bit_rate", cmd)
+
+    def test_bitrate_falls_back_to_file_size(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            path = Path(td) / "clip.mp4"
+            path.write_bytes(b"x" * 125_000)
+            with mock.patch("vg.media._ffprobe_path", return_value="ffprobe"), mock.patch(
+                "vg.media.subprocess.run"
+            ) as run:
+                run.return_value = mock.Mock(
+                    returncode=0,
+                    stdout=(
+                        '{"streams":[{"codec_type":"video","codec_name":"hevc","width":1280,'
+                        '"height":720,"avg_frame_rate":"30/1"}],"format":{"duration":"10"}}'
+                    ),
+                    stderr="",
+                )
+                info = probe_media_info(
+                    "ffmpeg",
+                    path,
+                    include_duration=True,
+                    include_audio=False,
+                    include_video_meta=True,
+                )
+            self.assertEqual(info.get("bitrate"), 100_000)
 
 
 class PlayerVideoMetaPersistTests(unittest.TestCase):
@@ -195,6 +227,7 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
                 "height": 2160,
                 "fps": 60,
                 "video_codec": "h264",
+                "bitrate": 8_000_000,
             },
             include_duration=False,
             include_audio=False,
@@ -204,6 +237,7 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
         self.assertEqual(item["height"], 2160)
         self.assertEqual(item["fps"], 60.0)
         self.assertEqual(item["video_codec"], "h264")
+        self.assertEqual(item["bitrate"], 8_000_000)
         self.assertTrue(item["probe_video_meta_done"])
 
     def test_wants_probe_until_codec_cached(self) -> None:
@@ -235,6 +269,20 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
                     "width": 1920,
                     "height": 1080,
                     "video_codec": "hevc",
+                    "bitrate": 2_500_000,
+                    "probe_video_meta_done": True,
+                    "audio_codec": "aac",
+                    "probe_audio_done": True,
+                },
+                stream_like=False,
+            )
+        )
+        self.assertTrue(
+            wants_player_video_meta(
+                {
+                    "width": 1920,
+                    "height": 1080,
+                    "video_codec": "hevc",
                     "probe_video_meta_done": True,
                     "audio_codec": "aac",
                     "probe_audio_done": True,
@@ -248,6 +296,7 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
                     "width": 1920,
                     "height": 1080,
                     "video_codec": "hevc",
+                    "bitrate": 0,
                     "probe_video_meta_done": True,
                     "audio_codec": "",
                     "probe_audio_done": True,
@@ -282,6 +331,7 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
                     "height": 720,
                     "fps": 24.0,
                     "video_codec": "h264",
+                    "bitrate": 1_500_000,
                     "audio_codec": "ac3",
                     "audio_hard": True,
                     "probe_video_meta_done": True,
@@ -302,6 +352,7 @@ class PlayerVideoMetaPersistTests(unittest.TestCase):
         self.assertTrue(item.get("audio_hard"))
         self.assertTrue(item.get("probe_audio_done"))
         self.assertEqual(item.get("video_codec"), "h264")
+        self.assertEqual(item.get("bitrate"), 1_500_000)
         self.assertTrue(item.get("probe_video_meta_done"))
 
     def test_fps30_encoder_follows_source_codec(self) -> None:

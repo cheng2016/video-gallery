@@ -320,11 +320,15 @@ def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> 
     """
     import threading
 
-    selected = list(videos) if videos is not None else list(STATE.get("videos") or [])
+    # Snapshot for the compute pass. Publish the caller's list afterwards so
+    # holders of that object keep seeing the same STATE["videos"] identity.
+    source = videos
+    selected = list(source) if source is not None else list(STATE.get("videos") or [])
     started = time.perf_counter()
     indexes = compute_catalog(selected, heavy=heavy)
     compute_ms = (time.perf_counter() - started) * 1000.0
     live = list(STATE.get("videos") or [])
+    adopted_live = False
     if len(live) > len(selected):
         try:
             from vg.diagnostics import emit
@@ -342,13 +346,15 @@ def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> 
         except Exception:
             pass
         selected = live
+        adopted_live = True
         # Live list already carries in-place probe fields; skip another heavy
         # duplicate pass so we do not stall the scanner again.
         remake_started = time.perf_counter()
         indexes = compute_catalog(selected, heavy=False)
         compute_ms += (time.perf_counter() - remake_started) * 1000.0
+    publish = selected if adopted_live or source is None else source
     apply_started = time.perf_counter()
-    apply_catalog_to_state(selected, indexes)
+    apply_catalog_to_state(publish, indexes)
     apply_ms = (time.perf_counter() - apply_started) * 1000.0
     try:
         from vg.diagnostics import perf

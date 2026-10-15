@@ -71,6 +71,20 @@ def probe_duration(ffmpeg: str, path: Path) -> float | None:
     return float(dur) if dur else None
 
 
+def _parse_bitrate(raw) -> int | None:
+    """ffprobe bit_rate is bits/sec. Ignore N/A and non-positive values."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text.upper() in ("N/A", "NAN"):
+        return None
+    try:
+        value = int(float(text))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def parse_frame_rate(raw) -> float | None:
     """Parse ffprobe r_frame_rate / avg_frame_rate strings like '60/1'."""
     if raw is None:
@@ -228,9 +242,9 @@ def probe_media_info(
 ) -> dict:
     """Run one ffprobe for the requested dimensions.
 
-    Duration, audio codec, and video width/height/fps/codec can be collected in
-    the same process. Callers that already decided to probe should request every
-    missing dimension together.
+    Duration, audio codec, and video width/height/fps/codec/bitrate can be
+    collected in the same process. Callers that already decided to probe should
+    request every missing dimension together.
     """
     from vg.diagnostics import emit, error
 
@@ -261,10 +275,17 @@ def probe_media_info(
         if include_audio or include_video_meta:
             stream_fields.append("codec_name")
         if include_video_meta:
-            stream_fields.extend(["width", "height", "r_frame_rate", "avg_frame_rate"])
+            stream_fields.extend(
+                ["width", "height", "r_frame_rate", "avg_frame_rate", "bit_rate"]
+            )
         entries = [f"stream={','.join(stream_fields)}"]
+        format_fields: list[str] = []
         if include_duration:
-            entries.append("format=duration")
+            format_fields.append("duration")
+        if include_video_meta:
+            format_fields.append("bit_rate")
+        if format_fields:
+            entries.append("format=" + ",".join(format_fields))
         cmd = [ffprobe, "-v", "error"]
         for entry in entries:
             cmd.extend(["-show_entries", entry])
@@ -294,6 +315,7 @@ def probe_media_info(
         width = None
         height = None
         fps = None
+        video_bitrate = None
         for s in streams:
             ctype = (s.get("codec_type") or "").lower()
             cname = (s.get("codec_name") or "").lower().strip()
@@ -309,6 +331,7 @@ def probe_media_info(
                         w, h = 0, 0
                     if w > 0 and h > 0:
                         width, height = w, h
+                        video_bitrate = _parse_bitrate(s.get("bit_rate"))
                     fps = parse_frame_rate(s.get("avg_frame_rate")) or parse_frame_rate(
                         s.get("r_frame_rate")
                     )
@@ -338,6 +361,23 @@ def probe_media_info(
             if fps is not None:
                 result["fps"] = round(fps, 3)
             result["video_codec"] = video_codec
+            # Container rate first; many VBR files omit the video-stream rate.
+            bitrate = _parse_bitrate(fmt.get("bit_rate")) or video_bitrate or 0
+            if not bitrate:
+                dur = result.get("duration")
+                if not dur and fmt.get("duration"):
+                    try:
+                        dur = float(fmt["duration"])
+                    except (TypeError, ValueError):
+                        dur = None
+                if dur and float(dur) > 0:
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        size = 0
+                    if size > 0:
+                        bitrate = int(round(size * 8 / float(dur)))
+            result["bitrate"] = int(bitrate or 0)
             result["probe_video_meta_done"] = True
         if include_duration or include_audio or include_video_meta:
             parts = [f"{_probe_log_tag(include_duration=include_duration, include_audio=include_audio, include_video_meta=include_video_meta)} ffprobe ok path={path.name}"]
@@ -345,7 +385,8 @@ def probe_media_info(
                 parts.append(
                     f"{width or 0}x{height or 0}@"
                     f"{result.get('fps') if result.get('fps') is not None else '-'} "
-                    f"vcodec={video_codec or '-'}"
+                    f"vcodec={video_codec or '-'} "
+                    f"bitrate={result.get('bitrate') or '-'}"
                 )
             else:
                 parts.append("video=(skip)")
@@ -691,6 +732,21 @@ def _apply_probe_to_item(
                     pass
             if "video_codec" in info:
                 item["video_codec"] = str(info.get("video_codec") or "").strip().lower()
+            if "bitrate" in info:
+                try:
+                    item["bitrate"] = max(0, int(float(info.get("bitrate") or 0)))
+                except (TypeError, ValueError):
+                    item["bitrate"] = 0
+            elif item.get("width") or item.get("height"):
+                item["bitrate"] = 0
+            if not item.get("bitrate"):
+                try:
+                    dur = float(item.get("duration") or info.get("duration") or 0)
+                    size = int(item.get("size") or 0)
+                except (TypeError, ValueError):
+                    dur, size = 0.0, 0
+                if dur > 0 and size > 0:
+                    item["bitrate"] = int(round(size * 8 / dur))
             # Only mark done when we actually got resolution; otherwise allow retry.
             if item.get("width") or item.get("height"):
                 item["probe_video_meta_done"] = True
@@ -737,14 +793,39 @@ def _player_probe_key(vid: str, root: str | None) -> str:
     return f"{(root or '').strip().casefold()}::{vid}"
 
 
+def remember_cached_bitrate(item: dict) -> bool:
+    """Store bitrate from size and duration when picture meta is already cached.
+
+    This avoids a second ffprobe on files probed before bitrate was recorded.
+    It does not read the file and does not advance the library generation.
+    """
+    if not isinstance(item, dict) or "bitrate" in item:
+        return False
+    if not item.get("probe_video_meta_done"):
+        return False
+    if not (item.get("width") or item.get("height")) or "video_codec" not in item:
+        return False
+    try:
+        dur = float(item.get("duration") or 0)
+        size = int(item.get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    if dur <= 0 or size <= 0:
+        return False
+    item["bitrate"] = int(round(size * 8 / dur))
+    return True
+
+
 def _player_video_meta_done(item: dict) -> bool:
     has_dims = bool(item.get("width") or item.get("height"))
     has_codec = "video_codec" in item
-    return bool(item.get("probe_video_meta_done")) and has_dims and has_codec
+    # 0 is a probed-but-unknown rate; a missing key still needs one ffprobe.
+    has_bitrate = "bitrate" in item
+    return bool(item.get("probe_video_meta_done")) and has_dims and has_codec and has_bitrate
 
 
 def wants_player_video_meta(item: dict, *, stream_like: bool) -> bool:
-    """True when player-open should (re)probe resolution/fps/video/audio codecs."""
+    """True when player-open should (re)probe resolution/fps/bitrate/codecs."""
     if stream_like or not isinstance(item, dict):
         return False
     return not (_player_video_meta_done(item) and _audio_already_known(item))
@@ -756,7 +837,7 @@ def player_video_meta_pending(vid: str, root: str | None) -> bool:
 
 
 def schedule_player_video_meta_probe(vid: str, root: str | None, ffmpeg: str) -> bool:
-    """Start a daemon ffprobe for width/height/fps/video+audio codecs. Never blocks."""
+    """Start a daemon ffprobe for width/height/fps/bitrate/codecs. Never blocks."""
     if not vid or not ffmpeg:
         log(f"[帧率探测] 无法启动后台线程 vid={vid or '-'} ffmpeg={bool(ffmpeg)}")
         return False
@@ -785,6 +866,11 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
         if not item:
             log(f"[帧率探测] 后台跳过：未找到视频 vid={vid}")
             return
+        if remember_cached_bitrate(item):
+            try:
+                save_library_item(item, bump_gen=False)
+            except Exception as exc:
+                log(f"[帧率探测] 后台写入推算码率失败 vid={vid}: {exc}")
         path = _item_probe_path(item)
         want_duration = not _duration_already_known(item)
         want_audio = not _audio_already_known(item)
@@ -817,13 +903,14 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
         )
         saved = False
         try:
-            saved = bool(save_library_item(item))
+            saved = bool(save_library_item(item, bump_gen=False))
         except Exception as exc:
             log(f"[帧率探测] 后台写入片库失败 vid={vid}: {exc}")
         log(
             f"[帧率探测] 后台完成 vid={vid} ok={info.get('ok')} "
             f"{item.get('width') or 0}x{item.get('height') or 0}@"
             f"{item.get('fps')} vcodec={item.get('video_codec') or '-'} "
+            f"bitrate={item.get('bitrate') or '-'} "
             f"acodec={item.get('audio_codec') or '-'} "
             f"audio_hard={int(bool(item.get('audio_hard')))} "
             f"done={bool(item.get('probe_video_meta_done'))} "
@@ -843,6 +930,7 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
             fps=item.get("fps"),
             video_codec=item.get("video_codec") or "",
             audio_codec=item.get("audio_codec") or "",
+            bitrate=item.get("bitrate") or 0,
             audio_hard=bool(item.get("audio_hard")),
             err=info.get("err") or "",
             path=str(path),

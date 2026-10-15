@@ -34,7 +34,7 @@ class UiControlLayoutTests(unittest.TestCase):
         self.assertIn("function applyCachedThumb(", html)
         self.assertIn("rememberThumbObjectUrl(url, objUrl)", html)
         self.assertIn("X-VG-Thumb-Status", html)
-        self.assertIn("function requestThumbReload(img, url)", html)
+        self.assertIn("function requestThumbReload(img, url, opts)", html)
         self.assertIn("function resetThumbQueue(", html)
         self.assertIn("&defer=1", html)
         self.assertIn("THUMB_CONCURRENCY", html)

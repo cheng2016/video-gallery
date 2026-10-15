@@ -139,6 +139,7 @@ class MetadataSettingsTests(unittest.TestCase):
                             "height": 720,
                             "fps": 30.0,
                             "video_codec": "h264",
+                            "bitrate": 2_500_000,
                         },
                     ) as probe,
                     mock.patch.object(web, "save_library_item"),
@@ -146,6 +147,7 @@ class MetadataSettingsTests(unittest.TestCase):
                 ):
                     response = web.app.test_client().get("/api/info/video-id")
                 self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["bitrate"], 2_500_000)
                 probe.assert_called_once_with(
                     "ffmpeg",
                     path,
@@ -214,6 +216,7 @@ class MetadataSettingsTests(unittest.TestCase):
             "height": 1080,
             "fps": 24.0,
             "video_codec": "h264",
+            "bitrate": 1_800_000,
             "probe_video_meta_done": True,
         }
         old_ffmpeg = STATE.get("ffmpeg")
@@ -231,8 +234,83 @@ class MetadataSettingsTests(unittest.TestCase):
             self.assertEqual(body["duration"], 42.0)
             self.assertEqual(body["video_codec"], "h264")
             self.assertEqual(body["audio_codec"], "aac")
+            self.assertEqual(body["bitrate"], 1_800_000)
         finally:
             STATE["ffmpeg"] = old_ffmpeg
+
+    def test_info_endpoint_derives_bitrate_without_probe_or_cache_bump(self) -> None:
+        with TemporaryDirectory() as td:
+            path = Path(td) / "video.mp4"
+            path.write_bytes(b"video")
+            item = {
+                "id": "video-id",
+                "name": "video",
+                "filename": "video.mp4",
+                "rel": "video.mp4",
+                "ext": ".mp4",
+                "duration": 10.0,
+                "duration_h": "0:10",
+                "probe_duration_done": True,
+                "audio_codec": "aac",
+                "probe_audio_done": True,
+                "width": 1280,
+                "height": 720,
+                "fps": 30.0,
+                "video_codec": "hevc",
+                "probe_video_meta_done": True,
+                "size": 1_250_000,
+            }
+            old_ffmpeg = STATE.get("ffmpeg")
+            STATE["ffmpeg"] = "ffmpeg"
+            try:
+                with (
+                    mock.patch.object(web, "find_video_by_id", return_value=item),
+                    mock.patch.object(web, "_item_probe_path", return_value=path),
+                    mock.patch.object(
+                        web,
+                        "probe_media_info",
+                        return_value={
+                            "ok": True,
+                            "width": 1280,
+                            "height": 720,
+                            "fps": 30.0,
+                            "video_codec": "hevc",
+                            "bitrate": 0,
+                        },
+                    ) as probe,
+                    mock.patch.object(web, "save_library_item") as save,
+                    mock.patch.object(web, "_local_path_for_item", return_value=None),
+                ):
+                    response = web.app.test_client().get("/api/info/video-id")
+                    save.assert_called_once_with(item, bump_gen=False)
+                self.assertEqual(response.status_code, 200)
+                probe.assert_not_called()
+                self.assertEqual(response.get_json()["bitrate"], 1_000_000)
+            finally:
+                STATE["ffmpeg"] = old_ffmpeg
+
+    def test_rescan_keeps_probe_fields_only_for_the_same_file(self) -> None:
+        from vg.scan import _inherit_probe_fields_if_same_file
+
+        prev = {
+            "size": 1000,
+            "mtime": 10.0,
+            "width": 1280,
+            "height": 720,
+            "fps": 30.0,
+            "bitrate": 800_000,
+            "video_codec": "hevc",
+            "probe_video_meta_done": True,
+        }
+        same = {"id": "v", "size": 1000, "mtime": 10.2}
+        self.assertTrue(_inherit_probe_fields_if_same_file(same, prev))
+        self.assertEqual(same["bitrate"], 800_000)
+        self.assertEqual(same["video_codec"], "hevc")
+
+        replaced = {"id": "v", "size": 2000, "mtime": 99.0}
+        self.assertFalse(_inherit_probe_fields_if_same_file(replaced, prev))
+        self.assertNotIn("bitrate", replaced)
+        self.assertNotIn("width", replaced)
 
     def test_existing_duration_is_not_probed_again(self) -> None:
         self.assertFalse(

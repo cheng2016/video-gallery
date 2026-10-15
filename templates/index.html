@@ -2332,6 +2332,7 @@
         width: info.width || 0,
         height: info.height || 0,
         fps: info.fps || 0,
+        bitrate: Number(info.bitrate || 0),
         is_hires: !!info.is_hires,
         can_fps30: !!info.can_fps30,
         fps_gate: info.fps_gate || "",
@@ -2411,6 +2412,16 @@
       return raw.toUpperCase();
     }
 
+    function formatBitrateLabel(bps) {
+      const n = Number(bps);
+      if (!Number.isFinite(n) || n < 1000) return "";
+      if (n >= 1000000) {
+        const text = (n / 1000000).toFixed(1).replace(/\.0$/, "");
+        return text + " Mbps";
+      }
+      return Math.round(n / 1000) + " kbps";
+    }
+
     function paintPlayerChips(meta) {
       const el = $("playerChips");
       if (!el) return;
@@ -2419,6 +2430,7 @@
       const w = Number(m.width || 0);
       const h = Number(m.height || 0);
       const fps = Number(m.fps || 0);
+      const bitrate = formatBitrateLabel(m.bitrate);
       const codec = formatVideoCodecLabel(m.video_codec || "");
       const audioLabel = formatAudioCodecLabel(m.audio_codec || "", {
         probe_audio_done: !!m.probe_audio_done,
@@ -2433,6 +2445,7 @@
       }
       if (w || h) chips.push(`${w || "?"}×${h || "?"}`);
       if (fps) chips.push(`${Math.round(fps)}fps`);
+      if (bitrate) chips.push(bitrate);
       if (codec) chips.push(codec);
       if (audioLabel) {
         const warn = !!m.audio_hard || audioLabel === "无音轨";
@@ -2463,6 +2476,7 @@
       currentPlayMeta.width = info.width || 0;
       currentPlayMeta.height = info.height || 0;
       currentPlayMeta.fps = info.fps || 0;
+      currentPlayMeta.bitrate = Number(info.bitrate || 0);
       currentPlayMeta.video_codec = info.video_codec || "";
       currentPlayMeta.is_hires = !!info.is_hires;
       currentPlayMeta.can_fps30 = !!info.can_fps30;
@@ -2509,6 +2523,7 @@
             width: info.width || 0,
             height: info.height || 0,
             fps: info.fps || 0,
+            bitrate: Number(info.bitrate || 0),
             video_codec: info.video_codec || "",
             audio_codec: info.audio_codec || "",
             audio_hard: !!info.audio_hard,
@@ -5305,7 +5320,7 @@
     const LOADED_META_FIELDS = [
       "duration", "duration_h", "size_h", "has_thumb", "thumb_v", "thumb_id",
       "bad", "bad_reason", "audio_codec", "audio_hard", "probe_duration_done",
-      "probe_audio_done", "width", "height", "fps", "video_codec", "ep_count",
+      "probe_audio_done", "width", "height", "fps", "bitrate", "video_codec", "ep_count",
       "seg_count", "dup", "dup_n", "dup_reason",
     ];
 
@@ -7788,6 +7803,7 @@
         width: (extra && extra.width) || 0,
         height: (extra && extra.height) || 0,
         fps: (extra && extra.fps) || 0,
+        bitrate: Number((extra && extra.bitrate) || 0),
         video_codec: (extra && extra.video_codec) || "",
         is_hires: !!(extra && extra.is_hires),
         can_fps30: !!(extra && extra.can_fps30),
@@ -7839,6 +7855,7 @@
         width: currentPlayMeta.width || 0,
         height: currentPlayMeta.height || 0,
         fps: currentPlayMeta.fps || 0,
+        bitrate: currentPlayMeta.bitrate || 0,
         video_codec: currentPlayMeta.video_codec || "",
         probe_pending: !!(extra && extra.probe_pending),
         is_hires: !!currentPlayMeta.is_hires,

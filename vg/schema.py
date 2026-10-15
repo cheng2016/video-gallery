@@ -64,6 +64,7 @@ class VideoItem(TypedDict, total=False):
     width: int
     height: int
     fps: float
+    bitrate: int
     bad: bool
     bad_reason: str
 

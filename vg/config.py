@@ -124,8 +124,8 @@ THUMB_EXT = ".vgt"
 # otherwise fan out to several decoder threads.  Keep enough parallelism to
 # make progress without starving the web UI or video playback.
 THUMB_WORKERS_MAX = 4
-# First-scan burst: one ffmpeg process per logical CPU (each already uses
-# -threads 1).  0 means "use os.cpu_count()".
+# First-scan burst. 200 files were fastest at logical CPUs minus 2
+# (10 here, 39.1s); 8 processes took 42.5s. 0 means that cap.
 THUMB_WORKERS_BURST = 0
 # Decrypted JPEG LRU for /thumb hot path. Larger helps channel switches on
 # multi-thousand libraries without re-decrypting the same visible cards.

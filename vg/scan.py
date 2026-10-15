@@ -97,9 +97,28 @@ def _same_root(a: str | Path | None, b: str | Path | None) -> bool:
 
 SCAN_WALK_JOB_CAP = 64
 SCAN_WALK_SPLIT_MIN_CHILDREN = 8
+# Quiet incremental checks use logical CPUs minus 4 so a drive walk
+# does not take every core the catalog read also needs.
+BACKGROUND_WALK_WORKERS = 4
 # Fuse only — initial expand keeps splitting fat nodes until job_cap / balance,
 # instead of stopping at depth 2.
 SCAN_WALK_SPLIT_MAX_DEPTH = 32
+
+
+def directory_walk_workers(cpus: int | None, *, top_dirs: int, background: bool) -> int:
+    """Thread count for one directory walk.
+
+    Quiet incremental checks use logical CPUs minus 4.
+    Full scans, including quiet ones, use logical CPUs minus 2.
+    """
+    logical = max(1, int(cpus or 1))
+    if background:
+        workers = max(1, logical - BACKGROUND_WALK_WORKERS)
+    else:
+        workers = max(1, logical - 2)
+    if top_dirs <= 0:
+        return 1
+    return workers
 
 
 def _scan_walk_child_dirs(path: Path) -> list[str]:
@@ -834,16 +853,18 @@ def count_video_files_by_folder(
         on_walk_error(err if isinstance(err, OSError) else OSError(err))
 
     cpus = max(1, os.cpu_count() or 4)
-    max_workers = max(1, cpus - 2)
-    target_jobs = min(SCAN_WALK_JOB_CAP, max(max_workers, 8))
+    walk_workers = directory_walk_workers(
+        cpus,
+        top_dirs=len(top_kept),
+        background=False,
+    )
+    target_jobs = min(SCAN_WALK_JOB_CAP, max(walk_workers, 8))
     shallow_jobs, leaf_jobs = expand_scan_walk_jobs(
         root,
         top_kept,
         target_jobs=target_jobs,
     )
     job_n = len(leaf_jobs)
-    if max_workers > 1 and top_kept:
-        walk_workers = max_workers
     if walk_workers > 1:
         walk_mode = "steal_expanded" if shallow_jobs else "steal"
     steal_n = 0
@@ -1508,6 +1529,65 @@ def _load_old_video_map(cache: Path, root: Path) -> dict[str, dict]:
         return {}
 
 
+def _probe_cache_still_valid(prev: dict, item: dict) -> bool:
+    """True when prev's probe fields still describe this file.
+
+    A replaced file keeps the same path id. Size, mtime, or file_sig differing
+    means the old bitrate/resolution must not be copied forward. Missing stats
+    on either side do not count as a change, so rebuilt containers can still
+    inherit.
+    """
+    try:
+        prev_size = int(prev.get("size") or 0)
+        item_size = int(item.get("size") or 0)
+    except (TypeError, ValueError):
+        prev_size, item_size = 0, 0
+    if prev_size and item_size and prev_size != item_size:
+        return False
+    try:
+        prev_mtime = float(prev.get("mtime") or 0)
+        item_mtime = float(item.get("mtime") or 0)
+    except (TypeError, ValueError):
+        prev_mtime, item_mtime = 0.0, 0.0
+    if prev_mtime and item_mtime and abs(prev_mtime - item_mtime) >= 1.0:
+        return False
+    prev_sig = str(prev.get("file_sig") or "").strip()
+    item_sig = str(item.get("file_sig") or "").strip()
+    if prev_sig and item_sig and prev_sig != item_sig:
+        return False
+    return True
+
+
+_PROBE_FIELDS_INHERITED_ON_RESCAN = (
+    "duration",
+    "duration_h",
+    "has_audio",
+    "audio_codec",
+    "audio_channels",
+    "sample_rate",
+    "audio_hard",
+    "width",
+    "height",
+    "fps",
+    "bitrate",
+    "video_codec",
+    "probe_video_meta_done",
+    "bad",
+    "bad_reason",
+)
+
+
+def _inherit_probe_fields_if_same_file(item: dict, prev: dict) -> bool:
+    if not _probe_cache_still_valid(prev, item):
+        return False
+    changed = False
+    for key in _PROBE_FIELDS_INHERITED_ON_RESCAN:
+        if item.get(key) in (None, "", []) and prev.get(key) not in (None, "", []):
+            item[key] = prev.get(key)
+            changed = True
+    return changed
+
+
 _PROBE_FIELDS_PRESERVED_BY_THUMB_SAVE = (
     "duration",
     "duration_h",
@@ -1519,6 +1599,8 @@ _PROBE_FIELDS_PRESERVED_BY_THUMB_SAVE = (
     "width",
     "height",
     "fps",
+    "bitrate",
+    "video_codec",
     "probe_ver",
     "probe_duration_done",
     "probe_audio_done",
@@ -2528,8 +2610,8 @@ def scan_videos(
                             )
 
         cpus = max(1, os.cpu_count() or 4)
-        max_workers = max(1, cpus - 2)
-        target_jobs = min(SCAN_WALK_JOB_CAP, max(max_workers, 8))
+        foreground_workers = max(1, cpus - 2)
+        target_jobs = min(SCAN_WALK_JOB_CAP, max(foreground_workers, 8))
         if usn_hit or incremental:
             shallow_jobs, leaf_jobs = [], []
         else:
@@ -2538,9 +2620,11 @@ def scan_videos(
                 top_kept,
                 target_jobs=target_jobs,
             )
-        walk_workers = 1
-        if max_workers > 1 and top_kept:
-            walk_workers = max_workers
+        walk_workers = directory_walk_workers(
+            cpus,
+            top_dirs=len(top_kept),
+            background=quiet and incremental,
+        )
         walk_mode = "serial"
         if walk_workers > 1:
             walk_mode = "steal_expanded" if shallow_jobs else "steal"
@@ -2768,25 +2852,7 @@ def scan_videos(
             prev = old_by_id.get(vid)
             if not prev:
                 continue
-            changed_meta = False
-            for key in (
-                "duration",
-                "duration_h",
-                "has_audio",
-                "audio_codec",
-                "audio_channels",
-                "sample_rate",
-                "audio_hard",
-                "width",
-                "height",
-                "fps",
-                "probe_video_meta_done",
-                "bad",
-                "bad_reason",
-            ):
-                if item.get(key) in (None, "", []) and prev.get(key) not in (None, "", []):
-                    item[key] = prev.get(key)
-                    changed_meta = True
+            changed_meta = _inherit_probe_fields_if_same_file(item, prev)
             if prev.get("has_thumb") and not item.get("has_thumb"):
                 item["has_thumb"] = True
                 item["thumb"] = prev.get("thumb") or item.get("thumb")
