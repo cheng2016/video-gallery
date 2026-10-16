@@ -148,9 +148,9 @@ class ScanWalkParallelTests(unittest.TestCase):
             self.assertGreater(len(saves), before)
             self.assertIn("extra", self._names())
 
-    def test_background_walk_uses_cpu_minus_four(self) -> None:
-        self.assertEqual(directory_walk_workers(12, top_dirs=29, background=True), 8)
-        self.assertEqual(directory_walk_workers(4, top_dirs=3, background=True), 1)
+    def test_background_walk_uses_cpu_minus_two(self) -> None:
+        self.assertEqual(directory_walk_workers(12, top_dirs=29, background=True), 10)
+        self.assertEqual(directory_walk_workers(4, top_dirs=3, background=True), 2)
         self.assertEqual(directory_walk_workers(2, top_dirs=3, background=True), 1)
         self.assertEqual(directory_walk_workers(12, top_dirs=0, background=True), 1)
 
@@ -159,7 +159,7 @@ class ScanWalkParallelTests(unittest.TestCase):
         self.assertEqual(directory_walk_workers(16, top_dirs=8, background=False), 14)
         self.assertEqual(directory_walk_workers(4, top_dirs=3, background=False), 2)
 
-    def test_background_incremental_walk_uses_cpu_minus_four(self) -> None:
+    def test_background_incremental_walk_uses_cpu_minus_two(self) -> None:
         calls: list[int] = []
         real = __import__(
             "vg.scan", fromlist=["_run_stolen_directory_walk"]
@@ -173,7 +173,7 @@ class ScanWalkParallelTests(unittest.TestCase):
             "vg.scan._run_stolen_directory_walk", side_effect=spy
         ):
             scan_videos(self.root, do_thumbs=False, incremental=True, quiet=True)
-        self.assertEqual(calls, [8])
+        self.assertEqual(calls, [10])
         self.assertEqual(self._names(), {"alpha", "beta", "gamma"})
 
     def test_quiet_full_scan_uses_cpu_minus_two(self) -> None:

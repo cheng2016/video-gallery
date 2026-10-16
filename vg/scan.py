@@ -97,9 +97,6 @@ def _same_root(a: str | Path | None, b: str | Path | None) -> bool:
 
 SCAN_WALK_JOB_CAP = 64
 SCAN_WALK_SPLIT_MIN_CHILDREN = 8
-# Quiet incremental checks use logical CPUs minus 4 so a drive walk
-# does not take every core the catalog read also needs.
-BACKGROUND_WALK_WORKERS = 4
 # Fuse only — initial expand keeps splitting fat nodes until job_cap / balance,
 # instead of stopping at depth 2.
 SCAN_WALK_SPLIT_MAX_DEPTH = 32
@@ -108,17 +105,12 @@ SCAN_WALK_SPLIT_MAX_DEPTH = 32
 def directory_walk_workers(cpus: int | None, *, top_dirs: int, background: bool) -> int:
     """Thread count for one directory walk.
 
-    Quiet incremental checks use logical CPUs minus 4.
-    Full scans, including quiet ones, use logical CPUs minus 2.
+    Full scans and quiet incremental checks both use logical CPUs minus 2.
     """
     logical = max(1, int(cpus or 1))
-    if background:
-        workers = max(1, logical - BACKGROUND_WALK_WORKERS)
-    else:
-        workers = max(1, logical - 2)
     if top_dirs <= 0:
         return 1
-    return workers
+    return max(1, logical - 2)
 
 
 def _scan_walk_child_dirs(path: Path) -> list[str]:
