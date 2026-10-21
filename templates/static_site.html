@@ -367,6 +367,7 @@
       { id: "mtime_desc", label: "最新" },
       { id: "mtime_asc", label: "最早" },
       { id: "size_desc", label: "最大" },
+      { id: "size_asc", label: "最小" },
       { id: "duration_desc", label: "最长" },
       { id: "duration_asc", label: "最短" },
       { id: "name", label: "名称" },
@@ -505,7 +506,7 @@
       if ((state.view || "series") === "series") {
         list = collapseToSeriesCards(list);
       }
-      const rev = state.sort !== "mtime_asc" && state.sort !== "name" && state.sort !== "duration_asc";
+      const rev = state.sort !== "mtime_asc" && state.sort !== "name" && state.sort !== "duration_asc" && state.sort !== "size_asc";
       list.sort((a, b) => {
         if (state.sort === "name") return (a.name || "").localeCompare(b.name || "", "zh");
         if (state.sort.startsWith("size")) return (a.size || 0) - (b.size || 0);
