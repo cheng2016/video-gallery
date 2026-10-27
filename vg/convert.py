@@ -125,6 +125,10 @@ def _convert_job_public(job: dict) -> dict:
         "scale": int(job.get("scale") or 0) or 0,
         "video_encoder": job.get("video_encoder") or "",
         "audio_encoder": job.get("audio_encoder") or "",
+        "excerpt_start": (job.get("excerpt") or {}).get("start")
+        if isinstance(job.get("excerpt"), dict) else None,
+        "excerpt_end": (job.get("excerpt") or {}).get("end")
+        if isinstance(job.get("excerpt"), dict) else None,
     }
 
 
@@ -151,6 +155,10 @@ def convert_kind_label(job: dict) -> str:
         if ext:
             parts.append(f"转{ext}")
         return " · ".join(parts) or "转换"
+    if kind == "gif":
+        return "制作GIF"
+    if kind == "clip":
+        return "截取片段"
     return "转封装"
 
 
@@ -326,6 +334,22 @@ def list_convert_jobs(limit: int = 40) -> list[dict]:
     return [_convert_job_public(j) for j in jobs[:limit]]
 
 
+_convert_seq = 0
+
+
+def _next_convert_seq() -> int:
+    global _convert_seq
+    _convert_seq += 1
+    return _convert_seq
+
+
+def _excerpt_same(left: dict | None, right: dict | None) -> bool:
+    a = left or {}
+    b = right or {}
+    keys = ("start", "end", "fps", "width", "accurate")
+    return all(a.get(key) == b.get(key) for key in keys)
+
+
 def enqueue_convert_job(
     vid: str,
     kind: str = "mp4",
@@ -336,11 +360,31 @@ def enqueue_convert_job(
     scale: int | None = None,
     video_encoder: str | None = None,
     audio_encoder: str | None = None,
+    excerpt: dict | None = None,
 ) -> tuple[bool, str, str]:
-    """Enqueue convert/fix-audio/fps30/transcode job. Returns (ok, msg, job_id)."""
+    """Enqueue convert/fix-audio/fps30/transcode/gif/clip job. Returns (ok, msg, job_id)."""
     kind = (kind or "mp4").strip().lower()
-    if kind not in ("mp4", "fix_audio", "fps30", "transcode"):
+    if kind not in ("mp4", "fix_audio", "fps30", "transcode", "gif", "clip"):
         return False, "未知任务类型", ""
+    stored_excerpt: dict | None = None
+    if kind in ("gif", "clip"):
+        if not isinstance(excerpt, dict):
+            return False, "缺少起止时间", ""
+        try:
+            stored_excerpt = {
+                "start": round(float(excerpt["start"]), 3),
+                "end": round(float(excerpt["end"]), 3),
+            }
+        except (KeyError, TypeError, ValueError):
+            return False, "起止时间无效", ""
+        if kind == "gif":
+            try:
+                stored_excerpt["fps"] = int(excerpt["fps"])
+                stored_excerpt["width"] = int(excerpt["width"])
+            except (KeyError, TypeError, ValueError):
+                return False, "GIF 参数无效", ""
+        else:
+            stored_excerpt["accurate"] = bool(excerpt.get("accurate"))
     stored_target = None
     if kind in ("fps30", "transcode") and target_fps is not None and target_fps != "":
         try:
@@ -389,6 +433,8 @@ def enqueue_convert_job(
                     and (job.get("video_encoder") or "auto") == (stored_encoder or "auto")
                     and (job.get("audio_encoder") or "auto") == (stored_audio or "auto")
                 )
+            elif kind in ("gif", "clip"):
+                same_target = _excerpt_same(job.get("excerpt"), stored_excerpt)
             if (
                 job.get("vid") == vid
                 and job_root.casefold() == (root or "").casefold()
@@ -397,7 +443,12 @@ def enqueue_convert_job(
                 and job.get("status") in ("queued", "running")
             ):
                 return True, "已有同类任务在队列中", jid
-        job_id = hashlib.md5(f"{kind}-{vid}-{datetime.now().timestamp()}".encode()).hexdigest()[:12]
+        seq = _next_convert_seq()
+        job_id = hashlib.md5(f"{kind}-{vid}-{time.time_ns()}-{seq}".encode()).hexdigest()[:12]
+        while job_id in STATE["convert_jobs"]:
+            log(f"[转换队列] 任务 id 冲突，重新生成 kind={kind} vid={vid} id={job_id}")
+            seq = _next_convert_seq()
+            job_id = hashlib.md5(f"{kind}-{vid}-{time.time_ns()}-{seq}".encode()).hexdigest()[:12]
         STATE["convert_jobs"][job_id] = {
             "id": job_id,
             "vid": vid,
@@ -417,6 +468,7 @@ def enqueue_convert_job(
             "scale": stored_scale,
             "video_encoder": stored_encoder,
             "audio_encoder": stored_audio,
+            "excerpt": stored_excerpt,
         }
     pump_convert_queue()
     return True, "已加入转换队列", job_id
@@ -451,6 +503,10 @@ def pump_convert_queue() -> None:
             target = _fps30_worker
         elif kind == "transcode":
             target = _transcode_worker
+        elif kind in ("gif", "clip"):
+            from vg.excerpt import run_excerpt_job
+
+            target = run_excerpt_job
         else:
             target = _convert_worker
         threading.Thread(
@@ -516,8 +572,13 @@ def _kill_convert_proc(proc: subprocess.Popen | None) -> None:
             pass
 
 
-def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> dict | None:
-    """把转出的 MP4 登记进所属根目录片库（无需全盘重扫）。"""
+def _register_converted_mp4(
+    out_path: Path,
+    item_hint: dict | None = None,
+    *,
+    allow_small: bool = False,
+) -> dict | None:
+    """把转出的成片登记进所属根目录片库（无需全盘重扫）。"""
     root = root_for_item(item_hint) if item_hint else None
     if root is None:
         root = Path(STATE["root"]) if STATE.get("root") else None
@@ -532,7 +593,7 @@ def _register_converted_mp4(out_path: Path, item_hint: dict | None = None) -> di
     except (ValueError, OSError):
         return None
     out_ext = (out_path.suffix or ".mp4").lower()
-    if is_too_small_video(out_ext, st.st_size):
+    if not allow_small and is_too_small_video(out_ext, st.st_size):
         return None
 
     vid = video_id(rel)

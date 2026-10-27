@@ -1231,6 +1231,13 @@
       color: #9ec1ff;
       font-size: 0.8rem;
     }
+    .excerpt-preview {
+      max-height: 120px;
+      max-width: 220px;
+      border-radius: 6px;
+      background: #000;
+      object-fit: contain;
+    }
     .modal-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1595,6 +1602,8 @@
       <button type="button" class="btn primary" id="btnLocalOpen" title="用系统默认播放器打开">系统播放器</button>
       <button type="button" class="btn" id="btnConvertToggle" title="封装、降帧、压缩分辨率">转换</button>
       <button type="button" class="btn" id="btnCover" title="用当前画面或指定时间截帧换封面">换封面</button>
+      <button type="button" class="btn" id="btnGif" title="按起止时间生成 GIF 动图">制作GIF</button>
+      <button type="button" class="btn" id="btnClip" title="把一段时间存成新视频">截取片段</button>
       <button type="button" class="btn" id="btnCopyPath" title="复制本地文件路径">复制路径</button>
       <button type="button" class="btn" id="btnReveal" title="在文件管理器中显示">打开位置</button>
       <div class="player-chips" id="playerChips"></div>
@@ -1645,6 +1654,60 @@
         </div>
       </div>
       <div class="convert-hint" id="convertHint"></div>
+    </div>
+    <div class="convert-panel hidden" id="excerptPanel">
+      <div class="convert-row">
+        <label class="convert-field">起点
+          <input type="number" id="excerptStart" min="0" step="0.1" value="0" title="开始秒数">
+        </label>
+        <button type="button" class="btn" id="btnExcerptStartNow" title="用播放器当前时间作为起点">用当前</button>
+        <label class="convert-field">终点
+          <input type="number" id="excerptEnd" min="0" step="0.1" value="5" title="结束秒数">
+        </label>
+        <button type="button" class="btn" id="btnExcerptEndNow" title="用播放器当前时间作为终点">用当前</button>
+        <span class="convert-hint" id="excerptSpan"></span>
+      </div>
+      <div class="convert-row" id="excerptGifRow">
+        <label class="convert-field">帧率
+          <select id="gifFps" title="GIF 帧率">
+            <option value="8">8</option>
+            <option value="10" selected>10</option>
+            <option value="12">12</option>
+            <option value="15">15</option>
+          </select>
+        </label>
+        <label class="convert-field">宽度
+          <select id="gifWidth" title="GIF 宽度">
+            <option value="240">240</option>
+            <option value="320">320</option>
+            <option value="480" selected>480</option>
+            <option value="640">640</option>
+          </select>
+        </label>
+        <div class="convert-actions">
+          <button type="button" class="btn primary" id="btnStartGif">生成 GIF</button>
+        </div>
+      </div>
+      <div class="convert-row" id="excerptClipRow" style="display:none">
+        <label class="convert-field">方式
+          <select id="clipMode" title="剪切方式">
+            <option value="copy">快速剪切</option>
+            <option value="accurate">精确重编码</option>
+          </select>
+        </label>
+        <div class="convert-actions">
+          <button type="button" class="btn primary" id="btnStartClip">保存为新视频</button>
+        </div>
+      </div>
+      <div class="convert-row">
+        <button type="button" class="btn" id="btnCancelExcerpt" style="display:none">取消</button>
+        <span class="convert-progress" id="excerptProgress"></span>
+      </div>
+      <div class="convert-row">
+        <img id="excerptPreview" class="excerpt-preview" alt="GIF 预览" style="display:none">
+        <button type="button" class="btn" id="btnExcerptOpen" style="display:none">打开生成文件</button>
+      </div>
+      <div class="convert-hint" id="excerptHint"></div>
     </div>
     <div id="coverPanel" class="cover-panel" style="display:none">
       <label>截帧时间（秒） <input type="number" id="coverSeek" min="0" step="0.5" value="3" style="width:5em" /></label>
@@ -7225,6 +7288,8 @@
     let currentConvertJobId = "";
     let currentConvertVid = "";
     let currentConvertKind = "";
+    let excerptMode = "";
+    let excerptSeedVid = "";
     let playProgressTimer = 0;
     let probePollTimer = 0;
 
@@ -7368,9 +7433,146 @@
       }
       if (cancel) cancel.style.display = converting ? "" : "none";
       if (converting && panel) panel.classList.remove("hidden");
+      if (converting) {
+        const excerptPanel = $("excerptPanel");
+        if (excerptPanel) excerptPanel.classList.add("hidden");
+      }
       const prog = $("transcodeProgress");
       if (prog && !converting) prog.textContent = "";
       if (!converting) updatePlayerConvertUi(currentPlayMeta || {});
+    }
+
+    function jobIsExcerpt(kind) {
+      return kind === "gif" || kind === "clip";
+    }
+
+    function applyExcerptMode(mode) {
+      excerptMode = mode === "clip" ? "clip" : "gif";
+      const gifRow = $("excerptGifRow");
+      const clipRow = $("excerptClipRow");
+      if (gifRow) gifRow.style.display = excerptMode === "gif" ? "" : "none";
+      if (clipRow) clipRow.style.display = excerptMode === "clip" ? "" : "none";
+      const hint = $("excerptHint");
+      if (hint) {
+        hint.textContent = excerptMode === "gif"
+          ? "按起止时间生成 GIF，保存在原视频旁边。最长 20 秒，完成后可在这里预览。"
+          : "快速剪切按关键帧切开，几乎不重新编码；精确重编码按填写的秒数切开，并加入片库。";
+      }
+    }
+
+    function paintExcerptSpan() {
+      const el = $("excerptSpan");
+      if (!el) return;
+      const start = Number($("excerptStart") && $("excerptStart").value);
+      const end = Number($("excerptEnd") && $("excerptEnd").value);
+      if (!(end > start)) {
+        el.textContent = "终点需晚于起点";
+        return;
+      }
+      const span = end - start;
+      el.textContent = excerptMode === "gif" && span > 20
+        ? `约 ${span.toFixed(1)} 秒 · 超过 GIF 上限 20 秒`
+        : `约 ${span.toFixed(1)} 秒`;
+    }
+
+    function seedExcerptTimes() {
+      if (!currentPlayId || excerptSeedVid === currentPlayId) {
+        paintExcerptSpan();
+        return;
+      }
+      excerptSeedVid = currentPlayId;
+      const video = $("player");
+      const cur = video && video.currentTime > 0 ? video.currentTime : 0;
+      const dur = video && isFinite(video.duration) ? video.duration : 0;
+      const start = Math.round(cur * 10) / 10;
+      let end = dur ? Math.min(dur, cur + 5) : cur + 5;
+      if (end <= start) end = start + 5;
+      if ($("excerptStart")) $("excerptStart").value = start.toFixed(1);
+      if ($("excerptEnd")) $("excerptEnd").value = (Math.round(end * 10) / 10).toFixed(1);
+      paintExcerptSpan();
+    }
+
+    function setExcerptFromPlayer(which) {
+      const video = $("player");
+      const cur = video ? (video.currentTime || 0) : 0;
+      const dur = video && isFinite(video.duration) ? video.duration : 0;
+      const rounded = Math.round(cur * 10) / 10;
+      if (which === "start") {
+        if ($("excerptStart")) $("excerptStart").value = rounded.toFixed(1);
+        const end = Number($("excerptEnd") && $("excerptEnd").value);
+        if (!(end > rounded)) {
+          const next = dur ? Math.min(dur, rounded + 5) : rounded + 5;
+          if ($("excerptEnd")) $("excerptEnd").value = (Math.round(Math.max(next, rounded + 0.5) * 10) / 10).toFixed(1);
+        }
+      } else if ($("excerptEnd")) {
+        $("excerptEnd").value = rounded.toFixed(1);
+      }
+      paintExcerptSpan();
+    }
+
+    function clearExcerptResult() {
+      const img = $("excerptPreview");
+      if (img) {
+        img.style.display = "none";
+        img.removeAttribute("src");
+      }
+      const openBtn = $("btnExcerptOpen");
+      if (openBtn) {
+        openBtn.style.display = "none";
+        openBtn.dataset.jobId = "";
+      }
+    }
+
+    function showExcerptResult(kind, jobId) {
+      const openBtn = $("btnExcerptOpen");
+      if (openBtn) {
+        openBtn.style.display = jobId ? "" : "none";
+        openBtn.dataset.jobId = jobId || "";
+      }
+      const img = $("excerptPreview");
+      if (!img) return;
+      if (kind === "gif" && jobId) {
+        img.src = "/api/excerpt/job/" + encodeURIComponent(jobId) + "/file?t=" + Date.now();
+        img.style.display = "";
+      } else {
+        img.style.display = "none";
+        img.removeAttribute("src");
+      }
+      const panel = $("excerptPanel");
+      if (panel && jobId) panel.classList.remove("hidden");
+    }
+
+    function setExcerptUi(busy) {
+      const gifBtn = $("btnStartGif");
+      const clipBtn = $("btnStartClip");
+      if (gifBtn) gifBtn.disabled = !!busy;
+      if (clipBtn) clipBtn.disabled = !!busy;
+      const cancel = $("btnCancelExcerpt");
+      if (cancel) cancel.style.display = busy ? "" : "none";
+      const prog = $("excerptProgress");
+      if (prog && !busy) prog.textContent = "";
+      if (busy) {
+        const panel = $("excerptPanel");
+        if (panel) panel.classList.remove("hidden");
+        applyExcerptMode(currentConvertKind === "clip" ? "clip" : (excerptMode || "gif"));
+        const convert = $("convertPanel");
+        if (convert) convert.classList.add("hidden");
+      }
+    }
+
+    function toggleExcerpt(mode) {
+      const panel = $("excerptPanel");
+      if (!panel) return;
+      if (!panel.classList.contains("hidden") && excerptMode === mode) {
+        panel.classList.add("hidden");
+        return;
+      }
+      if ($("coverPanel")) $("coverPanel").style.display = "none";
+      const convert = $("convertPanel");
+      if (convert) convert.classList.add("hidden");
+      panel.classList.remove("hidden");
+      applyExcerptMode(mode);
+      seedExcerptTimes();
     }
 
     function updateToMp4Button(kind, ext) {
@@ -7566,13 +7768,17 @@
       currentConvertKind = "";
       if (currentPlayMeta) currentPlayMeta.convertKind = "";
       setConvertUi(false);
+      setExcerptUi(false);
     }
 
     async function pollConvertJob(jobId, doneLabel) {
       stopConvertPoll();
       currentConvertJobId = jobId;
       if (!currentConvertVid) currentConvertVid = currentPlayId || "";
-      if (convertPlayerAttached()) setConvertUi(true);
+      if (convertPlayerAttached()) {
+        if (jobIsExcerpt(currentConvertKind)) setExcerptUi(true);
+        else setConvertUi(true);
+      }
       const tick = async () => {
         try {
           const r = await fetch("/api/convert-mp4/job/" + encodeURIComponent(jobId));
@@ -7591,21 +7797,29 @@
           if (kind) currentConvertKind = kind;
           if (st === "done") {
             stopConvertPoll();
+            const doneKind = kind || currentConvertKind || "";
+            const outPath = data.out_path || "";
             finishConvertJobUi();
-            if (attached) $("modalInfo").textContent = msg || (doneLabel || "完成，已加入片库");
-            // Soft refresh: keep filters/tags/scroll; only pull updated catalog.
-            try {
-              clientLog("convert_done_soft_refresh", {
-                job_id: jobId,
-                kind: kind || currentConvertKind || "",
-                out_path: data.out_path || "",
-              });
-              await refresh({ soft: true, nav: true });
-            } catch (err) {
-              clientLog("convert_done_soft_refresh_failed", {
-                job_id: jobId,
-                error: String(err && err.message ? err.message : err),
-              }, "error");
+            if (attached) {
+              $("modalInfo").textContent = msg || (doneLabel || "完成，已加入片库");
+              if (outPath) $("modalInfo").title = outPath;
+              if (jobIsExcerpt(doneKind)) showExcerptResult(doneKind, jobId);
+            }
+            if (doneKind !== "gif") {
+              // Soft refresh: keep filters/tags/scroll; only pull updated catalog.
+              try {
+                clientLog("convert_done_soft_refresh", {
+                  job_id: jobId,
+                  kind: doneKind,
+                  out_path: outPath,
+                });
+                await refresh({ soft: true, nav: true });
+              } catch (err) {
+                clientLog("convert_done_soft_refresh_failed", {
+                  job_id: jobId,
+                  error: String(err && err.message ? err.message : err),
+                }, "error");
+              }
             }
             if (!attached) {
               alert(msg || (doneLabel || "转换完成，已加入片库"));
@@ -7624,12 +7838,18 @@
           }
           if (attached) {
             $("modalInfo").textContent = msg || (`处理中… ${pct}%`);
-            const prog = $("transcodeProgress");
-            if (prog) prog.textContent = msg || (`处理中… ${pct}%`);
-            const startBtn = $("btnStartTranscode");
-            if (startBtn) startBtn.textContent = `转换中 ${pct}%`;
-            const panel = $("convertPanel");
-            if (panel) panel.classList.remove("hidden");
+            if (jobIsExcerpt(kind)) {
+              const prog = $("excerptProgress");
+              if (prog) prog.textContent = msg || (`处理中… ${pct}%`);
+              setExcerptUi(true);
+            } else {
+              const prog = $("transcodeProgress");
+              if (prog) prog.textContent = msg || (`处理中… ${pct}%`);
+              const startBtn = $("btnStartTranscode");
+              if (startBtn) startBtn.textContent = `转换中 ${pct}%`;
+              const panel = $("convertPanel");
+              if (panel) panel.classList.remove("hidden");
+            }
           }
           syncQueueBadgeFromJobs([{ ...data, id: jobId }]);
         } catch (e) {
@@ -7730,6 +7950,59 @@
 
     async function startFps30() {
       await startTranscode();
+    }
+
+    async function startExcerpt(mode) {
+      if (!currentPlayId) return;
+      const playKind = (currentPlayMeta && currentPlayMeta.kind) || currentPlayKind || "";
+      const playExt = String((currentPlayMeta && currentPlayMeta.ext) || "").toLowerCase();
+      if (playKind === "m3u8" || playKind === "ts_set" || playExt === ".m3u8") {
+        $("modalInfo").textContent = "流媒体请先转成文件，再制作 GIF 或截取片段";
+        return;
+      }
+      const start = Number($("excerptStart") && $("excerptStart").value);
+      const end = Number($("excerptEnd") && $("excerptEnd").value);
+      if (!(end > start)) {
+        $("modalInfo").textContent = "终点必须晚于起点";
+        return;
+      }
+      if (mode === "gif" && (end - start) > 20) {
+        $("modalInfo").textContent = "GIF 最长 20 秒，更长请用「截取片段」";
+        return;
+      }
+      const body = { mode: mode, start: start, end: end };
+      if (mode === "gif") {
+        body.fps = Number($("gifFps") && $("gifFps").value) || 10;
+        body.width = Number($("gifWidth") && $("gifWidth").value) || 480;
+      } else {
+        body.accurate = !!($("clipMode") && $("clipMode").value === "accurate");
+      }
+      currentConvertKind = mode;
+      currentConvertVid = currentPlayId;
+      clearExcerptResult();
+      setExcerptUi(true);
+      $("modalInfo").textContent = mode === "gif" ? "正在提交 GIF…" : "正在提交截取…";
+      try {
+        const root = (currentPlayMeta && currentPlayMeta.root) || "";
+        const rootQ = root ? ("?root=" + encodeURIComponent(root)) : "";
+        const r = await fetch("/api/excerpt/" + encodeURIComponent(currentPlayId) + rootQ, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok || !data.ok || !data.job_id) {
+          finishConvertJobUi();
+          $("modalInfo").textContent = (data && data.msg) || "无法开始";
+          return;
+        }
+        $("modalInfo").textContent = (data.msg || "已加入队列") + " 进度也可在「转换队列」查看。";
+        refreshQueueBadge();
+        await pollConvertJob(data.job_id, mode === "gif" ? "GIF 已生成" : "片段已加入片库");
+      } catch (e) {
+        finishConvertJobUi();
+        $("modalInfo").textContent = "请求失败: " + e;
+      }
     }
 
     function bindPlayProgress(video) {
@@ -7833,6 +8106,14 @@
       state.lastPlayId = id;
       saveUiPrefs();
       if ($("coverPanel")) $("coverPanel").style.display = "none";
+      if (excerptSeedVid !== id) {
+        excerptSeedVid = "";
+        clearExcerptResult();
+      }
+      const excerptPanel = $("excerptPanel");
+      if (excerptPanel && !(currentConvertVid === id && jobIsExcerpt(currentConvertKind))) {
+        excerptPanel.classList.add("hidden");
+      }
       $("modalTitle").textContent = name;
       paintPlayerInfoTip();
       updatePlayerConvertUi({ ...(extra || {}), kind, ext });
@@ -7867,7 +8148,10 @@
       }, "INFO", currentOperationId);
       $("modal").classList.add("open");
       bindPlayProgress(video);
-      if (convertPlayerAttached()) setConvertUi(true);
+      if (convertPlayerAttached()) {
+        if (jobIsExcerpt(currentConvertKind)) setExcerptUi(true);
+        else setConvertUi(true);
+      }
       if (extra && extra.probe_pending) {
         startProbePoll(id, currentPlayMeta.root || "");
       }
@@ -7983,6 +8267,9 @@
       if ($("coverPanel")) $("coverPanel").style.display = "none";
       const panel = $("convertPanel");
       if (panel) panel.classList.add("hidden");
+      const excerptPanel = $("excerptPanel");
+      if (excerptPanel) excerptPanel.classList.add("hidden");
+      clearExcerptResult();
       const startBtn = $("btnStartTranscode");
       if (startBtn) {
         startBtn.disabled = false;
@@ -8921,11 +9208,46 @@
         const panel = $("convertPanel");
         if (!panel) return;
         panel.classList.toggle("hidden");
+        if (!panel.classList.contains("hidden")) {
+          const excerpt = $("excerptPanel");
+          if (excerpt) excerpt.classList.add("hidden");
+        }
         updatePlayerConvertUi(currentPlayMeta || {});
       });
     }
     if ($("btnStartTranscode")) $("btnStartTranscode").addEventListener("click", () => startTranscode());
     if ($("btnCancelTranscode")) $("btnCancelTranscode").addEventListener("click", () => cancelConvertMp4());
+    if ($("btnGif")) $("btnGif").addEventListener("click", () => toggleExcerpt("gif"));
+    if ($("btnClip")) $("btnClip").addEventListener("click", () => toggleExcerpt("clip"));
+    if ($("btnExcerptStartNow")) $("btnExcerptStartNow").addEventListener("click", () => setExcerptFromPlayer("start"));
+    if ($("btnExcerptEndNow")) $("btnExcerptEndNow").addEventListener("click", () => setExcerptFromPlayer("end"));
+    if ($("excerptStart")) $("excerptStart").addEventListener("input", paintExcerptSpan);
+    if ($("excerptEnd")) $("excerptEnd").addEventListener("input", paintExcerptSpan);
+    if ($("btnStartGif")) $("btnStartGif").addEventListener("click", () => startExcerpt("gif"));
+    if ($("btnStartClip")) $("btnStartClip").addEventListener("click", () => startExcerpt("clip"));
+    if ($("btnCancelExcerpt")) $("btnCancelExcerpt").addEventListener("click", () => cancelConvertMp4());
+    if ($("btnExcerptOpen")) {
+      $("btnExcerptOpen").addEventListener("click", async () => {
+        const jobId = $("btnExcerptOpen").dataset.jobId || "";
+        if (!jobId) return;
+        try {
+          const r = await fetch("/api/excerpt/job/" + encodeURIComponent(jobId) + "/open", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const data = await r.json();
+          if (!r.ok || !data.ok) {
+            $("modalInfo").textContent = (data && data.msg) || "无法打开";
+            return;
+          }
+          $("modalInfo").textContent = data.msg || "已打开";
+          if (data.path) $("modalInfo").title = data.path;
+        } catch (err) {
+          $("modalInfo").textContent = "打开失败: " + err;
+        }
+      });
+    }
     if ($("transcodeExt")) $("transcodeExt").addEventListener("change", () => {
       $("transcodeExt").dataset.userPicked = "1";
     });
@@ -9079,6 +9401,8 @@
       if (!j) return "转换";
       if (j.kind === "fix_audio") return "修声音";
       if (j.kind === "fps30") return "降帧" + (j.target_fps ? ("→" + j.target_fps) : "");
+      if (j.kind === "gif") return "制作GIF";
+      if (j.kind === "clip") return "截取片段";
       if (j.kind === "transcode") {
         const parts = [];
         if (j.target_fps) parts.push("降帧→" + j.target_fps);
@@ -9117,7 +9441,7 @@
           queuePollTimer = 0;
         }
         if (!jobs.length) {
-          body.textContent = "队列为空。播放页「转换」面板可转封装 / 降帧 / 压缩；清理页可批量加入。";
+          body.textContent = "队列为空。播放页可转换、制作 GIF、截取片段；清理页可批量加入。";
           return;
         }
         const statusLabel = {
@@ -9205,6 +9529,10 @@
         const p = $("coverPanel");
         if (!p) return;
         p.style.display = p.style.display === "none" ? "flex" : "none";
+        if (p.style.display !== "none") {
+          const excerpt = $("excerptPanel");
+          if (excerpt) excerpt.classList.add("hidden");
+        }
         const video = $("player");
         if (video && $("coverSeek") && video.currentTime > 0) {
           $("coverSeek").value = String(Math.floor(video.currentTime * 10) / 10);
