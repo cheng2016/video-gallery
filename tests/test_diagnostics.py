@@ -18,6 +18,14 @@ class DiagnosticsTests(unittest.TestCase):
     def tearDown(self) -> None:
         diagnostics.set_full_logging(False)
 
+    def test_emit_swallows_bad_field_text(self) -> None:
+        class Bad:
+            def __str__(self) -> str:
+                raise RuntimeError("nope")
+
+        with mock.patch("vg.bootlog.write"):
+            diagnostics.emit("WARN", "emit_guard", force=True, bad=Bad())
+
     def test_error_always_prints_when_full_logging_is_off(self) -> None:
         diagnostics.set_full_logging(False)
         output = io.StringIO()

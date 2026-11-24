@@ -3978,6 +3978,60 @@ def _paths_for_delete(item: dict) -> list[Path]:
     return [p] if p and p.is_file() else []
 
 
+def _plan_root_delete(
+    rows: list,
+    *,
+    root_l: str,
+    removed_keys: set[tuple[str, str]],
+    removed_ids: set[tuple[str, str]],
+    root_of,
+    rel_of,
+) -> tuple[list, dict]:
+    """Split one disk catalog into rows to keep, plus delete-count facts.
+
+    absent_keys: a removed (root, rel) had no row in this snapshot.
+    extra_rows: one key matched more than one row, so those extras are dropped.
+    stale_rows: a kept row still carries an id that this delete removed.
+    """
+    keys_here = {rel for rk, rel in removed_keys if rk == root_l}
+    ids_here = {ident for rk, ident in removed_ids if rk == root_l}
+    kept: list = []
+    matched_rels: set[str] = set()
+    removed_rows = 0
+    stale_rows = 0
+    stale_ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            kept.append(row)
+            continue
+        row_root = (root_of(row) or "").lower()
+        row_rel = rel_of(row)
+        if (row_root, row_rel) in removed_keys:
+            if row_root == root_l:
+                removed_rows += 1
+                matched_rels.add(row_rel)
+            continue
+        kept.append(row)
+        overlap = {
+            str(row.get("id") or ""),
+            str(row.get("_thumb_id") or ""),
+        }
+        overlap.discard("")
+        overlap &= ids_here
+        if not overlap:
+            continue
+        stale_rows += 1
+        if len(stale_ids) < 8:
+            stale_ids.append(sorted(overlap)[0])
+    return kept, {
+        "removed_rows": removed_rows,
+        "absent_keys": len(keys_here - matched_rels),
+        "extra_rows": removed_rows - len(matched_rels),
+        "stale_rows": stale_rows,
+        "stale_ids": stale_ids,
+    }
+
+
 @app.route("/api/delete", methods=["POST"])
 @_serialized(_delete_lock)
 def api_delete():
@@ -4002,23 +4056,87 @@ def api_delete():
     if legacy_ids and len(get_mounted_roots()) > 1:
         return jsonify({"ok": False, "msg": "多盘删除必须携带每项的 root 和 rel"}), 400
 
+    started = time.perf_counter()
     removed = []
     errors = []
+    t_catalog = time.perf_counter()
     catalog = list(videos_for_scope(None))
+    catalog_ms = (time.perf_counter() - t_catalog) * 1000.0
+    trash_ms = 0.0
+    trash_calls = 0
+    resolve_ms = 0.0
+    save_ms = 0.0
+    publish_ms = 0.0
+    remaining_ms = 0.0
+    invalidate_ms = 0.0
+    missing_source = 0
+    roots_saved = 0
+    index_absent = 0
+    index_extra = 0
+    index_stale = 0
     removed_keys: set[tuple[str, str]] = set()
+    removed_ids: set[tuple[str, str]] = set()
     affected_roots: set[str] = set()
+
+    root_norm: dict[str, str] = {}
+    root_arg_norm: dict[str, str] = {}
+
+    def _safe_perf(event: str, elapsed_ms: float, **fields) -> None:
+        try:
+            diagnostic_perf(event, elapsed_ms, **fields)
+        except Exception:
+            pass
+
+    def _safe_emit(level: str, event: str, **fields) -> None:
+        try:
+            diagnostic_emit(level, event, **fields)
+        except Exception:
+            pass
+
+    def _remember_removed(item: dict, item_root: str, vid: str) -> None:
+        root_l = item_root.lower()
+        removed_keys.add((root_l, _rel_key(item)))
+        affected_roots.add(item_root)
+        for ident in (
+            vid,
+            str(item.get("id") or ""),
+            str(item.get("_thumb_id") or ""),
+        ):
+            if ident:
+                removed_ids.add((root_l, ident))
+
+    def _note_resolve(elapsed_ms: float, **fields) -> None:
+        nonlocal resolve_ms
+        resolve_ms += elapsed_ms
+        _safe_perf("delete_resolve", elapsed_ms, **fields)
 
     def _root_s(item: dict) -> str:
         raw = (item.get("_lib_root") or item.get("root") or "").strip()
         if not raw:
             return ""
+        cached = root_norm.get(raw)
+        if cached is not None:
+            return cached
         try:
-            return str(Path(raw).expanduser().resolve())
+            norm = str(Path(raw).expanduser().resolve())
         except OSError:
-            return raw
+            norm = raw
+        root_norm[raw] = norm
+        return norm
 
     def _rel_key(item: dict) -> str:
         return (item.get("rel") or "").replace("\\", "/").strip("/").casefold()
+
+    def _norm_root_arg(root_arg: str) -> str:
+        cached = root_arg_norm.get(root_arg)
+        if cached is not None:
+            return cached
+        try:
+            norm = str(Path(root_arg).expanduser().resolve()).lower()
+        except OSError:
+            norm = root_arg.lower()
+        root_arg_norm[root_arg] = norm
+        return norm
 
     for raw in requested:
         req = raw if isinstance(raw, dict) else {"id": raw}
@@ -4027,19 +4145,16 @@ def api_delete():
             errors.append({"id": vid, "msg": "无效 id"})
             continue
         prefer_root = str(req.get("root") or "").strip()
+        prefer_root_norm = _norm_root_arg(prefer_root) if prefer_root else ""
         prefer_rel = str(req.get("rel") or "").replace("\\", "/").strip("/").casefold()
         if len(get_mounted_roots()) > 1 and (not prefer_root or not prefer_rel):
             errors.append({"id": vid, "msg": "多盘删除缺少 root 或 rel"})
             continue
         item = None
+        t_match = time.perf_counter()
         for candidate in catalog:
-            if prefer_root:
-                try:
-                    same_root = _root_s(candidate).lower() == str(Path(prefer_root).expanduser().resolve()).lower()
-                except OSError:
-                    same_root = _root_s(candidate).lower() == prefer_root.lower()
-                if not same_root:
-                    continue
+            if prefer_root and _root_s(candidate).lower() != prefer_root_norm:
+                continue
             if (
                 prefer_rel
                 and _rel_key(candidate) == prefer_rel
@@ -4052,68 +4167,222 @@ def api_delete():
             ):
                 item = candidate
                 break
+        match_ms = (time.perf_counter() - t_match) * 1000.0
+        find_ms = 0.0
         if item is None:
+            t_find = time.perf_counter()
             item = find_video_by_id(vid, prefer_root=prefer_root or None)
+            find_ms = (time.perf_counter() - t_find) * 1000.0
         if not item:
+            _note_resolve(
+                match_ms + find_ms,
+                video_id=vid,
+                catalog_rows=len(catalog),
+                match_ms=round(match_ms, 1),
+                find_ms=round(find_ms, 1),
+                found=False,
+            )
             errors.append({"id": vid, "msg": "未找到"})
             continue
         item_root = _root_s(item)
         if prefer_root and item_root:
-            try:
-                wanted_root = str(Path(prefer_root).expanduser().resolve())
-            except OSError:
-                wanted_root = prefer_root
-            if item_root.lower() != wanted_root.lower():
+            if item_root.lower() != prefer_root_norm:
+                _note_resolve(
+                    match_ms + find_ms,
+                    video_id=vid,
+                    catalog_rows=len(catalog),
+                    match_ms=round(match_ms, 1),
+                    find_ms=round(find_ms, 1),
+                    found=False,
+                )
                 errors.append({"id": vid, "msg": "磁盘归属不匹配"})
                 continue
         if not item_root:
+            _note_resolve(
+                match_ms + find_ms,
+                video_id=vid,
+                catalog_rows=len(catalog),
+                match_ms=round(match_ms, 1),
+                find_ms=round(find_ms, 1),
+                found=False,
+            )
             errors.append({"id": vid, "msg": "缺少磁盘归属，未删除"})
             continue
 
+        t_paths = time.perf_counter()
         paths = _paths_for_delete(item)
+        paths_ms = (time.perf_counter() - t_paths) * 1000.0
+        _note_resolve(
+            match_ms + find_ms + paths_ms,
+            video_id=vid,
+            catalog_rows=len(catalog),
+            match_ms=round(match_ms, 1),
+            find_ms=round(find_ms, 1),
+            paths_ms=round(paths_ms, 1),
+            paths=len(paths),
+        )
         if not paths:
             errors.append({"id": vid, "msg": "文件不存在"})
+            missing_source += 1
+            _safe_emit(
+                "WARN",
+                "delete_source_missing",
+                force=True,
+                video_id=vid,
+                root=item_root,
+                rel=item.get("rel"),
+                kind=item.get("kind"),
+                action="removed_from_index",
+            )
             # 仍从索引去掉
             removed.append(vid)
-            removed_keys.add((item_root.lower(), _rel_key(item)))
-            affected_roots.add(item_root)
+            _remember_removed(item, item_root, vid)
             continue
         ok_all = True
         for p in paths:
+            t_trash = time.perf_counter()
             ok, msg = move_to_trash(p)
+            trash_ms += (time.perf_counter() - t_trash) * 1000.0
+            trash_calls += 1
             if not ok:
                 ok_all = False
                 errors.append({"id": vid, "msg": msg, "path": str(p)})
                 break
         if ok_all:
             removed.append(vid)
-            removed_keys.add((item_root.lower(), _rel_key(item)))
-            affected_roots.add(item_root)
+            _remember_removed(item, item_root, vid)
+            t_inv = time.perf_counter()
             thumb_cache_invalidate(item.get("_thumb_id") or item.get("id") or vid)
+            invalidate_ms += (time.perf_counter() - t_inv) * 1000.0
 
     def _was_removed(item: dict) -> bool:
         return (_root_s(item).lower(), _rel_key(item)) in removed_keys
 
+    t_remaining = time.perf_counter()
     remaining = [v for v in catalog if not _was_removed(v)]
+    remaining_ms = (time.perf_counter() - t_remaining) * 1000.0
+    _safe_perf(
+        "delete_remaining_filter",
+        remaining_ms,
+        catalog_rows=len(catalog),
+        kept=len(remaining),
+        removed=len(removed_keys),
+    )
     STATE["videos"] = remaining
     for root_s in affected_roots:
+        t_save = time.perf_counter()
+        rows_before = 0
+        rows_after = 0
+        removed_rows = 0
+        absent_keys = 0
+        extra_rows = 0
+        stale_rows = 0
+        stale_ids: list[str] = []
+        save_error = ""
         try:
             root_catalog = read_root_library(root_s)
             if root_catalog is None:
                 root_catalog = [
                     v for v in catalog if _root_s(v).lower() == root_s.lower()
                 ]
-            save_root_library(
-                root_s,
-                [v for v in root_catalog if not _was_removed(v)],
+            rows_before = len(root_catalog)
+            kept_rows, plan = _plan_root_delete(
+                root_catalog,
+                root_l=root_s.lower(),
+                removed_keys=removed_keys,
+                removed_ids=removed_ids,
+                root_of=_root_s,
+                rel_of=_rel_key,
             )
+            rows_after = len(kept_rows)
+            removed_rows = plan["removed_rows"]
+            absent_keys = plan["absent_keys"]
+            extra_rows = plan["extra_rows"]
+            stale_rows = plan["stale_rows"]
+            stale_ids = plan["stale_ids"]
+            index_absent += absent_keys
+            index_extra += extra_rows
+            index_stale += stale_rows
+            save_root_library(root_s, kept_rows)
+            roots_saved += 1
         except Exception as e:
+            save_error = str(e)[:200]
             errors.append({"root": root_s, "msg": f"索引保存失败: {e}"})
+        finally:
+            root_save_ms = (time.perf_counter() - t_save) * 1000.0
+            save_ms += root_save_ms
+            _safe_perf(
+                "delete_index_save", root_save_ms,
+                force=bool(save_error) or extra_rows != 0 or stale_rows != 0,
+                root=root_s,
+                rows_before=rows_before,
+                rows_after=rows_after,
+                removed_rows=removed_rows,
+                absent_keys=absent_keys,
+                extra_rows=extra_rows,
+                stale_rows=stale_rows,
+                save_error=save_error,
+            )
+            if not save_error and extra_rows:
+                _safe_emit(
+                    "WARN",
+                    "delete_index_extra_rows",
+                    force=True,
+                    root=root_s,
+                    extra_rows=extra_rows,
+                    removed_rows=removed_rows,
+                )
+            if not save_error and stale_rows:
+                _safe_emit(
+                    "WARN",
+                    "delete_index_id_kept",
+                    force=True,
+                    root=root_s,
+                    stale_rows=stale_rows,
+                    ids=",".join(stale_ids),
+                )
 
+    t_publish = time.perf_counter()
     if get_mounted_roots():
         publish_unified_library()
     else:
         rebuild_indexes(remaining)
+    publish_ms = (time.perf_counter() - t_publish) * 1000.0
+
+    total_ms = (time.perf_counter() - started) * 1000.0
+    _safe_perf(
+        "delete_profile", total_ms, force=True,
+        requested=len(requested),
+        removed=len(removed),
+        errors=len(errors),
+        missing_source=missing_source,
+        roots_saved=roots_saved,
+        catalog_ms=round(catalog_ms, 1),
+        resolve_ms=round(resolve_ms, 1),
+        trash_ms=round(trash_ms, 1),
+        trash_calls=trash_calls,
+        save_ms=round(save_ms, 1),
+        publish_ms=round(publish_ms, 1),
+        remaining_ms=round(remaining_ms, 1),
+        invalidate_ms=round(invalidate_ms, 1),
+        index_absent=index_absent,
+        index_extra=index_extra,
+        index_stale=index_stale,
+        other_ms=round(
+            max(
+                0.0,
+                total_ms
+                - catalog_ms
+                - resolve_ms
+                - trash_ms
+                - save_ms
+                - publish_ms
+                - remaining_ms
+                - invalidate_ms,
+            ),
+            1,
+        ),
+    )
 
     return jsonify({
         "ok": True,

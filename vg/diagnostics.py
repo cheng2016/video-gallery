@@ -81,24 +81,28 @@ def emit(
     ERROR/WARN always print. Other levels need force=True (key/slow stages)
     or must go through call() for full-logging method traces.
     Full logging does not dump loop successes.
+    Never raises: a logging failure must not change the caller's result.
     """
-    level_n = (level or "INFO").upper()
-    if level_n not in {"ERROR", "WARN"} and not force:
-        return
-    suffix = _fields_text(fields)
-    line = f"[{level_n}] {event}"
-    if suffix:
-        line += " " + suffix
-    if detail:
-        line += " detail=" + str(detail).replace("\r", " ").replace("\n", " | ")
     try:
-        print(line, flush=True)
-    except Exception:
-        pass
-    try:
-        from vg import bootlog
+        level_n = (level or "INFO").upper()
+        if level_n not in {"ERROR", "WARN"} and not force:
+            return
+        suffix = _fields_text(fields)
+        line = f"[{level_n}] {event}"
+        if suffix:
+            line += " " + suffix
+        if detail:
+            line += " detail=" + str(detail).replace("\r", " ").replace("\n", " | ")
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
+        try:
+            from vg import bootlog
 
-        bootlog.write(line, urgent=level_n == "ERROR")
+            bootlog.write(line, urgent=level_n == "ERROR")
+        except Exception:
+            pass
     except Exception:
         pass
 

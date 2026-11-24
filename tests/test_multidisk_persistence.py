@@ -319,5 +319,73 @@ class MultiDiskPersistenceTests(unittest.TestCase):
         self.assertEqual({row["root"] for row in rows}, {str(self.root_a), str(self.root_b)})
 
 
+class DeleteIndexPlanTests(unittest.TestCase):
+    def plan(self, rows, keys, ids):
+        return web._plan_root_delete(
+            rows,
+            root_l="d:\\lib",
+            removed_keys=keys,
+            removed_ids=ids,
+            root_of=lambda item: item.get("root") or "",
+            rel_of=lambda item: (item.get("rel") or "").casefold(),
+        )
+
+    def test_matching_row_is_removed_without_extra_or_stale(self):
+        kept, stats = self.plan(
+            [{"id": "a" * 16, "root": "D:\\lib", "rel": "a.mp4"}],
+            {("d:\\lib", "a.mp4")},
+            {("d:\\lib", "a" * 16)},
+        )
+        self.assertEqual(kept, [])
+        self.assertEqual(stats["removed_rows"], 1)
+        self.assertEqual(stats["absent_keys"], 0)
+        self.assertEqual(stats["extra_rows"], 0)
+        self.assertEqual(stats["stale_rows"], 0)
+
+    def test_missing_row_counts_as_absent(self):
+        row = {"id": "b" * 16, "root": "D:\\lib", "rel": "b.mp4"}
+        kept, stats = self.plan(
+            [row],
+            {("d:\\lib", "gone.mp4")},
+            {("d:\\lib", "c" * 16)},
+        )
+        self.assertEqual(kept, [row])
+        self.assertEqual(stats["absent_keys"], 1)
+        self.assertEqual(stats["extra_rows"], 0)
+        self.assertEqual(stats["stale_rows"], 0)
+
+    def test_same_id_with_a_different_rel_stays_and_is_flagged(self):
+        row = {
+            "id": "a" * 16,
+            "_thumb_id": "t" * 16,
+            "root": "D:\\lib",
+            "rel": "other.mp4",
+        }
+        kept, stats = self.plan(
+            [row],
+            {("d:\\lib", "old.mp4")},
+            {("d:\\lib", "t" * 16)},
+        )
+        self.assertEqual(kept, [row])
+        self.assertEqual(stats["absent_keys"], 1)
+        self.assertEqual(stats["stale_rows"], 1)
+        self.assertEqual(stats["stale_ids"], ["t" * 16])
+
+    def test_one_key_removes_duplicate_rels(self):
+        rows = [
+            {"id": "a" * 16, "root": "D:\\lib", "rel": "A.mp4"},
+            {"id": "b" * 16, "root": "D:\\lib", "rel": "a.mp4"},
+        ]
+        kept, stats = self.plan(
+            rows,
+            {("d:\\lib", "a.mp4")},
+            {("d:\\lib", "a" * 16)},
+        )
+        self.assertEqual(kept, [])
+        self.assertEqual(stats["removed_rows"], 2)
+        self.assertEqual(stats["extra_rows"], 1)
+        self.assertEqual(stats["absent_keys"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
