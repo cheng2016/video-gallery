@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +26,34 @@ class DiagnosticsTests(unittest.TestCase):
 
         with mock.patch("vg.bootlog.write"):
             diagnostics.emit("WARN", "emit_guard", force=True, bad=Bad())
+
+    def test_tty_console_emit_does_not_block_on_full_stdout(self) -> None:
+        """A jammed Windows console must not freeze HTTP worker threads."""
+        gate = threading.Event()
+
+        class BlockingTTY:
+            def isatty(self) -> bool:
+                return True
+
+            def write(self, _data: str) -> int:
+                gate.wait(timeout=2.0)
+                return 0
+
+            def flush(self) -> None:
+                return None
+
+        old_out = sys.stdout
+        try:
+            sys.stdout = BlockingTTY()  # type: ignore[assignment]
+            with mock.patch("vg.bootlog.write"):
+                started = time.perf_counter()
+                diagnostics.emit("WARN", "console_backpressure", force=True, n=1)
+                elapsed = time.perf_counter() - started
+            self.assertLess(elapsed, 0.2)
+        finally:
+            gate.set()
+            diagnostics.flush_console(timeout=0.5)
+            sys.stdout = old_out
 
     def test_error_always_prints_when_full_logging_is_off(self) -> None:
         diagnostics.set_full_logging(False)

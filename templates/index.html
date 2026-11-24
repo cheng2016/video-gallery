@@ -1482,9 +1482,38 @@
         max-width: 160px;
       }
     }
+    .vg-toast-host {
+      position: fixed;
+      left: 50%;
+      bottom: 28px;
+      transform: translateX(-50%);
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .vg-toast {
+      max-width: min(86vw, 420px);
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: rgba(28, 35, 48, 0.94);
+      color: var(--text);
+      border: 1px solid var(--border);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      font-size: 13px;
+      line-height: 1.4;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    .vg-toast.show { opacity: 1; transform: none; }
+    .vg-toast.err { border-color: var(--danger); color: #ffd6d6; }
   </style>
 </head>
 <body>
+  <div class="vg-toast-host" id="toastHost" aria-live="polite"></div>
   <header>
     <button class="menu-toggle" id="menuBtn" title="显示/隐藏目录">☰</button>
     <div class="brand">本地<span>视频库</span></div>
@@ -8294,6 +8323,22 @@
       $("modal").classList.remove("open");
     }
 
+    function showToast(message, opts) {
+      const host = $("toastHost");
+      const text = String(message || "").trim();
+      if (!host || !text) return;
+      const el = document.createElement("div");
+      el.className = "vg-toast" + (opts && opts.error ? " err" : "");
+      el.textContent = text;
+      host.appendChild(el);
+      requestAnimationFrame(() => el.classList.add("show"));
+      const hold = opts && opts.error ? 3200 : 1600;
+      setTimeout(() => {
+        el.classList.remove("show");
+        setTimeout(() => el.remove(), 220);
+      }, hold);
+    }
+
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -8710,7 +8755,6 @@
     let cleanupType = "dup";
     let cleanupLib = "";
     let cleanupCat = "";
-    let cleanupScopeReady = false;
 
     function thumbHtml(id, thumbV, hasThumb, root) {
       const vid = id || "";
@@ -8773,16 +8817,10 @@
       cleanupCat = catSel.value || "";
     }
 
-    async function loadCleanup(type, opts) {
-      opts = opts || {};
+    async function loadCleanup(type) {
       cleanupType = type || "dup";
       $("cleanupTabDup").classList.toggle("primary", cleanupType === "dup");
       $("cleanupTabBad").classList.toggle("primary", cleanupType === "bad");
-      if (!cleanupScopeReady || opts.fromBrowse) {
-        cleanupLib = state.lib || "";
-        cleanupCat = state.category || "";
-        cleanupScopeReady = true;
-      }
       const body = $("cleanupBody");
       const hint = $("cleanupHint");
       body.innerHTML = "加载中…";
@@ -8861,7 +8899,7 @@
                <button type="button" class="btn cleanup-keep-mode" data-mode="largest" data-gi="${gi}">只留最大</button>`
             : "";
           return `<div class="cleanup-group" style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px" data-gi="${gi}">
-            <div style="margin-bottom:8px"><strong>${escapeHtml(g.reason || "")}</strong> · ${items.length} 项 · 勾选=删除</div>
+            <div class="cleanup-group-head" style="margin-bottom:8px"><strong>${escapeHtml(g.reason || "")}</strong> · ${items.length} 项 · 勾选=删除</div>
             ${rows}
             <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
               ${tools}
@@ -8876,9 +8914,51 @@
       }
     }
 
+    function cleanupEmptyText() {
+      return cleanupType === "bad"
+        ? "当前范围内没有标记为损坏的文件"
+        : "当前范围内没有发现重复组（可换频道或选「全部频道」再试）";
+    }
+
+    function dropCleanupItems(panel, removedIds) {
+      const body = $("cleanupBody");
+      if (!body || !panel) return;
+      let groups = [];
+      try { groups = JSON.parse(body.dataset.groups || "[]"); } catch (_) {}
+      const gi = Number(panel.dataset.gi);
+      const removed = new Set(removedIds || []);
+      if (!Number.isInteger(gi) || !groups[gi]) return;
+      groups[gi].items = (groups[gi].items || []).filter((it) => !removed.has(it.id));
+      panel.querySelectorAll(".media-row").forEach((row) => {
+        const box = row.querySelector(".cleanup-check");
+        if (box && removed.has(box.dataset.id)) row.remove();
+      });
+      if ((groups[gi].items || []).length < 2) {
+        groups.splice(gi, 1);
+        panel.remove();
+      }
+      const panels = [...body.querySelectorAll(".cleanup-group")];
+      panels.forEach((node, i) => {
+        node.dataset.gi = String(i);
+        node.querySelectorAll("[data-gi]").forEach((el) => { el.dataset.gi = String(i); });
+        const head = node.querySelector(".cleanup-group-head");
+        const items = (groups[i] && groups[i].items) || [];
+        if (head && groups[i]) {
+          head.innerHTML = `<strong>${escapeHtml(groups[i].reason || "")}</strong> · ${items.length} 项 · 勾选=删除`;
+        }
+      });
+      body.dataset.groups = JSON.stringify(groups);
+      if (!body.querySelector(".cleanup-group")) {
+        body.textContent = cleanupEmptyText();
+        body.dataset.groups = "[]";
+      }
+    }
+
     $("cleanupBtn").addEventListener("click", () => {
       $("cleanupModal").classList.add("open");
-      loadCleanup("dup", { fromBrowse: true });
+      cleanupLib = "";
+      cleanupCat = "";
+      loadCleanup("dup");
     });
     $("cleanupModalClose").addEventListener("click", () => $("cleanupModal").classList.remove("open"));
     $("cleanupModal").addEventListener("click", (e) => {
@@ -8994,11 +9074,15 @@
           body: JSON.stringify({ items, trash: true }),
         });
         const data = await r.json();
-        alert(data.msg || (data.ok ? "完成" : "失败"));
-        await loadCleanup(cleanupType);
-        try { await refresh(); } catch (_) {}
+        const failed = !data.ok || (data.errors && data.errors.length);
+        const removedIds = Array.isArray(data.removed) && data.removed.length
+          ? data.removed
+          : (data.ok ? items.map((it) => it.id) : []);
+        if (removedIds.length) dropCleanupItems(panel, removedIds);
+        showToast(data.msg || (failed ? "删除失败" : "已移到回收站"), failed ? { error: true } : undefined);
+        refresh({ soft: true }).catch(() => {});
       } catch (err) {
-        alert("删除失败: " + err);
+        showToast("删除失败: " + err, { error: true });
       }
     });
 

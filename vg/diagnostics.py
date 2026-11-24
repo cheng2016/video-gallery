@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import queue
+import sys
 import threading
 import time
 import traceback
@@ -32,6 +34,17 @@ _last_aggregate_flush = time.monotonic()
 _rate_lock = threading.Lock()
 _last_events: dict[str, float] = {}
 
+# Console output must never block waitress threads. ``start.bat`` attaches a
+# real Windows console; when client_action / PERF lines fill that buffer,
+# ``print(..., flush=True)`` stalls forever and the whole HTTP pool freezes
+# (cleanup modal stuck on 「加载中…」, /api/status times out). Non-TTY sinks
+# (pytest StringIO, redirected files) still print inline so tests stay sync.
+_CONSOLE_QUEUE_MAX = 256
+_console_queue: queue.SimpleQueue[str | None] | None = None
+_console_thread: threading.Thread | None = None
+_console_lock = threading.Lock()
+_console_dropped = 0
+
 # HTTP hang diagnostics: track in-flight Flask requests and lock holders so a
 # dead waitress pool still leaves a trail even when new requests never enter.
 _inflight_lock = threading.Lock()
@@ -43,6 +56,80 @@ _lock_holders: dict[str, dict] = {}
 _stall_watchdog_started = False
 _STALL_WARN_MS = 3000.0
 _STALL_POLL_S = 2.0
+
+
+def _stdout_is_tty() -> bool:
+    try:
+        out = sys.stdout
+        return bool(out is not None and getattr(out, "isatty", lambda: False)())
+    except Exception:
+        return False
+
+
+def _console_writer() -> None:
+    global _console_dropped
+    q = _console_queue
+    if q is None:
+        return
+    while True:
+        try:
+            item = q.get()
+        except Exception:
+            return
+        if item is None:
+            return
+        try:
+            print(item, flush=True)
+        except Exception:
+            pass
+
+
+def _ensure_console_writer() -> queue.SimpleQueue[str | None]:
+    global _console_queue, _console_thread
+    with _console_lock:
+        if _console_queue is None:
+            _console_queue = queue.SimpleQueue()
+        if _console_thread is None or not _console_thread.is_alive():
+            _console_thread = threading.Thread(
+                target=_console_writer,
+                name="diag-console-writer",
+                daemon=True,
+            )
+            _console_thread.start()
+        return _console_queue
+
+
+def _emit_console(line: str) -> None:
+    """Best-effort console mirror; never blocks the caller on a full TTY."""
+    global _console_dropped
+    try:
+        if not _stdout_is_tty():
+            print(line, flush=True)
+            return
+        q = _ensure_console_writer()
+        # SimpleQueue is unbounded; bound manually by dropping when backed up.
+        pending = q.qsize()
+        if pending >= _CONSOLE_QUEUE_MAX:
+            _console_dropped += 1
+            return
+        q.put_nowait(line)
+    except Exception:
+        pass
+
+
+def flush_console(timeout: float = 1.0) -> None:
+    """Wait until the async console queue drains (tests / shutdown)."""
+    q = _console_queue
+    if q is None:
+        return
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        try:
+            if q.qsize() == 0:
+                return
+        except Exception:
+            return
+        time.sleep(0.01)
 
 
 def set_full_logging(enabled: bool) -> None:
@@ -82,6 +169,8 @@ def emit(
     or must go through call() for full-logging method traces.
     Full logging does not dump loop successes.
     Never raises: a logging failure must not change the caller's result.
+    Console writes on a TTY are async so a full ``start.bat`` console cannot
+    freeze waitress; the file log is written first.
     """
     try:
         level_n = (level or "INFO").upper()
@@ -94,15 +183,12 @@ def emit(
         if detail:
             line += " detail=" + str(detail).replace("\r", " ").replace("\n", " | ")
         try:
-            print(line, flush=True)
-        except Exception:
-            pass
-        try:
             from vg import bootlog
 
             bootlog.write(line, urgent=level_n == "ERROR")
         except Exception:
             pass
+        _emit_console(line)
     except Exception:
         pass
 
