@@ -10,7 +10,7 @@ from pathlib import Path
 from vg.cache import ensure_cache_dir, save_index
 from vg.config import VGDATA_DIR
 from vg.schema import RUNTIME_ONLY_FIELDS, serialize_video_item
-from vg.state import STATE
+from vg.state import STATE, catalog_writer_busy as is_catalog_writer_busy
 from vg.util import log
 
 _MAX_DISK_LIBS = 12
@@ -61,7 +61,7 @@ def _wait_catalog_flight(root_s: str, event: threading.Event, *, caller: str) ->
         log(f"[跨盘] 等待目录库加载超时 {root_s} caller={caller}")
 
 
-def _disk_lib_snapshot(root_s: str) -> list[dict] | None:
+def _disk_lib_snapshot(root_s: str, *, index_mtime: float | None = None) -> list[dict] | None:
     with _libs_guard("disk_libs_snapshot"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         if not existing:
@@ -69,7 +69,11 @@ def _disk_lib_snapshot(root_s: str) -> list[dict] | None:
                 if str(k).lower() == root_s.lower():
                     existing = val
                     break
-        if existing and existing.get("by_id"):
+        if existing and existing.get("by_id") and (
+            index_mtime is None
+            or existing.get("live")
+            or float(existing.get("index_mtime") or 0) == float(index_mtime)
+        ):
             return list(existing["by_id"].values())
     return None
 
@@ -315,7 +319,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
         _wait_catalog_flight(root_s, flight, caller="read_root_library")
         return _disk_lib_snapshot(root_s)
     try:
-        cached = _disk_lib_snapshot(root_s)
+        cached = _disk_lib_snapshot(root_s, index_mtime=index_mtime)
         if cached:
             return cached
         videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
@@ -617,6 +621,156 @@ def save_library_items(
     return saved
 
 
+def patch_library_media_items(items: list[dict], *, fields: tuple) -> int:
+    """Patch matching media fields without inserting or replacing catalog entries."""
+    from vg.catalog_db import catalog_mtime, patch_catalog_video_fields
+    from vg.schema import PROBE_RESULT_FIELDS, THUMB_RESULT_FIELDS, media_item_signature
+    from vg.state import invalidate_query_caches
+
+    if not items:
+        return 0
+    if any(field not in (*PROBE_RESULT_FIELDS, *THUMB_RESULT_FIELDS) for field in fields):
+        from vg.diagnostics import error
+
+        error(
+            "library_media_patch_fields_failed",
+            ValueError("library media patch contains non-result fields"),
+            rows=len(items),
+        )
+        return 0
+    groups: dict[str, tuple[str, list[dict]]] = {}
+    for item in items:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        raw_root = str(item.get("_lib_root") or item.get("root") or "").strip()
+        if not raw_root:
+            continue
+        root_s = _norm_root_str(raw_root)
+        key = _catalog_flight_key(root_s)
+        if key not in groups:
+            groups[key] = (root_s, [])
+        groups[key][1].append(item)
+
+    results: list[tuple[str, list[dict], float]] = []
+    saved = 0
+    failed_roots = 0
+    for root_s, batch in groups.values():
+        try:
+            cache_s = next(
+                (str(item["_lib_cache"]).strip() for item in batch if item.get("_lib_cache")),
+                "",
+            )
+            cache = Path(cache_s) if cache_s else ensure_cache_dir(Path(root_s))
+            committed = patch_catalog_video_fields(cache, root_s, batch, fields=fields)
+            if not committed:
+                continue
+            results.append((root_s, committed, catalog_mtime(cache)))
+            saved += len(committed)
+        except Exception as exc:
+            failed_roots += 1
+            from vg.diagnostics import error
+
+            error("library_media_patch_failed", exc, root=root_s, rows=len(batch))
+    if not saved:
+        return 0
+
+    wanted: dict[tuple, dict] = {}
+    root_mtimes: dict[str, float] = {}
+    source_ids: set[str] = set()
+    for root_s, committed, index_mtime in results:
+        root_signature = media_item_signature({"root": root_s})[0]
+        root_mtimes[root_signature] = index_mtime
+        for raw in committed:
+            signature = media_item_signature(dict(raw, root=root_s, _lib_root=root_s))
+            wanted[signature] = raw
+            source_ids.add(signature[1])
+
+    lookup_ids = source_ids | {str(raw.get("id") or "") for raw in wanted.values()}
+    seen: set[int] = set()
+    memory_changed = 0
+    invalid_signatures = 0
+
+    def patch_current(current) -> None:
+        nonlocal memory_changed, invalid_signatures
+        if not isinstance(current, dict) or id(current) in seen:
+            return
+        seen.add(id(current))
+        source_id = str(current.get("_thumb_id") or current.get("id") or "")
+        if source_id not in source_ids:
+            return
+        try:
+            signature = media_item_signature(current)
+            raw = wanted.get(signature)
+        except (TypeError, ValueError):
+            invalid_signatures += 1
+            return
+        if raw is None:
+            return
+        changed = False
+        for field in fields:
+            if field in raw:
+                if field not in current or current[field] != raw[field]:
+                    current[field] = raw[field]
+                    changed = True
+            elif field in current:
+                current.pop(field)
+                changed = True
+        if changed:
+            memory_changed += 1
+
+    with _libs_guard("disk_libs_patch_media_fields"):
+        for key, lib in (STATE.get("disk_libs") or {}).items():
+            if not isinstance(lib, dict):
+                continue
+            root_signature = media_item_signature({"root": lib.get("root") or key})[0]
+            if root_signature not in root_mtimes:
+                continue
+            by_id = lib.get("by_id") or {}
+            for source_id in source_ids:
+                patch_current(by_id.get(source_id))
+            lib["index_mtime"] = root_mtimes[root_signature]
+        for current in STATE.get("videos") or []:
+            patch_current(current)
+        for index_name in ("by_id", "by_thumb_id"):
+            index = STATE.get(index_name) or {}
+            for source_id in lookup_ids:
+                patch_current(index.get(source_id))
+        for current in STATE.get("scan_live") or []:
+            patch_current(current)
+        STATE["lib_gen"] = int(STATE.get("lib_gen") or 0) + 1
+
+    invalidate_query_caches()
+    try:
+        from vg.web import invalidate_response_caches
+
+        invalidate_response_caches()
+    except ImportError:
+        pass
+    except Exception as exc:
+        from vg.diagnostics import error
+
+        error("library_media_patch_cache_invalidation_failed", exc, rows=saved)
+    try:
+        from vg.diagnostics import emit_rate_limited
+
+        emit_rate_limited(
+            "INFO",
+            "catalog_media_patch_batch",
+            key="patch_fields|" + "|".join(fields),
+            interval=5.0,
+            force=True,
+            saved=saved,
+            memory_changed=memory_changed,
+            roots=len(results),
+            failed_roots=failed_roots,
+            invalid_signatures=invalid_signatures,
+            thread=threading.current_thread().name,
+        )
+    except Exception:
+        pass
+    return saved
+
+
 def archive_current_library() -> None:
     """Snapshot active library before switching disks.
 
@@ -829,32 +983,8 @@ def load_library_from_index(root: Path | str) -> bool:
         if (
             existing
             and existing.get("by_id")
-            and (
-                STATE.get("meta_progress")
-                or STATE.get("scanning")
-                or STATE.get("updating")
-            )
+            and is_catalog_writer_busy()
         ):
-            try:
-                from vg.diagnostics import emit_rate_limited
-
-                emit_rate_limited(
-                    "WARN",
-                    "disk_lib_reload_skipped_writer_busy",
-                    key=f"reload-skip|{root_s}",
-                    interval=5.0,
-                    force=True,
-                    root=root_s,
-                    cached_rows=len(existing.get("by_id") or {}),
-                    cached_mtime=float(existing.get("index_mtime") or 0),
-                    disk_mtime=float(index_mtime or 0),
-                    scanning=bool(STATE.get("scanning")),
-                    updating=bool(STATE.get("updating")),
-                    meta_progress=str(STATE.get("meta_progress") or "")[:120],
-                    reason="avoid_catalog_lock_deadlock",
-                )
-            except Exception:
-                pass
             return True
         # Scan flushes catalog.sqlite often; reloading 778+ rows for every
         # /thumb or history lookup stalls the UI. Keep RAM copy briefly.
@@ -882,7 +1012,7 @@ def load_library_from_index(root: Path | str) -> bool:
         _wait_catalog_flight(root_s, flight, caller="load_library_from_index")
         return bool(_disk_lib_snapshot(root_s))
     try:
-        if _disk_lib_snapshot(root_s):
+        if _disk_lib_snapshot(root_s, index_mtime=index_mtime):
             return True
         stage_started = time.perf_counter()
         videos = load_catalog_videos(cache, root_s, restore_search_cache=True)
@@ -1068,31 +1198,8 @@ def find_in_disk_libs(vid: str, prefer_root: str | None = None) -> dict | None:
     if not vid:
         return None
     prefer = _norm_root_str(prefer_root) if prefer_root else ""
-    catalog_writer_busy = bool(
-        STATE.get("scanning")
-        or STATE.get("updating")
-        or STATE.get("meta_progress")
-    )
-    if prefer and catalog_writer_busy:
-        try:
-            from vg.diagnostics import emit_rate_limited
-
-            emit_rate_limited(
-                "WARN",
-                "disk_libs_ensure_skipped_writer_busy",
-                key=f"ensure-skip|{prefer}",
-                interval=5.0,
-                force=True,
-                root=prefer,
-                video_id=str(vid)[:24],
-                scanning=bool(STATE.get("scanning")),
-                updating=bool(STATE.get("updating")),
-                meta_progress=str(STATE.get("meta_progress") or "")[:120],
-                reason="avoid_catalog_lock_deadlock",
-            )
-        except Exception:
-            pass
-    elif prefer:
+    catalog_writer_busy = is_catalog_writer_busy()
+    if prefer and not catalog_writer_busy:
         if not memory_catalog_ready(prefer):
             ensure_library(prefer)
     with _libs_guard("disk_libs_lookup_by_id"):

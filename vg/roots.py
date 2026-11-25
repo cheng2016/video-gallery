@@ -19,10 +19,11 @@ from vg.disk_libs import (
     load_library_from_index,
     read_root_library,
     stamp_lib_meta,
+    sync_disk_lib_memory,
     _norm_root_str,
 )
 from vg.drives import save_prefs
-from vg.state import STATE
+from vg.state import STATE, catalog_writer_busy as is_catalog_writer_busy
 from vg.util import log
 
 _roots_lock = threading.RLock()
@@ -252,13 +253,7 @@ def filter_videos_by_lib(videos: list[dict] | None, lib: str | None) -> list[dic
 
 
 def _snapshot_covers_archives(videos: list[dict], lib: str = "") -> bool:
-    """Return whether the published snapshot is at least as complete as RAM archives.
-
-    A stale ``meta_progress`` string can survive a test/restart while STATE is
-    intentionally partial.  Only trust the snapshot for metadata writes when
-    every known per-disk archive row is represented; otherwise the catalog
-    remains the source of truth.
-    """
+    """Trust a published snapshot only when it covers the archived catalogs."""
     libs = STATE.get("disk_libs") or {}
     if not libs:
         return False
@@ -309,7 +304,7 @@ def videos_for_scope(lib: str | None = None) -> list[dict]:
         STATE.get("scanning")
         or STATE.get("updating")
         or (
-            STATE.get("meta_progress")
+            is_catalog_writer_busy()
             and _snapshot_covers_archives(state_vids, lib)
         )
     )
@@ -431,7 +426,7 @@ def roots_summary(videos: list[dict] | None = None) -> list[dict]:
         STATE.get("scanning")
         or STATE.get("updating")
         or (
-            STATE.get("meta_progress")
+            is_catalog_writer_busy()
             and _snapshot_covers_archives(snapshot)
         )
     )
@@ -1067,7 +1062,7 @@ def publish_unified_library(
         # disks that actually contributed videos this publish)
         seen_libs: set[str] = set()
         for v in merged:
-            s = str(v.get("_lib_root") or v.get("root") or "").rstrip("\\/")
+            s = str(v.get("_lib_root") or v.get("root") or "")
             if s:
                 seen_libs.add(s)
         for lib_s in (seen_libs if refresh_tree else ()):
@@ -1078,12 +1073,12 @@ def publish_unified_library(
             try:
                 scoped_vids = videos_for_scope(lib_s) if videos_for_scope else [
                     x for x in merged
-                    if str(x.get("_lib_root") or x.get("root") or "").rstrip("\\/") == lib_s
+                    if str(x.get("_lib_root") or x.get("root") or "") == lib_s
                 ]
             except Exception:
                 scoped_vids = [
                     x for x in merged
-                    if str(x.get("_lib_root") or x.get("root") or "").rstrip("\\/") == lib_s
+                    if str(x.get("_lib_root") or x.get("root") or "") == lib_s
                 ]
             if not scoped_vids:
                 continue
@@ -1167,12 +1162,13 @@ def publish_unified_library(
     return len(merged)
 
 
-def on_scan_finished(root: Path | str) -> None:
-    """After a root finishes loading/scanning: archive + maybe re-merge."""
+def on_scan_finished(root: Path | str, videos: list[dict]) -> None:
+    """Publish the completed root snapshot before merging mounted libraries."""
     try:
         root_s = _norm_root_str(root)
     except Exception:
         return
+    sync_disk_lib_memory(root_s, videos)
     mounts = get_mounted_roots()
     # Windows 路径大小写不一致时不能当成「未挂载」，否则会冲掉其它盘
     if not any(m.lower() == root_s.lower() for m in mounts):
@@ -1196,7 +1192,6 @@ def on_scan_finished(root: Path | str) -> None:
                 if key.lower() not in {m.lower() for m in restored}:
                     restored.append(key)
             set_mounted_roots(restored, primary=root_s, drop_offline=False)
-            archive_current_library()
             publish_unified_library()
             return
         stamp_lib_meta(STATE.get("videos") or [], root=root_s, cache=STATE.get("cache_dir"))
@@ -1205,9 +1200,7 @@ def on_scan_finished(root: Path | str) -> None:
             v["root"] = root_s
             if "_folder_raw" not in v:
                 v["_folder_raw"] = (v.get("folder") or "").replace("\\", "/").strip("/")
-        archive_current_library()
         return
-    archive_current_library()
     publish_unified_library()
 
 

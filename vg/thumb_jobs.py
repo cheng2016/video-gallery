@@ -26,7 +26,7 @@ THUMB_PRIORITY_BATCH = 10
 @dataclass
 class _ThumbJob:
     key: str
-    work: Callable[[], bool]
+    work: Callable[[], bool | None]
     future: Future = field(default_factory=Future)
     priority: int = THUMB_PRIORITY_BATCH
     started: bool = False
@@ -44,12 +44,18 @@ _THUMB_FAIL_COOLDOWN_S = 15 * 60
 _failed_until: dict[str, float] = {}
 
 
-def thumbnail_job_key(cache: Path | str, file_id: str) -> str:
+def thumbnail_job_key(cache: Path | str, file_id: str, *, item: dict | None = None) -> str:
     try:
         root = str(Path(cache).resolve())
     except OSError:
         root = str(cache)
-    return f"{root.casefold()}::{file_id}"
+    key = f"{root.casefold()}::{file_id}"
+    if item is not None:
+        from hashlib import sha256
+        from vg.schema import media_item_signature
+        version = repr(media_item_signature(item)[3:]).encode("utf-8")
+        key += "::" + sha256(version).hexdigest()
+    return key
 
 
 _fg_note_seq = 0
@@ -82,9 +88,8 @@ def note_frontend_activity(hold_seconds: float = 0.6, source: str = "unknown") -
             bumped = True
     if bumped and hold >= 0.4:
         _fg_note_seq += 1
-        from vg.diagnostics import aggregate, emit_rate_limited
+        from vg.diagnostics import emit_rate_limited
 
-        aggregate("foreground_activity_note", hold * 1000.0)
         emit_rate_limited(
             "INFO",
             "foreground_activity_note",
@@ -220,7 +225,7 @@ def _worker() -> None:
                     )
             work_started = time.monotonic()
             try:
-                result = bool(job.work())
+                result = job.work()
             except BaseException as exc:
                 from vg.diagnostics import error
 
@@ -244,7 +249,8 @@ def _worker() -> None:
                         "thumbnail_job",
                         (time.monotonic() - work_started) * 1000.0,
                     )
-                else:
+                # Obsolete sources must not put their replacement into failure cooldown.
+                elif result is not None:
                     with _jobs_lock:
                         _failed_until[job.key] = time.monotonic() + _THUMB_FAIL_COOLDOWN_S
                     from vg.diagnostics import emit
@@ -303,7 +309,7 @@ def thumbnail_recently_failed(key: str) -> bool:
 
 def submit_thumbnail_job(
     key: str,
-    work: Callable[[], bool],
+    work: Callable[[], bool | None],
     *,
     priority: int = THUMB_PRIORITY_BATCH,
     force: bool = False,

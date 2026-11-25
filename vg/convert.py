@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from vg.cache import thumb_file_ready, thumb_path, thumb_version
+from vg.cache import thumb_file_ready
 from vg.catalog import build_tree, rebuild_indexes
 from vg.catalog_repository import find_video_by_id
 from vg.config import (
@@ -39,7 +39,7 @@ from vg.media import (
     fps_can_halve_to_30,
     is_2k_or_4k,
     normalize_target_fps,
-    make_thumbnail,
+    make_item_thumbnail,
     probe_duration,
     probe_media_info,
 )
@@ -664,17 +664,12 @@ def _register_converted_mp4(
     if ffmpeg and cache and not item.get("has_thumb"):
         def _thumb_one():
             try:
-                out = thumb_path(cache, vid)
-                if make_thumbnail(ffmpeg, out_path, out, background=True):
-                    item["has_thumb"] = True
-                    item["thumb_v"] = thumb_version(cache, vid)
-                    rebuild_indexes(STATE.get("videos") or [])
-                    return True
+                return make_item_thumbnail(item, ffmpeg, cache)
             except Exception as e:
                 log(f"[转MP4] 预览图失败: {e}")
             return False
         submit_thumbnail_job(
-            thumbnail_job_key(cache, vid),
+            thumbnail_job_key(cache, vid, item=item),
             _thumb_one,
             priority=THUMB_PRIORITY_BATCH,
         )

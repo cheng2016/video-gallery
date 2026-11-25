@@ -622,6 +622,11 @@ def attach_thumb_meta(v: dict) -> dict:
             v["thumb_v"] = 1
         aggregate("attach_thumb_meta_fast_path", 0.0)
         return v
+    if v.get("has_thumb") is False:
+        v["thumb_id"] = vid
+        v["thumb_v"] = 0
+        aggregate("attach_thumb_meta_neg_cache", 0.0)
+        return v
 
     # Negative cache: if we already confirmed this video has no thumb in the
     # current generation, skip the file-system checks entirely.

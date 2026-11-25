@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from vg import catalog_db
 from vg.catalog_db import (
@@ -229,6 +230,39 @@ class CatalogDbTests(unittest.TestCase):
             {"动作": 250, "剧情": 250},
         )
 
+    def test_hydrate_warms_exact_indexed_facets_without_second_query(self) -> None:
+        root = self.base / "warm-library"
+        cache = self.base / "warm-cache"
+        root.mkdir()
+        items = [self._item(vid="a" * 16, rel="电影/a.mp4"),
+                 self._item(vid="b" * 16, rel="电视剧/b.mkv")]
+        items[0]["genres"] = ["动作"]
+        self.assertTrue(save_catalog(cache, root, items))
+        expected = load_catalog_facet_rows(cache)
+        catalog_db._facet_rows_memo.clear()
+        load_catalog_videos(cache, root, restore_search_cache=True)
+        with mock.patch.object(catalog_db, "_connect", side_effect=AssertionError("unexpected second SQL query")):
+            self.assertEqual(load_catalog_facet_rows(cache), expected)
+
+    def test_warmed_facets_invalidate_after_catalog_replacement(self) -> None:
+        root = self.base / "changed-library"
+        cache = self.base / "changed-cache"
+        root.mkdir()
+        self.assertTrue(save_catalog(cache, root, [self._item(vid="a" * 16, rel="old/a.mp4")]))
+        load_catalog_videos(cache, root, restore_search_cache=True)
+        self.assertTrue(save_catalog(cache, root, [self._item(vid="b" * 16, rel="new/b.mkv")]))
+        self.assertEqual([row["folder"] for row in load_catalog_facet_rows(cache)], ["new"])
+
+    def test_facet_hydrate_does_not_warm_filtered_or_search_results(self) -> None:
+        root = self.base / "filtered-library"
+        cache = self.base / "filtered-cache"
+        root.mkdir()
+        self.assertTrue(save_catalog(cache, root, [self._item(vid="a" * 16, rel="电影/a.mp4"),
+                                                 self._item(vid="b" * 16, rel="电视剧/b.mkv")]))
+        load_catalog_videos(cache, root, restore_search_cache=True)
+        self.assertEqual(len(load_catalog_facet_rows(cache, category="电影")), 1)
+        self.assertEqual(len(load_catalog_facet_rows(cache, search="b")), 1)
+
     def test_facet_rows_support_ext_and_type_views_without_requery(self) -> None:
         root = self.base / "library3"
         cache = self.base / "cache3"
@@ -246,8 +280,12 @@ class CatalogDbTests(unittest.TestCase):
         rows[1]["folder"] = "电影"
         rows[1]["genres"] = ["剧情"]
         self.assertTrue(save_catalog(cache, root, rows))
-        loaded = load_catalog_facet_rows(cache, category="电影")
+        with mock.patch("vg.diagnostics.perf") as perf:
+            loaded = load_catalog_facet_rows(cache, category="电影")
         self.assertEqual(len(loaded), 2)
+        stage_log = next(call for call in perf.call_args_list if call.args[0] == "sqlite_query_facets")
+        for stage in ["lock_wait_ms", "connect_ms", "query_ms", "close_ms", "decode_ms"]:
+            self.assertGreaterEqual(stage_log.kwargs[stage], 0)
         with_ext = facets_from_rows(loaded, category="电影", folder="电影", ext=".mp4")
         without_ext = facets_from_rows(loaded, category="电影", folder="电影", ext="")
         self.assertEqual({row["id"] for row in with_ext["genres"]}, {"动作"})

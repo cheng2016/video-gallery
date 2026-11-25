@@ -16,7 +16,7 @@ from vg.disk_libs import (
     read_root_library,
 )
 from vg.roots import get_mounted_roots, roots_summary, videos_for_scope
-from vg.state import STATE
+from vg.state import STATE, catalog_writer_busy as is_catalog_writer_busy
 
 
 class VideoLookup(Protocol):
@@ -78,27 +78,6 @@ def _same_root(left: str | None, right: str | None) -> bool:
         ).replace("/", "\\").rstrip("\\").casefold()
 
 
-def _emit_lookup_skip(vid: str, prefer: str | None) -> None:
-    try:
-        from vg.diagnostics import emit_rate_limited
-
-        emit_rate_limited(
-            "WARN",
-            "catalog_lookup_skip_sqlite_writer_busy",
-            key=f"lookup-skip|{prefer or ''}",
-            interval=5.0,
-            force=True,
-            video_id=str(vid)[:24],
-            prefer_root=prefer or "",
-            scanning=bool(STATE.get("scanning")),
-            updating=bool(STATE.get("updating")),
-            meta_progress=str(STATE.get("meta_progress") or "")[:120],
-            reason="avoid_catalog_lock_deadlock",
-        )
-    except Exception:
-        pass
-
-
 class RuntimeCatalogRepository:
     """Default adapter over current in-memory and per-disk catalog storage."""
 
@@ -113,11 +92,7 @@ class RuntimeCatalogRepository:
 
     def find_video(self, vid: str, prefer_root: str | None = None) -> dict | None:
         prefer = (prefer_root or "").strip() or None
-        catalog_writer_busy = bool(
-            STATE.get("scanning")
-            or STATE.get("updating")
-            or STATE.get("meta_progress")
-        )
+        catalog_writer_busy = is_catalog_writer_busy()
         if prefer:
             # The current/unified runtime indexes already contain the owning
             # root.  Check them before touching per-disk persistence: the old
@@ -141,7 +116,6 @@ class RuntimeCatalogRepository:
             # find_in_disk_libs still takes _libs_lock / Path.resolve and was
             # stacking 20–30s stalls on by-ids even after ensure was skipped.
             if catalog_writer_busy:
-                _emit_lookup_skip(vid, prefer)
                 return None
             # find_in_disk_libs performs the one required ensure_library call.
             hit = find_in_disk_libs(vid, prefer_root=prefer)
@@ -179,7 +153,6 @@ class RuntimeCatalogRepository:
         if hit is not None:
             return hit
         if catalog_writer_busy:
-            _emit_lookup_skip(vid, None)
             return None
         hit = find_in_disk_libs(vid, prefer_root=None)
         if hit is not None:

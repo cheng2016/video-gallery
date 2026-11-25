@@ -234,7 +234,7 @@ class MultiDiskRescanTests(unittest.TestCase):
                 "id": "set-1",
                 "kind": "ts_set",
                 "size": 300,
-                "mtime": 100.75,
+                "mtime": 100.25,
             }
         ]
 
@@ -245,6 +245,11 @@ class MultiDiskRescanTests(unittest.TestCase):
         )
 
         self.assertEqual((reused, changed), (1, 0))
+        collapsed[0]["mtime"] = 100.75
+        self.assertEqual(
+            _final_scan_change_counts(collapsed, previous, incremental=True),
+            (0, 1),
+        )
 
 
 if __name__ == "__main__":

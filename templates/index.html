@@ -1102,6 +1102,251 @@
       flex-shrink: 0;
     }
     .modal-close:hover { background: var(--danger); border-color: var(--danger); }
+    .workspace-modal {
+      padding: 28px;
+      align-items: center;
+      justify-content: center;
+      background: rgba(4, 7, 12, 0.78);
+      backdrop-filter: blur(8px);
+    }
+    #queueModal { z-index: 102; }
+    .workspace-panel {
+      color-scheme: dark;
+      width: min(1120px, 100%);
+      height: min(860px, 88vh);
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+      border: 1px solid #344054;
+      border-radius: 18px;
+      box-shadow: 0 24px 90px rgba(0,0,0,0.5);
+    }
+    .workspace-heading {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 24px 28px 20px;
+      background: linear-gradient(120deg, rgba(0,200,212,0.07), transparent 65%);
+      flex-shrink: 0;
+    }
+    .workspace-heading > div { flex: 1; min-width: 0; }
+    .workspace-heading h2 { font-size: 1.3rem; font-weight: 650; letter-spacing: 0.02em; }
+    .workspace-heading p { margin-top: 7px; color: var(--muted); font-size: 0.82rem; line-height: 1.6; }
+    .workspace-heading .modal-close { width: 36px; height: 36px; background: transparent; }
+    .workspace-stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      padding: 0 28px 20px;
+      flex-shrink: 0;
+    }
+    .workspace-stat {
+      padding: 14px 18px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--bg2);
+      min-width: 0;
+    }
+    .workspace-stat span { display: block; color: var(--muted); font-size: 0.75rem; }
+    .workspace-stat strong { display: block; margin-top: 6px; font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .workspace-stat.accent strong { color: var(--accent); }
+    .workspace-stat.warning strong { color: #f0ae77; }
+    .workspace-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 28px;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+      flex-shrink: 0;
+    }
+    .workspace-tabs {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 4px;
+      background: #0b0f15;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .workspace-tabs .btn { background: transparent; border-color: transparent; padding: 7px 13px; font-size: 0.8rem; }
+    .workspace-tabs .btn.primary { background: #18353b; color: #7ae9ed; border-color: #245158; }
+    .workspace-field { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.78rem; min-width: 0; }
+    .workspace-field select {
+      height: 34px;
+      max-width: 190px;
+      min-width: 80px;
+      padding: 0 10px;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font: inherit;
+    }
+    .workspace-toolbar .toolbar-spacer { flex: 1; }
+    .workspace-modal .btn:focus-visible,
+    .workspace-modal select:focus-visible,
+    .workspace-modal input:focus-visible,
+    .workspace-modal .modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .workspace-hint { padding: 12px 28px 0; color: var(--muted); font-size: 0.75rem; line-height: 1.65; flex-shrink: 0; }
+    .workspace-hint strong { color: #b9c6d8; font-weight: 500; }
+    .workspace-body { flex: 1; min-height: 0; overflow: auto; padding: 18px 28px; scrollbar-gutter: stable; }
+    .workspace-footer {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      padding: 15px 28px;
+      border-top: 1px solid var(--border);
+      background: var(--bg2);
+      flex-shrink: 0;
+    }
+    .workspace-footer-note { flex: 1; color: var(--muted); font-size: 0.76rem; line-height: 1.6; }
+    .workspace-footer-note strong { color: var(--text); font-weight: 500; }
+    .workspace-footer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .workspace-modal .btn { font-size: 0.8rem; }
+    .workspace-empty { min-height: 200px; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 28px; }
+    .workspace-empty-mark { display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 18px; border: 1px solid #245158; border-radius: 16px; color: var(--accent); background: rgba(0,200,212,0.06); font-size: 1.5rem; }
+    .workspace-empty strong { font-size: 1rem; font-weight: 550; }
+    .workspace-empty p { margin-top: 8px; color: var(--muted); font-size: 0.8rem; line-height: 1.8; max-width: 430px; overflow-wrap: anywhere; }
+    .workspace-empty.error .workspace-empty-mark { color: #f0ae77; border-color: #614732; background: rgba(240,174,119,0.06); }
+    .workspace-empty.loading .workspace-empty-mark { font-size: 0; }
+    .workspace-empty.loading .workspace-empty-mark::after { content: ''; width: 20px; height: 20px; border: 2px solid #245158; border-top-color: var(--accent); border-radius: 50%; animation: workspace-spin 0.8s linear infinite; }
+    @keyframes workspace-spin { to { transform: rotate(360deg); } }
+    .cleanup-group { border: 1px solid var(--border); border-radius: 12px; background: var(--bg2); overflow: hidden; margin-bottom: 16px; }
+    .cleanup-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02); }
+    .cleanup-group-title { flex: 1; min-width: 150px; }
+    .cleanup-group-title strong { font-size: 0.88rem; font-weight: 550; }
+    .cleanup-group-title span { margin-left: 10px; color: var(--muted); font-size: 0.74rem; }
+    .cleanup-group-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+    .cleanup-group-tools .btn { padding: 5px 10px; font-size: 0.74rem; }
+    .workspace-modal .btn.cleanup-del-group { color: #f1a0a0; background: rgba(232,93,93,0.06); border-color: rgba(232,93,93,0.28); }
+    .workspace-modal .btn.cleanup-del-group:hover:not(:disabled) { background: rgba(232,93,93,0.15); border-color: var(--danger); }
+    .cleanup-group .media-row { margin: 0; padding: 16px; border: 0; border-bottom: 1px solid rgba(42,51,68,0.6); border-radius: 0; align-items: center; background: transparent; }
+    .cleanup-group .media-row:last-child { border-bottom: 0; }
+    .cleanup-group .media-row.is-selected { background: rgba(232,93,93,0.035); }
+    .cleanup-group .media-row-check { width: 16px; height: 16px; margin: 0 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+    .cleanup-group .media-row-thumb { width: 112px; min-width: 112px; height: 63px; }
+    .cleanup-row-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .cleanup-row-title strong { min-width: 0; font-size: 0.85rem; font-weight: 550; }
+    .cleanup-row-badge { flex-shrink: 0; padding: 3px 7px; border-radius: 5px; background: rgba(0,200,212,0.09); color: #78d8d9; font-size: 0.68rem; }
+    .is-selected .cleanup-row-badge { background: rgba(232,93,93,0.09); color: #de9797; }
+    .cleanup-group .media-row-meta { opacity: 1; color: var(--muted); font-size: 0.73rem; line-height: 1.6; }
+    .cleanup-path { color: #6e7b90; font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cleanup-reason { color: #f0ae77; font-size: 0.74rem; overflow-wrap: anywhere; }
+    .cleanup-group .media-row-actions { flex-shrink: 0; margin: 0; justify-content: flex-end; }
+    .cleanup-group .media-row-actions .btn { padding: 6px 9px; font-size: 0.73rem; }
+    .workspace-modal [hidden] { display: none !important; }
+    .queue-picker-title { font-size: 0.85rem; font-weight: 550; }
+    .queue-picker-search { display: flex; gap: 6px; min-width: 0; }
+    .queue-picker-search input { width: 180px; min-width: 0; height: 34px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 0.78rem; }
+    .queue-picker-rules { color: var(--muted); font-size: 0.76rem; line-height: 1.6; margin-bottom: 14px; }
+    .queue-candidate { display: flex; align-items: center; gap: 14px; padding: 14px 16px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); cursor: pointer; }
+    .queue-candidate.is-selected { border-color: #245158; background: rgba(0,200,212,0.045); }
+    .queue-candidate input { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
+    .queue-candidate-main { flex: 1; min-width: 0; }
+    .queue-candidate-main strong { display: block; font-size: 0.84rem; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .queue-candidate-main small { display: block; color: var(--muted); font-size: 0.73rem; margin: 5px 0; }
+    .queue-candidate-main .cleanup-path { display: block; }
+    .queue-candidate .queue-kind { flex-shrink: 0; font-size: 0.7rem; }
+    .queue-picker-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .queue-picker-pagination > span { flex: 1; color: var(--muted); font-size: 0.76rem; }
+    .queue-task { display: flex; align-items: flex-start; gap: 14px; padding: 18px; margin-bottom: 12px; background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; }
+    .queue-task[data-status="running"] { border-color: #245158; background: linear-gradient(110deg, rgba(0,200,212,0.045), var(--bg2) 60%); }
+    .queue-task[data-status="error"] { border-color: #5c3a3a; }
+    .queue-task-index { display: grid; place-items: center; flex-shrink: 0; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+    .queue-task[data-status="running"] .queue-task-index { color: var(--accent); border-color: #245158; }
+    .queue-task-main { flex: 1; min-width: 0; }
+    .queue-task-heading { display: flex; gap: 12px; align-items: flex-start; }
+    .queue-task-heading strong { flex: 1; min-width: 0; font-size: 0.9rem; font-weight: 550; overflow-wrap: anywhere; line-height: 1.5; }
+    .queue-status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; color: var(--muted); font-size: 0.72rem; padding: 4px 8px; border-radius: 6px; background: rgba(255,255,255,0.035); }
+    .queue-status::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .queue-status.running { color: var(--accent); background: rgba(0,200,212,0.08); }
+    .queue-status.done { color: #88ceaa; background: rgba(136,206,170,0.08); }
+    .queue-status.error { color: #ef9999; background: rgba(232,93,93,0.08); }
+    .queue-status.cancelling { color: #f0ae77; }
+    .queue-task-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 7px; }
+    .queue-kind { color: #aab8cc; font-size: 0.75rem; }
+    .queue-message { margin-top: 8px; font-size: 0.75rem; color: var(--muted); line-height: 1.65; overflow-wrap: anywhere; }
+    .queue-task[data-status="error"] .queue-message { color: #dd9b9b; }
+    .queue-progress-row { display: flex; align-items: center; gap: 12px; margin-top: 13px; }
+    .queue-progress-row .queue-progress { flex: 1; margin: 0; height: 5px; }
+    .queue-progress-row .queue-progress > i { background: var(--accent); }
+    .queue-progress-row span { min-width: 40px; text-align: right; color: var(--accent); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+    .queue-task[data-status="queued"] .queue-progress > i { background: #627087; }
+    .queue-task-actions { flex-shrink: 0; padding-top: 1px; }
+    .queue-task-actions .btn { background: transparent; padding: 6px 10px; color: var(--muted); font-size: 0.75rem; }
+    .history-day { margin-bottom: 22px; }
+    .history-day-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .history-day-heading h3 { color: #b9c6d8; font-size: 0.78rem; font-weight: 550; }
+    .history-day-heading::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .history-day-heading span { color: var(--muted); font-size: 0.7rem; }
+    .history-entry { display: flex; align-items: center; gap: 18px; width: 100%; margin-bottom: 10px; padding: 16px; text-align: left; font: inherit; color: var(--text); border: 1px solid var(--border); border-radius: 12px; background: var(--bg2); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+    .history-entry:hover { border-color: #245158; background: #17242e; }
+    .history-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .history-entry .media-row-thumb { width: 144px; min-width: 144px; height: 81px; border-radius: 8px; }
+    .history-entry-main { display: flex; flex-direction: column; gap: 7px; flex: 1; min-width: 0; }
+    .history-entry-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; font-weight: 550; }
+    .history-entry-meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.73rem; }
+    .history-entry-progress { display: flex; align-items: center; gap: 12px; margin-top: 3px; }
+    .history-progress-track { width: min(180px, 35%); height: 4px; border-radius: 99px; background: #283343; overflow: hidden; flex-shrink: 0; }
+    .history-progress-track i { display: block; height: 100%; background: var(--accent); }
+    .history-entry.done .history-progress-track i { background: #88ceaa; }
+    .history-progress-text { color: #aab8cc; font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+    .history-entry-side { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; flex-shrink: 0; }
+    .history-status { padding: 4px 8px; border-radius: 6px; color: #78d8d9; background: rgba(0,200,212,0.08); font-size: 0.7rem; }
+    .history-status.done { color: #88ceaa; background: rgba(136,206,170,0.08); }
+    .history-status.offline { color: #f0ae77; background: rgba(240,174,119,0.08); }
+    .history-status.missing { color: var(--muted); background: rgba(255,255,255,0.035); }
+    .history-play-action { color: #aab8cc; font-size: 0.74rem; }
+    .history-entry:hover .history-play-action { color: var(--accent); }
+    .history-time { color: #6e7b90; font-size: 0.68rem; font-variant-numeric: tabular-nums; }
+    #histClearBtn { color: #e49a9a; background: transparent; border-color: rgba(232,93,93,0.25); }
+    #histClearBtn:hover:not(:disabled) { color: #ffb0b0; border-color: var(--danger); }
+    @media (max-width: 760px) {
+      .workspace-modal { padding: 12px; }
+      .workspace-panel { height: calc(100dvh - 24px); border-radius: 12px; }
+      .workspace-heading { padding: 18px 16px 14px; }
+      .workspace-heading h2 { font-size: 1.1rem; }
+      .workspace-stats { gap: 8px; padding: 0 16px 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .workspace-stat { padding: 10px 12px; }
+      .workspace-stat strong { font-size: 1.15rem; }
+      .workspace-toolbar { padding: 10px 16px; gap: 10px; }
+      .workspace-tabs .btn { padding: 6px 9px; }
+      .workspace-field select { max-width: 130px; }
+      .workspace-hint { padding: 10px 16px 0; font-size: 0.7rem; }
+      .workspace-body { padding: 12px 16px; }
+      .workspace-footer { padding: 12px 16px; gap: 8px; }
+      .workspace-footer-note { flex-basis: 100%; }
+      .cleanup-group-head { padding: 12px; }
+      .cleanup-group .media-row { padding: 12px; flex-wrap: wrap; gap: 10px; }
+      .cleanup-group .media-row-thumb { width: 72px; min-width: 72px; height: 46px; }
+      .cleanup-group .media-row-actions { width: 100%; }
+      .cleanup-row-title { flex-wrap: wrap; gap: 4px; }
+      .cleanup-row-title strong { flex-basis: 100%; }
+      .queue-task { padding: 13px; gap: 10px; flex-wrap: wrap; }
+      .queue-task-index { display: none; }
+      .queue-task-heading { gap: 8px; }
+      .queue-task-actions { width: 100%; text-align: right; }
+      .history-entry { padding: 12px; gap: 12px; flex-wrap: wrap; }
+      .history-entry .media-row-thumb { width: 88px; min-width: 88px; height: 58px; }
+      .history-entry-title { font-size: 0.82rem; }
+      .history-entry-meta { font-size: 0.68rem; }
+      .history-entry-progress { gap: 7px; flex-wrap: wrap; }
+      .history-progress-track { width: 100%; }
+      .history-progress-text { font-size: 0.66rem; }
+      .history-entry-side { flex-direction: row; align-items: center; width: 100%; gap: 8px; }
+      .history-time { flex: 1; }
+      .history-play-action { order: 1; }
+      .history-day { margin-bottom: 16px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .workspace-empty.loading .workspace-empty-mark::after { animation: none; }
+    }
     .player-wrap {
       flex: 1 1 auto;
       display: flex;
@@ -1841,60 +2086,139 @@
     </div>
   </div>
 
-  <div class="modal" id="cleanupModal">
-    <div class="modal-bar">
-      <div class="title">片库清理</div>
-      <button class="modal-close" id="cleanupModalClose" title="关闭">×</button>
-    </div>
-    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;align-items:center;gap:8px">
-      <button type="button" class="btn primary" id="cleanupTabDup">重复</button>
-      <button type="button" class="btn" id="cleanupTabBad">损坏</button>
-      <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px">
-        盘
-        <select id="cleanupLib" style="max-width:9em" title="限制在某一盘内查找"></select>
-      </label>
-      <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px">
-        频道
-        <select id="cleanupCat" style="max-width:10em" title="限制在某一频道（一级目录）内查找"></select>
-      </label>
-      <button type="button" class="btn" id="cleanupBatchFix" title="把勾选中需修声音的加入限速队列">批量修声音</button>
-      <button type="button" class="btn" id="cleanupBatchMp4" title="把勾选中的 m3u8/TS 合集加入限速队列">批量转MP4</button>
-    </div>
-    <div id="cleanupHint" class="modal-info" style="padding:8px 14px 0;color:var(--muted);font-size:12px;line-height:1.5"></div>
-    <div class="modal-info" id="cleanupBody" style="flex:1;overflow:auto;max-height:65vh"></div>
+  <div class="modal workspace-modal" id="cleanupModal">
+    <section class="workspace-panel" role="dialog" aria-modal="true" aria-labelledby="cleanupTitle" tabindex="-1">
+      <div class="workspace-heading">
+        <div>
+          <h2 id="cleanupTitle">文件清理</h2>
+          <p>整理重复副本，检查损坏文件，让片库保持干净。</p>
+        </div>
+        <button type="button" class="modal-close" id="cleanupModalClose" title="关闭" aria-label="关闭文件清理">×</button>
+      </div>
+      <div class="workspace-stats">
+        <div class="workspace-stat"><span id="cleanupGroupLabel">重复组</span><strong id="cleanupGroupCount">—</strong></div>
+        <div class="workspace-stat"><span>待检查文件</span><strong id="cleanupFileCount">—</strong></div>
+        <div class="workspace-stat accent"><span>已勾选</span><strong id="cleanupSelectedCount">0</strong></div>
+        <div class="workspace-stat warning"><span>勾选文件体积</span><strong id="cleanupSelectedSize">0 B</strong></div>
+      </div>
+      <div class="workspace-toolbar">
+        <div class="workspace-tabs" role="group" aria-label="清理类型">
+          <button type="button" class="btn primary" id="cleanupTabDup" aria-pressed="true">重复文件</button>
+          <button type="button" class="btn" id="cleanupTabBad" aria-pressed="false">损坏文件</button>
+        </div>
+        <span class="toolbar-spacer"></span>
+        <label class="workspace-field">磁盘<select id="cleanupLib" title="限制在某一盘内查找"><option value="">全部盘</option></select></label>
+        <label class="workspace-field">频道<select id="cleanupCat" title="限制在某一频道（一级目录）内查找"><option value="">全部频道</option></select></label>
+      </div>
+      <div id="cleanupHint" class="workspace-hint"></div>
+      <div id="cleanupBody" class="workspace-body" aria-busy="false"></div>
+      <div class="workspace-footer">
+        <div class="workspace-footer-note" id="cleanupSelectionHint" role="status">勾选要移到回收站的文件，不会永久删除。</div>
+      </div>
+    </section>
   </div>
 
-  <div class="modal" id="historyModal">
-    <div class="modal-bar">
-      <div class="title">观看历史</div>
-      <button class="modal-close" id="historyModalClose" title="关闭">×</button>
-    </div>
-    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
-      <button type="button" class="btn primary" id="histTabResume">继续看</button>
-      <button type="button" class="btn" id="histTabRecent">最近</button>
-      <button type="button" class="btn" id="histTabDone">已看完</button>
-      <button type="button" class="btn" id="histClearBtn" title="清除本地观看记录">清空记录</button>
-    </div>
-    <div class="modal-info" id="historyBody" style="flex:1;overflow:auto;max-height:65vh"></div>
+  <div class="modal workspace-modal" id="historyModal">
+    <section class="workspace-panel" role="dialog" aria-modal="true" aria-labelledby="historyTitle" tabindex="-1">
+      <div class="workspace-heading">
+        <div>
+          <h2 id="historyTitle">播放历史</h2>
+          <p>接着上次看到的地方，或回顾最近看过的视频。</p>
+        </div>
+        <button type="button" class="modal-close" id="historyModalClose" title="关闭" aria-label="关闭播放历史">×</button>
+      </div>
+      <div class="workspace-stats">
+        <div class="workspace-stat accent"><span>继续看</span><strong id="histResumeCount">—</strong></div>
+        <div class="workspace-stat"><span>已看完</span><strong id="histDoneCount">—</strong></div>
+        <div class="workspace-stat"><span>全部记录</span><strong id="histTotalCount">—</strong></div>
+        <div class="workspace-stat"><span>当前显示</span><strong id="histVisibleCount">—</strong></div>
+      </div>
+      <div class="workspace-toolbar">
+        <div class="workspace-tabs" role="group" aria-label="播放历史筛选">
+          <button type="button" class="btn primary" id="histTabResume" aria-pressed="true">继续看</button>
+          <button type="button" class="btn" id="histTabRecent" aria-pressed="false">最近播放</button>
+          <button type="button" class="btn" id="histTabDone" aria-pressed="false">已看完</button>
+        </div>
+        <span class="toolbar-spacer"></span>
+        <button type="button" class="btn" id="histRefreshBtn">刷新</button>
+      </div>
+      <div id="historyHint" class="workspace-hint" role="status"></div>
+      <div id="historyBody" class="workspace-body" aria-busy="false"></div>
+      <div class="workspace-footer">
+        <div class="workspace-footer-note">记录保存在<strong>当前浏览器</strong>，清空只移除观看进度，不会删除视频文件。</div>
+        <div class="workspace-footer-actions">
+          <button type="button" class="btn" id="histClearBtn" title="清除当前浏览器的全部观看记录">清空记录</button>
+        </div>
+      </div>
+    </section>
   </div>
 
-  <div class="modal" id="queueModal">
-    <div class="modal-bar">
-      <div class="title">转换队列</div>
-      <button class="modal-close" id="queueModalClose" title="关闭">×</button>
-    </div>
-    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;gap:8px">
-      <label>并发
-        <select id="queueParallel" title="同时转码数，1 最稳">
-          <option value="1">1（推荐）</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-          <option value="4">4</option>
-        </select>
-      </label>
-      <button type="button" class="btn" id="queueRefreshBtn">刷新</button>
-    </div>
-    <div class="modal-info" id="queueBody" style="flex:1;overflow:auto;max-height:65vh"></div>
+  <div class="modal workspace-modal" id="queueModal">
+    <section class="workspace-panel" role="dialog" aria-modal="true" aria-labelledby="queueTitle" tabindex="-1">
+      <div class="workspace-heading">
+        <div>
+          <h2 id="queueTitle">转换队列</h2>
+          <p>转换、修声音与片段制作任务，进度在这里一目了然。</p>
+        </div>
+        <button type="button" class="modal-close" id="queueModalClose" title="关闭" aria-label="关闭转换队列">×</button>
+      </div>
+      <div class="workspace-stats">
+        <div class="workspace-stat accent"><span>正在处理</span><strong id="queueRunningCount">—</strong></div>
+        <div class="workspace-stat"><span>等待处理</span><strong id="queueWaitingCount">—</strong></div>
+        <div class="workspace-stat"><span>已完成</span><strong id="queueDoneCount">—</strong></div>
+        <div class="workspace-stat warning"><span>失败</span><strong id="queueErrorCount">—</strong></div>
+      </div>
+      <div class="workspace-toolbar" id="queueTaskToolbar">
+        <div class="workspace-tabs" id="queueFilters" role="group" aria-label="任务状态筛选">
+          <button type="button" class="btn primary" data-filter="all" aria-pressed="true">全部</button>
+          <button type="button" class="btn" data-filter="active" aria-pressed="false">处理中</button>
+          <button type="button" class="btn" data-filter="finished" aria-pressed="false">已结束</button>
+          <button type="button" class="btn" data-filter="error" aria-pressed="false">失败</button>
+        </div>
+        <span class="toolbar-spacer"></span>
+        <label class="workspace-field">同时处理
+          <select id="queueParallel" title="同时转码数，1 最稳">
+            <option value="1">1 个（推荐）</option>
+            <option value="2">2 个</option>
+            <option value="3">3 个</option>
+            <option value="4">4 个</option>
+          </select>
+        </label>
+        <button type="button" class="btn" id="queueRefreshBtn">刷新</button>
+      </div>
+      <div class="workspace-toolbar" id="queuePickerToolbar" hidden>
+        <button type="button" class="btn" id="queuePickerBack">返回任务</button>
+        <strong id="queuePickerTitle" class="queue-picker-title">选择待处理文件</strong>
+        <span class="toolbar-spacer"></span>
+        <label class="workspace-field">磁盘<select id="queuePickerLib"><option value="">全部盘</option></select></label>
+        <form id="queuePickerSearch" class="queue-picker-search">
+          <input type="search" id="queuePickerQuery" placeholder="搜索文件名或路径" aria-label="搜索待转换文件" />
+          <button type="submit" class="btn">搜索</button>
+        </form>
+      </div>
+      <div id="queueBody" class="workspace-body" aria-busy="false"></div>
+      <div id="queuePicker" class="workspace-body" aria-busy="false" hidden>
+        <p id="queuePickerRules" class="queue-picker-rules"></p>
+        <div id="queuePickerList"></div>
+        <div class="queue-picker-pagination">
+          <span id="queuePickerPageInfo"></span>
+          <button type="button" class="btn" id="queuePickerPrev" disabled>上一页</button>
+          <button type="button" class="btn" id="queuePickerNext" disabled>下一页</button>
+        </div>
+      </div>
+      <div class="workspace-footer">
+        <div class="workspace-footer-note" id="queueLiveHint" role="status">有任务时自动更新，关闭面板不会中断转换。</div>
+        <div class="workspace-footer-note" id="queueBatchHint" role="status" hidden></div>
+        <div class="workspace-footer-actions" id="queueBatchActions">
+          <button type="button" class="btn" id="queueBatchFix">批量修声音</button>
+          <button type="button" class="btn" id="queueBatchMp4">批量转 MP4</button>
+        </div>
+        <div class="workspace-footer-actions" id="queuePickerActions" hidden>
+          <button type="button" class="btn" id="queuePickerSelectAll" disabled>全选本页</button>
+          <button type="button" class="btn primary" id="queueBatchSubmit" disabled>加入队列</button>
+        </div>
+      </div>
+    </section>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script>
@@ -2108,6 +2432,10 @@
       const eventName = String(event || "unknown");
       const levelName = String(level || "INFO").toUpperCase();
       const important = levelName === "ERROR" || levelName === "WARN";
+      if (!important && !CLIENT_LOG_CORE_EVENTS.has(eventName) &&
+          Number.isFinite(fields?.elapsed_ms) && fields.elapsed_ms < 200) {
+        return;
+      }
       if (!important && !state._fullLogging && !CLIENT_LOG_CORE_EVENTS.has(eventName)) {
         return;
       }
@@ -2695,9 +3023,12 @@
       return rows;
     }
 
-    function renderContinueBar() {
+    async function renderContinueBar() {
       const bar = $("continueBar");
       if (!bar) return;
+      // DOM-owned version also works before later script constants initialize.
+      const version = String((Number(bar.dataset.continueVersion) || 0) + 1);
+      bar.dataset.continueVersion = version;
       const rows = historyEntries("resume").slice(0, 8);
       if (!rows.length) {
         bar.style.display = "none";
@@ -2705,19 +3036,40 @@
         return;
       }
       bar.style.display = "flex";
-      // 异步补缩略图信息
       bar.innerHTML = `<span class="cont-label">继续看</span>` + rows.map((r) => {
         const dur = Number(r.duration) || 0;
         const pct = dur > 0 ? Math.min(99, Math.round((r.t / dur) * 100)) : 0;
         const label = escapeHtml(r.name || r.id);
-        return `<button type="button" class="continue-chip" data-play-id="${escapeAttr(r.id)}" title="${escapeAttr(r.folder || r.root || "")}">
-          <span class="media-row-thumb">
-            <img ${lazyThumbMarkup(r.id, 1, r.root || "")} />
-          </span>
+        return `<button type="button" class="continue-chip" data-play-id="${escapeAttr(r.id)}" data-play-root="${escapeAttr(r.root || "")}" title="${escapeAttr(r.folder || r.root || "")}">
+          ${thumbHtml("")}
           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}${pct ? `<span class="pct">${pct}%</span>` : ""}</span>
         </button>`;
       }).join("");
-      watchThumbs(bar);
+      const chips = [...bar.querySelectorAll("[data-play-id]")];
+      try {
+        const response = await fetch("/api/videos-by-ids", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: rows.map((r) => r.id), hints: historyHints(rows) }),
+        });
+        const data = await response.json();
+        if ($("continueBar") !== bar || bar.dataset.continueVersion !== version) return;
+        if (!response.ok || data.ok === false) throw new Error(data.msg || "读取续播信息失败");
+        rows.forEach((r, index) => {
+          const v = (data.videos || []).find((item) => item.id === r.id
+            && (!r.root || sameLibPath(item.root, r.root)));
+          const root = r.root || (v && v.root) || "";
+          if (!v || (data.offline_roots || []).some((path) => sameLibPath(path, root))) return;
+          const chip = chips[index];
+          if (!chip || !bar.contains(chip)) return;
+          chip.dataset.playRoot = root;
+          chip.querySelector(".media-row-thumb").outerHTML = thumbHtml(v.thumb_id || v.id, v.thumb_v, v.has_thumb, root, v);
+        });
+        watchThumbs(bar);
+      } catch (err) {
+        if ($("continueBar") !== bar || bar.dataset.continueVersion !== version) return;
+        clientLog("continue_bar_lookup_failed", { error: String(err.message || err) }, "WARN");
+      }
     }
 
     loadUiPrefs();
@@ -2848,8 +3200,6 @@
     async function fetchVideos(offset, requestReason, extra) {
       const started = clientNow();
       const operationId = newOperationId("page");
-      let terminalStatus = "pending";
-      let terminalError = "";
       let responseRequestId = "";
       const requestedOffset = offset == null ? state.offset : offset;
       const requestedLimit = Math.max(
@@ -2900,7 +3250,6 @@
         }
         const data = await r.json();
         responseRequestId = r.headers.get("X-VG-Request-ID") || "";
-        terminalStatus = "completed";
         clientLog("page_load_completed", {
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
           request_id: responseRequestId,
@@ -2922,19 +3271,15 @@
       } catch (e) {
         // 切换频道/筛选时主动取消旧请求，不算失败
         if (controller.signal.aborted || isAbortError(e)) {
-          terminalStatus = "aborted";
-          terminalError = String(e && (e.reason || e.message || e) || "aborted");
           clientLog("page_load_aborted", {
             elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
             reason: controller.signal.aborted ? "channel-switch" : String(e),
           }, "INFO", operationId);
           return null;
         }
-        terminalStatus = "failed";
-        terminalError = String(e && (e.stack || e) || "unknown");
         clientLog("page_load_failed", {
           elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          reason: String(e),
+          reason: String(e && (e.stack || e) || "unknown"),
         }, "ERROR", operationId);
         throw e;
       } finally {
@@ -2943,16 +3288,6 @@
         // 「等待 facets」标记：避免请求异常后 tree_nav 永远被压制不渲染。
         const wasFirstPage = offset == null || Number(offset) === 0;
         if (wasFirstPage) state._firstPageVideoPending = false;
-        clientLog("page_load_finally", {
-          request_reason: requestReason || "unspecified",
-          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          status: terminalStatus,
-          requested_offset: requestedOffset,
-          response_request_id: responseRequestId,
-          first_page: wasFirstPage,
-          active_requests_after: activeListControllers.size,
-          error: terminalError,
-        }, terminalStatus === "failed" ? "ERROR" : "INFO", operationId);
       }
     }
 
@@ -3177,12 +3512,12 @@
           const detail = bits.join(" · ");
           if (detail) {
             const head = state.multi
-              ? ("片库扫描中" + (state.lib ? " · 当前盘" : " · 全部"))
+              ? ((d.scanning ? "片库扫描中" : "后台补全中") + (state.lib ? " · 当前盘" : " · 全部"))
               : (d.root ? ("当前: " + d.root) : "扫描中");
             $("status").textContent = head + " · " + detail;
             $("status").title = $("status").textContent;
           }
-          const scanBusy = !!d.scanning || !!d.background_busy;
+          const scanBusy = !!d.scanning || !!d.scan_busy;
           $("rescanBtn").disabled = scanBusy;
           $("scanDriveBtn").disabled = scanBusy;
           $("driveSelect").disabled = scanBusy;
@@ -3247,16 +3582,20 @@
               // Scan finished → lib_gen is about to bump; sync sidebar.
               await refresh({ soft: true, nav: true });
               try { rearmThumbsAfterCatalog("poll_scan_done", state._lastThumbStatus); } catch (_) {}
-            } else if (d.thumb_progress && d.thumb_progress !== lastThumbProgress) {
-              lastThumbProgress = d.thumb_progress;
+            } else if (!canFull && (genChanged || foundJump)) {
+              pollAction = "refresh_throttled";
+            }
+            if (genChanged || (d.thumb_progress && d.thumb_progress !== lastThumbProgress)) {
+              lastThumbProgress = d.thumb_progress || lastThumbProgress;
               const thumbNeed = countGridThumbPending();
               if (now - thumbRefreshTimer > 3000 && thumbNeed.pending_visible > 0) {
                 thumbRefreshTimer = now;
-                pollAction = "thumbs_visible";
+                if (pollAction === "wait") pollAction = "thumbs_visible";
+                rearmThumbsAfterCatalog("poll_media_progress", state._lastThumbStatus);
                 refreshVisibleThumbs();
                 clientLog("thumb_refresh_gate", {
                   decision: "reload_visible",
-                  reason: "thumb_progress_changed",
+                  reason: genChanged ? "lib_gen_changed" : "thumb_progress_changed",
                   pending_visible: thumbNeed.pending_visible,
                   visible: thumbNeed.visible,
                   pending_loaded: thumbNeed.pending_loaded,
@@ -3267,7 +3606,7 @@
                   folder: state.folder || "",
                 }, "INFO");
               } else if (thumbNeed.pending_visible <= 0) {
-                pollAction = "thumbs_skipped_unrelated";
+                if (pollAction === "wait") pollAction = "thumbs_skipped_unrelated";
                 clientLog("thumb_refresh_gate", {
                   decision: "skip",
                   reason: "no_pending_visible_in_current_grid",
@@ -3281,11 +3620,9 @@
                   category: state.category || "",
                   folder: state.folder || "",
                 }, "INFO");
-              } else {
+              } else if (pollAction === "wait") {
                 pollAction = "thumbs_throttled";
               }
-            } else if (!canFull && (genChanged || foundJump)) {
-              pollAction = "refresh_throttled";
             }
             if (pollAction !== "wait") {
               clientLog("poll_decision", {
@@ -3309,13 +3646,11 @@
             }
           } else if (wasBusy) {
             wasBusy = false;
-            lastLibGen = gen;
-            state._libGen = gen;
             const thumbNeed = countGridThumbPending();
             // Thumb-only busy episode: images can be patched in-place. Soft
             // list refresh here used to rebuild the grid when E: thumbs
             // finished while the user was still on another folder.
-            const doSoftList = !!busyNeedsListRefresh;
+            const doSoftList = !!busyNeedsListRefresh || genChanged;
             busyNeedsListRefresh = false;
             clientLog("poll_decision", {
               action: doSoftList ? "idle_final_refresh" : "idle_final_thumbs_only",
@@ -3341,6 +3676,8 @@
               // a brief idle gap would otherwise miss the later lib_gen bump
               // that carries duration/bad badges.
               await refresh({ soft: true, nav: true });
+              lastLibGen = gen;
+              state._libGen = gen;
             } else {
               clientLog("thumb_refresh_gate", {
                 decision: "skip_soft_list",
@@ -3357,10 +3694,9 @@
             try { refreshStuckThumbs("poll_idle"); } catch (_) {}
             try { summarizeGridCardCoverage("poll_idle"); } catch (_) {}
           } else if (genChanged) {
-            // Late catalog rebuild (metadata finish) while status looks idle.
+            // Work can finish between polls. Keep the generation unacknowledged
+            // while throttled so the next idle tick still requests a soft refresh.
             const canFull = now - state._lastFullRefresh >= 1000;
-            lastLibGen = gen;
-            state._libGen = gen;
             try { rearmThumbsAfterCatalog("poll_idle_gen", state._lastThumbStatus); } catch (_) {}
             clientLog("poll_decision", {
               action: canFull ? "idle_gen_refresh" : "idle_gen_throttled",
@@ -3378,6 +3714,8 @@
             if (canFull) {
               state._lastFullRefresh = now;
               await refresh({ soft: true, nav: true });
+              lastLibGen = gen;
+              state._libGen = gen;
               refreshVisibleThumbs();
               try { refreshStuckThumbs("poll_idle_gen"); } catch (_) {}
               try { summarizeGridCardCoverage("poll_idle_gen"); } catch (_) {}
@@ -3700,7 +4038,23 @@
         + (root ? ("&root=" + encodeURIComponent(root)) : "");
     }
 
-    function lazyThumbMarkup(id, tv, root) {
+    function thumbnailFailureIsCurrent(item) {
+      if (!item || !(item.thumb_failed || item.thumb_failed_reason || item.thumb_fail_reason)) return false;
+      // Legacy markers without a source stamp remain conservative skips.
+      if (!item.thumb_failed_size && !item.thumb_failed_mtime) return true;
+      const savedSize = Number(item.thumb_failed_size || 0);
+      const savedMtime = Number(item.thumb_failed_mtime || 0);
+      const size = Number(item.size || 0);
+      const mtime = Number(item.mtime || 0);
+      return Number.isFinite(savedSize) && Number.isFinite(savedMtime)
+        && Number.isFinite(size) && Number.isFinite(mtime)
+        && savedSize === size && Math.abs(savedMtime - mtime) < 1;
+    }
+
+    function lazyThumbMarkup(id, tv, root, item) {
+      if (!id || thumbnailFailureIsCurrent(item)) {
+        return `src="${THUMB_PENDING_SRC}" data-thumb-ready="1" data-thumb-exhausted="1" alt="" decoding="async"`;
+      }
       const url = thumbUrlFor(id, tv, root);
       return `src="${THUMB_PENDING_SRC}" data-thumb-url="${escapeAttr(url)}" alt="" decoding="async"`;
     }
@@ -3899,7 +4253,7 @@
           return r.blob();
         })
         .then((blob) => {
-          if (!img.isConnected) {
+          if (!img.isConnected || img.dataset.thumbUrl !== url) {
             thumbBusy = Math.max(0, thumbBusy - 1);
             pumpThumbs();
             return;
@@ -3912,8 +4266,12 @@
           // Cache owns the object URL across virtual-list card rebuilds.
           rememberThumbObjectUrl(url, objUrl);
           img.onload = () => {
-            img.dataset.thumbLoading = "";
             thumbBusy = Math.max(0, thumbBusy - 1);
+            if (!img.isConnected || img.dataset.thumbUrl !== url) {
+              pumpThumbs();
+              return;
+            }
+            img.dataset.thumbLoading = "";
             thumbLoadReady(img);
             logThumbDiag("thumb_ready", {
               video_id: (img.closest(".card") || {}).dataset?.id || "",
@@ -3923,16 +4281,23 @@
             pumpThumbs();
           };
           img.onerror = () => {
-            img.dataset.thumbLoading = "";
             thumbBusy = Math.max(0, thumbBusy - 1);
-            if (img.isConnected) thumbLoadFailed(img, "blob_decode");
-            else pumpThumbs();
+            if (!img.isConnected || img.dataset.thumbUrl !== url) {
+              pumpThumbs();
+              return;
+            }
+            img.dataset.thumbLoading = "";
+            thumbLoadFailed(img, "blob_decode");
           };
           img.src = objUrl;
         })
         .catch((err) => {
-          img.dataset.thumbLoading = "";
           thumbBusy = Math.max(0, thumbBusy - 1);
+          if (img.dataset.thumbUrl !== url) {
+            pumpThumbs();
+            return;
+          }
+          img.dataset.thumbLoading = "";
           if (img.isConnected) {
             if (err && err.permanent) {
               thumbLoadGiveUp(img, err.reason || "thumb_unavailable");
@@ -4015,7 +4380,7 @@
         })(),
         url: url.slice(0, 120),
         attempt: Number(img.dataset.thumbAttempt) || 0,
-      }, "WARN");
+      }, reasonCode === "persisted_failure" ? "INFO" : "WARN");
       pumpThumbs();
     }
 
@@ -4109,8 +4474,8 @@
       let pendingLoaded = 0;
       document.querySelectorAll("#grid .card").forEach((card) => {
         const img = card.querySelector("img");
-        const pending = !(img && img.dataset.thumbReady === "1")
-          && card.dataset.hasThumb !== "1";
+        const pending = !!img && img.dataset.thumbReady !== "1"
+          && img.dataset.thumbExhausted !== "1";
         if (pending) pendingLoaded += 1;
         const box = card.getBoundingClientRect();
         if (box.bottom < view.top - 80 || box.top > view.bottom + 80) return;
@@ -4130,7 +4495,7 @@
       const view = root.getBoundingClientRect ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
       let touched = 0;
       document.querySelectorAll("#grid .card img[data-thumb-url], #grid .card img").forEach((img) => {
-        if (img.dataset.thumbExhausted === "1") return;
+        if (img.dataset.thumbReady === "1" || img.dataset.thumbLoading === "1" || img.dataset.thumbExhausted === "1") return;
         const card = img.closest(".card");
         if (!card) return;
         const box = card.getBoundingClientRect();
@@ -4228,7 +4593,7 @@
           return;
         }
         if (data.msg) $("status").textContent = data.msg;
-        await refresh();
+        await refresh({ soft: !!sameDrive, nav: true });
         startPoll();
       } catch (e) {
         alert("请求失败: " + e);
@@ -4239,8 +4604,7 @@
     }
 
     function sameLibPath(a, b) {
-      return String(a || "").replace(/[\\/]+$/, "").toLowerCase() ===
-        String(b || "").replace(/[\\/]+$/, "").toLowerCase();
+      return libCacheKey(a) === libCacheKey(b);
     }
 
     function libCacheKey(lib) {
@@ -4829,19 +5193,6 @@
         : 0;
       const src = String(source || "unknown");
       if (src.startsWith("video_facets") && state.types.length === 0 && lastEffectiveTypeCount > 0 && !state._firstPageVideoPending) {
-        clientLog("format_tags_rendered", filterStateFields({
-          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          source: source || "unknown",
-          type_count: 0,
-          types: "",
-          selected_ext: state.ext || "",
-          suppress_reason: "empty_types_from_non_first_page_facets",
-          preserved_type_count: lastEffectiveTypeCount,
-          last_source: state._extTagsLastSource || "",
-          new_priority: newPri,
-          last_priority: lastPri,
-          key_prefix: _fpPrefix(state._lastExtKey || key, 24),
-        }), "WARN");
         return;
       }
       if (newPri < lastPri && !identicalHtml) {
@@ -4936,20 +5287,6 @@
           }), "INFO");
           return;
         }
-        clientLog("taxonomy_tags_rendered", filterStateFields({
-          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          genre_count: 0,
-          theme_count: 0,
-          merged_count: 0,
-          duplicate_count: 0,
-          count_mismatch_count: 0,
-          tag_count_before: beforeTagCount,
-          tag_count_preserved: beforeTagCount,
-          suppress_reason: "empty_taxonomy_from_non_first_page_facets",
-          selected_genre: state.genre || "",
-          selected_theme: state.theme || "",
-          visible: beforeRowVisible,
-        }), "WARN");
         return;
       }
       row.style.display = "flex";
@@ -5049,19 +5386,6 @@
           }));
           return;
         }
-        // 假空：offset>0 响应不传 facets，已有 DOM 保留，不清选中
-        clientLog("background_tags_rendered", filterStateFields({
-          elapsed_ms: Number(clientElapsedMs(started).toFixed(1)),
-          tag_kind: isBackground ? "background" : "theme",
-          visible: beforeRowVisible,
-          tag_count_before: beforeTagCount,
-          tag_count_preserved: beforeTagCount,
-          suppress_reason: isBackground
-            ? "empty_background_from_non_first_page_facets"
-            : "empty_theme_from_non_first_page_facets",
-          selected_before: selectedBefore,
-          selected_preserved: selectedBefore,
-        }), "WARN");
         return;
       }
       state[stateList] = nextValues;
@@ -5412,13 +5736,40 @@
 
     const LOADED_META_FIELDS = [
       "duration", "duration_h", "size_h", "has_thumb", "thumb_v", "thumb_id",
-      "bad", "bad_reason", "audio_codec", "audio_hard", "probe_duration_done",
-      "probe_audio_done", "width", "height", "fps", "bitrate", "video_codec", "ep_count",
+      "bad", "bad_reason", "has_audio", "audio_codec", "audio_channels", "sample_rate",
+      "audio_hard", "probe_duration_done", "probe_audio_done", "probe_video_meta_done",
+      "width", "height", "fps", "bitrate", "video_codec", "ep_count",
       "seg_count", "dup", "dup_n", "dup_reason",
     ];
 
-    function mergeLoadedVideoMeta(target, source) {
-      if (!target || !source) return false;
+    function mergeLoadedVideoMeta(target, source, expected = target) {
+      if (!target || !source || !expected) return false;
+      if (
+        !libCacheKey(target.root || target._lib_root || "")
+        || !libCacheKey(source.root || source._lib_root || "")
+        || !String(target.rel || "").replace(/[\\/]+/g, "").trim()
+        || !String(source.rel || "").replace(/[\\/]+/g, "").trim()
+        || videoLocationKey(target) !== videoLocationKey(source)
+        || videoLocationKey(target) !== videoLocationKey(expected)
+        || String(target.id) !== String(source.id)
+        || String(target.id) !== String(expected.id)
+        || (target.kind || "") !== (expected.kind || "")
+      ) return false;
+      let replaced = (target.kind || "") !== (source.kind || "");
+      for (const key of ["size", "mtime"]) {
+        if (target[key] !== expected[key]) return false;
+        if (source[key] == null || target[key] == null) continue;
+        const current = Number(target[key]);
+        const incoming = Number(source[key]);
+        if (!Number.isFinite(current) || !Number.isFinite(incoming)) return false;
+        if (current !== incoming) replaced = true;
+      }
+      // A fresh catalog row may replace a file, but not a row changed since the request.
+      if (replaced) {
+        for (const key of Object.keys(target)) delete target[key];
+        Object.assign(target, source);
+        return true;
+      }
       let changed = false;
       for (const key of LOADED_META_FIELDS) {
         if (!(key in source)) continue;
@@ -5427,6 +5778,11 @@
           target[key] = next;
           changed = true;
         }
+      }
+      // Explicit bad=false must clear both the badge flag and its stale tooltip.
+      if (source.bad === false && target.bad_reason) {
+        delete target.bad_reason;
+        changed = true;
       }
       // Runtime duplicate triad: by-ids always sends an explicit dup boolean so
       // we can clear stale badges when a remake drops a mark.
@@ -5512,12 +5868,97 @@
       }
       const grid = $("grid");
       if (!grid) return;
+      const scroller = $("contentScroll");
+      const scrollTop = scroller ? scroller.scrollTop : 0;
+      const overflowAnchor = scroller ? scroller.style.overflowAnchor : "";
+      let replaced = false;
       grid.querySelectorAll(".card[data-id]").forEach((card) => {
         const v = byId.get(String(card.dataset.id || ""));
-        if (!v) return;
+        if (!v || videoLocationKey(v) !== videoLocationKey({ root: card.dataset.root, rel: card.dataset.rel })) return;
+        const version = JSON.stringify([v.size, v.mtime, v.kind || ""]);
+        if (card.dataset.sourceVersion !== version) {
+          if (scroller) scroller.style.overflowAnchor = "none";
+          card.insertAdjacentHTML("beforebegin", cardHtml(v));
+          const next = card.previousElementSibling;
+          card.remove();
+          card = next;
+          replaced = true;
+          const img = card.querySelector("img");
+          if (img) requestThumbReload(img, img.dataset.thumbUrl, { force: true });
+          watchThumbs(card);
+        } else {
+          const thumbVersion = String(v.thumb_v || (v.has_thumb ? 1 : 0));
+          if (v.has_thumb && (card.dataset.hasThumb !== "1" || card.dataset.thumbVersion !== thumbVersion)) {
+            const img = card.querySelector("img");
+            const id = v.thumb_id || (v.kind === "series" ? (v.cover_id || v.id) : v.id);
+            if (img && id) requestThumbReload(img,
+              "/thumb/" + encodeURIComponent(id) + "?v=" + thumbVersion + "&defer=1"
+                + (v.root ? "&root=" + encodeURIComponent(v.root) : ""), { force: true });
+          }
+          card.dataset.hasThumb = v.has_thumb ? "1" : "0";
+          card.dataset.thumbVersion = thumbVersion;
+        }
         syncCardDurationBadge(card, v);
         syncCardStatusBadges(card, v);
       });
+      if (replaced && scroller) {
+        scroller.scrollTop = scrollTop;
+        scroller.style.overflowAnchor = overflowAnchor;
+      }
+    }
+
+    function videoLocationKey(item) {
+      return JSON.stringify([
+        libCacheKey(item.root || item._lib_root || ""),
+        String(item.rel || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase(),
+      ]);
+    }
+
+    function pruneDeletedVideos(removedItems, { adjustCounts = true, matchSource = false } = {}) {
+      if (!removedItems.length) return;
+      refreshToken += 1;
+      cancelListRequests();
+      const removed = new Set(removedItems.map(videoLocationKey));
+      const removedSources = new Set(removedItems);
+      const beforeCount = state.loadedVideos.length;
+      state.loadedVideos = state.loadedVideos.filter((v) => matchSource
+        ? !removedSources.has(v) : !removed.has(videoLocationKey(v)));
+      const removedCount = beforeCount - state.loadedVideos.length;
+      if (!removedCount) return;
+      state.offset = (Number(state.loadedBaseOffset) || 0) + state.loadedVideos.length;
+      if (adjustCounts) {
+        state.totalCount = Math.max(0, state.totalCount - removedCount);
+        state.rawCount = Math.max(0, state.rawCount - removedCount);
+      }
+      state.hasMore = state.offset < state.totalCount;
+      const grid = $("grid");
+      const root = $("contentScroll");
+      const scrollTop = root.scrollTop;
+      const overflowAnchor = root.style.overflowAnchor;
+      root.style.overflowAnchor = "none";
+      try {
+        if (state.virtualEnabled) {
+          state._virtualWindowKey = "";
+          renderVirtualGrid();
+        } else {
+          grid.querySelectorAll(".card").forEach((card) => {
+            if (removed.has(videoLocationKey(card.dataset)) && (!matchSource || removedItems.some((v) =>
+              String(v.id) === card.dataset.id
+              && JSON.stringify([v.size, v.mtime, v.kind || ""]) === card.dataset.sourceVersion
+            ))) card.remove();
+          });
+        }
+        if (!state.loadedVideos.length && !state.loadedBaseOffset) {
+          grid.innerHTML = "";
+          state._virtualWindowKey = "";
+          $("empty").textContent = "没有找到视频";
+          $("empty").style.display = state.hasMore ? "none" : "block";
+        }
+        updateGridHint();
+      } finally {
+        root.scrollTop = scrollTop;
+        root.style.overflowAnchor = overflowAnchor;
+      }
     }
 
     function applyDurationBadgesFromLoaded() {
@@ -5525,26 +5966,25 @@
     }
 
     async function refreshLoadedCardMeta(reason) {
-      const loaded = state.loadedVideos || [];
+      const token = refreshToken;
+      let loaded = state.loadedVideos || [];
       if (!loaded.length) return 0;
       const ids = [];
       const hints = {};
+      const expected = new Map();
       for (const v of loaded) {
         if (!v || !v.id) continue;
         const id = String(v.id);
+        expected.set(id, { ...v, segments: Array.isArray(v.segments) ? [...v.segments] : v.segments });
         ids.push(id);
-        if (v.root) hints[id] = { root: v.root };
+        const root = v.root || v._lib_root;
+        if (root) hints[id] = { root };
       }
       if (!ids.length) return 0;
       const metaStarted = clientNow();
-      clientLog("loaded_card_meta_start", {
-        reason: reason || "unspecified",
-        loaded: loaded.length,
-        id_count: ids.length,
-        refresh_running: !!state._refreshRunning,
-      });
       let patched = 0;
       const byId = new Map();
+      const confirmedMissing = new Map();
       let slowChunkCount = 0;
       let maxChunkMs = 0;
       for (let i = 0; i < ids.length; i += 100) {
@@ -5562,8 +6002,10 @@
             body: JSON.stringify({ ids: chunk, hints: chunkHints }),
           }).then((r) => r.json());
         } catch (_) {
+          if (token !== refreshToken) return 0;
           continue;
         }
+        if (token !== refreshToken) return 0;
         const chunkMs = clientElapsedMs(chunkStarted);
         if (chunkMs > maxChunkMs) maxChunkMs = chunkMs;
         if (chunkMs >= 3000) {
@@ -5579,11 +6021,39 @@
         for (const row of (data && data.videos) || []) {
           if (row && row.id) byId.set(String(row.id), row);
         }
+        if (data && data.catalog_stable && data.lib_gen === state._libGen) {
+          for (const miss of data.missing || []) {
+            const id = String(miss.id || "");
+            const original = expected.get(id);
+            if (miss.confirmed && !miss.offline && original
+                && sameLibPath(miss.root, original.root || original._lib_root)) {
+              confirmedMissing.set(id, { original, gen: data.lib_gen });
+            }
+          }
+        }
       }
+      if (token !== refreshToken) return 0;
       for (const v of loaded) {
         if (!v || !v.id) continue;
         const fresh = byId.get(String(v.id));
-        if (fresh && mergeLoadedVideoMeta(v, fresh)) patched += 1;
+        if (fresh && mergeLoadedVideoMeta(v, fresh, expected.get(String(v.id)))) patched += 1;
+      }
+      const removedItems = (state.loadedVideos || []).filter((v) => {
+        const miss = confirmedMissing.get(String(v.id));
+        return miss && miss.gen === state._libGen && !byId.has(String(v.id))
+          && videoLocationKey(v) === videoLocationKey(miss.original)
+          && ["size", "mtime", "kind"].every((key) => v[key] === miss.original[key])
+          && JSON.stringify(v.segments || []) === JSON.stringify(miss.original.segments || []);
+      });
+      if (removedItems.length) {
+        pruneDeletedVideos(removedItems, { adjustCounts: false, matchSource: true });
+        loaded = state.loadedVideos;
+        clientLog("loaded_card_missing_pruned", {
+          reason: reason || "unspecified",
+          removed: removedItems.length,
+          lib_gen: state._libGen,
+          items: removedItems.slice(0, 5).map((v) => ({ id: v.id, root: v.root || v._lib_root, rel: v.rel })),
+        }, "WARN");
       }
       let withDuration = 0;
       let withThumb = 0;
@@ -5648,9 +6118,9 @@
       const durLabel = cardDurationLabel(v);
       const epMark = durLabel ? `<span class="dur">${escapeHtml(durLabel)}</span>` : "";
       return `
-        <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}" data-has-thumb="${v.has_thumb ? "1" : "0"}">
+        <div class="card" data-id="${v.id}" data-root="${escapeAttr(v.root || "")}" data-rel="${escapeAttr(v.rel || "")}" data-ext="${escapeAttr(v.ext || "")}" data-kind="${escapeAttr(v.kind || "")}" data-cover="${escapeAttr(thumbId || "")}" data-has-thumb="${v.has_thumb ? "1" : "0"}" data-thumb-version="${escapeAttr(String(tv))}" data-source-version="${escapeAttr(JSON.stringify([v.size, v.mtime, v.kind || ""]))}">
           <div class="thumb">
-            <img ${lazyThumbMarkup(thumbId, tv, v.root || "")} />
+            <img ${lazyThumbMarkup(thumbId, tv, v.root || "", v)} />
             <div class="play"><div class="play-icon"></div></div>
             ${dup ? `<span class="dup-badge" title="${escapeAttr(dupReason)}">重复×${dupN}</span>` : ""}
             ${bad ? `<span class="bad-badge" title="${escapeAttr(badReason)}">损坏</span>` : ""}
@@ -5682,19 +6152,6 @@
       const previous = state._virtualCols;
       if (!Number.isFinite(previous)) {
         state._virtualCols = calculated;
-      } else if (previous !== calculated) {
-        clientLog("virtual_columns_changed", {
-          previous_cols: previous,
-          calculated_cols: calculated,
-          kept_cols: previous,
-          grid_width: w,
-          content_width: $("contentScroll")?.clientWidth || 0,
-          window_width: window.innerWidth,
-          mobile_media: window.matchMedia("(max-width: 900px)").matches,
-          scroll_top: Math.round($("contentScroll")?.scrollTop || 0),
-          scroll_height: $("contentScroll")?.scrollHeight || 0,
-          reason: "layout_feedback_during_render",
-        }, "WARN");
       }
       return state._virtualCols;
     }
@@ -6071,50 +6528,27 @@
         // bottom sentinel element, IntersectionObserver fires loadMore.
         ensureScrollObserver();
       } else {
-        if (!append) grid.innerHTML = "";
-        if (videos && videos.length) {
-          grid.insertAdjacentHTML("beforeend", videos.map(cardHtml).join(""));
+        const appendScrollTop = root ? root.scrollTop : 0;
+        const previousOverflowAnchor = root ? root.style.overflowAnchor : "";
+        if (append && root) root.style.overflowAnchor = "none";
+        try {
+          if (!append) grid.innerHTML = "";
+          if (videos && videos.length) {
+            grid.insertAdjacentHTML("beforeend", videos.map(cardHtml).join(""));
+          }
+          updateGridHint();
+          watchThumbs(grid);
+          ensureScrollObserver();
+        } finally {
+          if (append && root) {
+            root.scrollTop = appendScrollTop;
+            root.style.overflowAnchor = previousOverflowAnchor;
+          }
         }
-        updateGridHint();
-        watchThumbs(grid);
-        ensureScrollObserver();
       }
       const afterScrollTop = root ? root.scrollTop : 0;
       const afterScrollHeight = root ? root.scrollHeight : 0;
       const renderMs = Number((performance.now() - renderStarted).toFixed(1));
-      const inputDuplicateCards = (videos || []).filter((v) => !!(v && v.dup));
-      const loadedDuplicateCards = (state.loadedVideos || []).filter((v) => !!(v && v.dup));
-      const inputDuplicateFieldRows = (videos || []).filter((v) =>
-        v && (Object.prototype.hasOwnProperty.call(v, "dup") ||
-          Object.prototype.hasOwnProperty.call(v, "dup_n") ||
-          Object.prototype.hasOwnProperty.call(v, "dup_reason"))
-      ).length;
-      const visibleDuplicateBadges = grid
-        ? grid.querySelectorAll(".dup-badge").length
-        : 0;
-      clientLog("duplicate_badge_render_diagnostics", {
-        append: !!append,
-        mode: state.virtualEnabled ? "virtual" : "flat",
-        input_rows: beforeVideosInput,
-        input_duplicate_field_rows: inputDuplicateFieldRows,
-        input_duplicate_rows: inputDuplicateCards.length,
-        input_duplicate_counts: inputDuplicateCards
-          .map((v) => `${v.dup_n || 0}:${v.dup_reason || ""}`)
-          .join(",")
-          .slice(0, 500),
-        loaded_rows: state.loadedVideos.length,
-        loaded_duplicate_rows: loadedDuplicateCards.length,
-        loaded_duplicate_counts: loadedDuplicateCards
-          .map((v) => `${v.dup_n || 0}:${v.dup_reason || ""}`)
-          .join(",")
-          .slice(0, 500),
-        visible_duplicate_badges: visibleDuplicateBadges,
-        dom_card_count: grid ? grid.querySelectorAll(".card").length : 0,
-        total: state.totalCount || 0,
-        offset: state.offset || 0,
-        has_more: !!state.hasMore,
-        render_ms: renderMs,
-      }, inputDuplicateFieldRows === 0 && beforeVideosInput > 0 ? "WARN" : "INFO");
       // MAX_LOADED_VIDEOS head-trim is a very common "silent jump": the
       // virtual grid's loadedBase advances, which moves padTop and makes the
       // page feel like it "snapped up" a few rows even though the user did
@@ -7085,22 +7519,7 @@
           }, "WARN");
         }
       }
-      if (!state.hasMore || loadingMore) {
-        clientLog("load_more_skipped", {
-          elapsed_ms: 0,
-          seq: callSeq,
-          trigger: triggerName,
-          reason: loadingMore ? "already_loading" : (!state.hasMore ? "no_more" : "unknown"),
-          loading_more: !!loadingMore,
-          has_more: !!state.hasMore,
-          offset: state.offset || 0,
-          total: state.totalCount || 0,
-          loaded: state.loadedVideos.length,
-          loaded_base: Number(state.loadedBaseOffset) || 0,
-          abort_count_so_far: loadMoreAbortCount,
-        }, (loadingMore && state.hasMore) ? "WARN" : "INFO");
-        return;
-      }
+      if (!state.hasMore || loadingMore) return;
       loadingMore = true;
       const hint = $("loadMoreHint");
       if (hint) hint.textContent = "加载中…";
@@ -7124,8 +7543,9 @@
           scroll_height: beforeHeight,
           client_height: root ? root.clientHeight : 0,
         }, "INFO");
+        const token = refreshToken;
         const data = await fetchVideos(state.offset, "load_more");
-        if (!data) {
+        if (!data || token !== refreshToken) {
           // fetchVideos already logged page_load_aborted on cancel; just mark.
           loadMoreAbortCount += 1;
           clientLog("load_more_no_data", {
@@ -7139,6 +7559,8 @@
           return;
         }
         const batch = data.videos || [];
+        state.totalCount = data.count || 0;
+        state.rawCount = (data.raw_count != null ? data.raw_count : data.count) || 0;
         state.hasMore = !!data.has_more;
         state.offset += batch.length;
         if (!batch.length) state.hasMore = false;
@@ -8755,21 +9177,78 @@
     let cleanupType = "dup";
     let cleanupLib = "";
     let cleanupCat = "";
+    let cleanupLoadVersion = 0;
 
-    function thumbHtml(id, thumbV, hasThumb, root) {
+    function workspaceEmptyHtml(title, detail, state = "empty") {
+      const mark = state === "error" ? "!" : state === "loading" ? "" : "✓";
+      return `<div class="workspace-empty ${escapeAttr(state)}" role="status">
+        <div class="workspace-empty-mark" aria-hidden="true">${mark}</div>
+        <strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p>
+      </div>`;
+    }
+
+    function cleanupSizeText(bytes) {
+      if (!bytes) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      const unit = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+      return `${(bytes / Math.pow(1024, unit)).toFixed(unit ? 1 : 0)} ${units[unit]}`;
+    }
+
+    function cleanupGroupHeadHtml(group, gi) {
+      const items = group.items || [];
+      const tools = cleanupType === "dup"
+        ? `<button type="button" class="btn cleanup-keep-mode" data-mode="oldest" data-gi="${gi}">只留最早</button>
+           <button type="button" class="btn cleanup-keep-mode" data-mode="newest" data-gi="${gi}">只留最新</button>
+           <button type="button" class="btn cleanup-keep-mode" data-mode="largest" data-gi="${gi}">只留最大</button>`
+        : "";
+      return `<div class="cleanup-group-title"><strong>${cleanupType === "dup" ? `重复组 ${gi + 1}` : "损坏文件"}</strong><span>${items.length} 个文件</span></div>
+        <div class="cleanup-group-tools">${tools}<button type="button" class="btn cleanup-del-group" data-gi="${gi}" disabled>移到回收站</button></div>`;
+    }
+
+    function syncCleanupSelection() {
+      const body = $("cleanupBody");
+      const checks = [...body.querySelectorAll(".cleanup-check")];
+      let selected = 0;
+      let bytes = 0;
+      checks.forEach((box) => {
+        if (box.checked) { selected++; bytes += Number(box.dataset.size) || 0; }
+        const row = box.closest(".media-row");
+        row.classList.toggle("is-selected", box.checked);
+        row.querySelector(".cleanup-row-badge").textContent = box.checked ? "已勾选" : cleanupType === "dup" ? "保留" : "未勾选";
+      });
+      body.querySelectorAll(".cleanup-group").forEach((panel) => {
+        const count = panel.querySelectorAll(".cleanup-check:checked").length;
+        const del = panel.querySelector(".cleanup-del-group");
+        del.disabled = !count || panel.dataset.deleting === "true";
+        del.textContent = panel.dataset.deleting === "true" ? "正在移到回收站…" : `移到回收站${count ? `（${count}）` : ""}`;
+      });
+      $("cleanupGroupLabel").textContent = cleanupType === "dup" ? "重复组" : "损坏分组";
+      $("cleanupGroupCount").textContent = body.querySelectorAll(".cleanup-group").length;
+      $("cleanupFileCount").textContent = checks.length;
+      $("cleanupSelectedCount").textContent = selected;
+      $("cleanupSelectedSize").textContent = cleanupSizeText(bytes);
+      $("cleanupSelectionHint").innerHTML = selected
+        ? `<strong>已勾选 ${selected} 个 · ${cleanupSizeText(bytes)}</strong>，删除仅移到回收站。`
+        : "勾选要移到回收站的文件，不会永久删除。";
+    }
+
+    function thumbHtml(id, thumbV, hasThumb, root, item) {
       const vid = id || "";
       const tv = thumbV || (hasThumb ? 1 : 0);
-      if (!vid) {
+      if (!vid || thumbnailFailureIsCurrent(item)) {
         return `<div class="media-row-thumb"><span class="ph">无图</span></div>`;
       }
       return `<div class="media-row-thumb">
-        <img ${lazyThumbMarkup(vid, tv, root || "")} />
+        <img ${lazyThumbMarkup(vid, tv, root || "", item)} />
         <span class="ph" style="display:none">无图</span>
       </div>`;
     }
 
     function pickKeepId(items, mode) {
       if (!items.length) return "";
+      if (mode === "oldest") {
+        return items.slice().sort((a, b) => (a.mtime || 0) - (b.mtime || 0))[0].id;
+      }
       if (mode === "newest") {
         return items.slice().sort((a, b) => (b.mtime || 0) - (a.mtime || 0))[0].id;
       }
@@ -8818,21 +9297,31 @@
     }
 
     async function loadCleanup(type) {
+      const version = ++cleanupLoadVersion;
       cleanupType = type || "dup";
       $("cleanupTabDup").classList.toggle("primary", cleanupType === "dup");
       $("cleanupTabBad").classList.toggle("primary", cleanupType === "bad");
+      $("cleanupTabDup").setAttribute("aria-pressed", String(cleanupType === "dup"));
+      $("cleanupTabBad").setAttribute("aria-pressed", String(cleanupType === "bad"));
       const body = $("cleanupBody");
       const hint = $("cleanupHint");
-      body.innerHTML = "加载中…";
-      if (hint) hint.textContent = "正在按所选范围扫描…";
+      body.innerHTML = workspaceEmptyHtml("正在检查文件", "按所选磁盘与频道查找，请稍候。", "loading");
+      body.dataset.groups = "[]";
+      body.setAttribute("aria-busy", "true");
+      syncCleanupSelection();
+      $("cleanupGroupCount").textContent = "—";
+      $("cleanupFileCount").textContent = "—";
+      hint.textContent = "正在按所选范围检查…";
       try {
         const params = new URLSearchParams();
         params.set("type", cleanupType);
         if (cleanupLib) params.set("lib", cleanupLib);
         if (cleanupCat) params.set("category", cleanupCat);
         const data = await fetch("/api/cleanup?" + params).then((r) => r.json());
+        if (version !== cleanupLoadVersion) return;
         if (!data.ok) {
-          body.textContent = data.msg || "加载失败";
+          body.innerHTML = workspaceEmptyHtml("检查未完成", data.msg || "加载失败，请切换范围重试。", "error");
+          hint.textContent = "未能取得检查结果。";
           return;
         }
         fillCleanupScopeSelects(data);
@@ -8858,59 +9347,51 @@
         else if (cleanupCat) scopeBits.push(cleanupCat);
         else scopeBits.push("全部频道");
         scopeBits.push(`范围内 ${scope.video_count != null ? scope.video_count : "?"} 部`);
-        if (hint) {
-          hint.innerHTML = `<strong>范围</strong>：${escapeHtml(scopeBits.join(" · "))}。`
-            + ` <strong>判定</strong>：${escapeHtml(scope.rules || "同体积后内容哈希相同的不同文件")}。`
-            + ` 切换上方「盘 / 频道」后会重新扫描。`;
-        }
+        hint.innerHTML = `<strong>${escapeHtml(scopeBits.join(" · "))}</strong><br>`
+          + (cleanupType === "dup"
+            ? `按内容完全相同判重，按文件修改时间默认保留最早一份。${escapeHtml(scope.rules || "")}`
+            : "显示片库已标记的损坏文件，可勾选移到回收站；批量转换请到转换队列。");
         const groups = (data.groups || []).filter((g) => (g.items || []).length);
         if (!groups.length) {
-          body.textContent = cleanupType === "bad"
-            ? "当前范围内没有标记为损坏的文件"
-            : "当前范围内没有发现重复组（可换频道或选「全部频道」再试）";
-          body.dataset.groups = "[]";
+          body.innerHTML = workspaceEmptyHtml(cleanupType === "bad" ? "没有损坏文件" : "没有重复文件", cleanupEmptyText());
+          syncCleanupSelection();
           return;
         }
         body.innerHTML = groups.map((g, gi) => {
           const items = g.items || [];
-          const keepNewest = pickKeepId(items, "newest");
+          const keepOldest = pickKeepId(items, "oldest");
           const rows = items.map((it) => {
-            const isKeep = cleanupType === "dup" && it.id === keepNewest;
-            const checked = cleanupType === "bad" ? "checked" : (isKeep ? "" : "checked");
-            const keepTag = isKeep ? ` <span style="color:var(--accent)">保留·最新</span>` : "";
-            const reason = it.reason ? ` · ${escapeHtml(it.reason)}` : "";
-            const lib = it.lib_label ? ` · ${escapeHtml(it.lib_label)}` : "";
-            return `
-            <div class="media-row">
-              <input type="checkbox" class="cleanup-check media-row-check" data-id="${escapeAttr(it.id)}" data-root="${escapeAttr(it.root || "")}" data-rel="${escapeAttr(it.rel || "")}" ${checked} />
-              ${thumbHtml(it.thumb_id || it.id, it.thumb_v, it.has_thumb, it.root)}
+            const isKeep = cleanupType === "dup" && it.id === keepOldest;
+            const checked = cleanupType === "bad" || !isKeep ? "checked" : "";
+            const meta = [it.size_h, it.mtime_h, it.folder, it.lib_label].filter(Boolean).join(" · ");
+            return `<div class="media-row">
+              <input type="checkbox" class="cleanup-check media-row-check" aria-label="${escapeAttr(`勾选 ${it.name || "文件"}`)}" data-id="${escapeAttr(it.id)}" data-root="${escapeAttr(it.root || "")}" data-rel="${escapeAttr(it.rel || "")}" data-size="${Number(it.size) || 0}" ${checked} />
+              ${thumbHtml(it.thumb_id || it.id, it.thumb_v, it.has_thumb, it.root, it)}
               <div class="media-row-body">
-                <strong title="${escapeAttr(it.name || "")}">${escapeHtml(it.name || "")}${keepTag}</strong>
-                <div class="media-row-meta">${escapeHtml(it.size_h || "")} · ${escapeHtml(it.mtime_h || "")} · ${escapeHtml(it.folder || "")}${lib}${reason}<br>${escapeHtml(it.path || "")}</div>
-                <div class="media-row-actions">
-                  <button type="button" class="btn cleanup-reveal" data-id="${escapeAttr(it.id)}" data-root="${escapeAttr(it.root || "")}">打开位置</button>
-                  ${cleanupType === "dup" ? `<button type="button" class="btn cleanup-keep-one" data-id="${escapeAttr(it.id)}">只留这个</button>` : ""}
-                </div>
+                <div class="cleanup-row-title"><strong title="${escapeAttr(it.name || "")}">${escapeHtml(it.name || "未命名文件")}</strong><span class="cleanup-row-badge"></span></div>
+                <div class="media-row-meta">${escapeHtml(meta)}</div>
+                <div class="cleanup-path" title="${escapeAttr(it.path || "")}">${escapeHtml(it.path || "")}</div>
+                ${it.reason ? `<div class="cleanup-reason">${escapeHtml(it.reason)}</div>` : ""}
+              </div>
+              <div class="media-row-actions">
+                <button type="button" class="btn cleanup-reveal" data-id="${escapeAttr(it.id)}" data-root="${escapeAttr(it.root || "")}">打开位置</button>
+                ${cleanupType === "dup" ? `<button type="button" class="btn cleanup-keep-one" data-id="${escapeAttr(it.id)}">只留这个</button>` : ""}
               </div>
             </div>`;
           }).join("");
-          const tools = cleanupType === "dup"
-            ? `<button type="button" class="btn cleanup-keep-mode" data-mode="newest" data-gi="${gi}">只留最新</button>
-               <button type="button" class="btn cleanup-keep-mode" data-mode="largest" data-gi="${gi}">只留最大</button>`
-            : "";
-          return `<div class="cleanup-group" style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px" data-gi="${gi}">
-            <div class="cleanup-group-head" style="margin-bottom:8px"><strong>${escapeHtml(g.reason || "")}</strong> · ${items.length} 项 · 勾选=删除</div>
-            ${rows}
-            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
-              ${tools}
-              <button type="button" class="btn primary cleanup-del-group" data-gi="${gi}">删除勾选（进回收站）</button>
-            </div>
+          return `<div class="cleanup-group" data-gi="${gi}">
+            <div class="cleanup-group-head">${cleanupGroupHeadHtml(g, gi)}</div>${rows}
           </div>`;
         }).join("");
         body.dataset.groups = JSON.stringify(groups);
+        syncCleanupSelection();
         watchThumbs(body);
       } catch (err) {
-        body.textContent = "加载失败: " + err;
+        if (version !== cleanupLoadVersion) return;
+        body.innerHTML = workspaceEmptyHtml("检查未完成", "加载失败: " + err, "error");
+        hint.textContent = "未能取得检查结果。";
+      } finally {
+        if (version === cleanupLoadVersion) body.setAttribute("aria-busy", "false");
       }
     }
 
@@ -8920,20 +9401,20 @@
         : "当前范围内没有发现重复组（可换频道或选「全部频道」再试）";
     }
 
-    function dropCleanupItems(panel, removedIds) {
+    function dropCleanupItems(panel, removedItems) {
       const body = $("cleanupBody");
-      if (!body || !panel) return;
+      if (!body || !panel || !body.contains(panel)) return;
       let groups = [];
       try { groups = JSON.parse(body.dataset.groups || "[]"); } catch (_) {}
       const gi = Number(panel.dataset.gi);
-      const removed = new Set(removedIds || []);
+      const removed = new Set(removedItems.map(videoLocationKey));
       if (!Number.isInteger(gi) || !groups[gi]) return;
-      groups[gi].items = (groups[gi].items || []).filter((it) => !removed.has(it.id));
+      groups[gi].items = (groups[gi].items || []).filter((it) => !removed.has(videoLocationKey(it)));
       panel.querySelectorAll(".media-row").forEach((row) => {
         const box = row.querySelector(".cleanup-check");
-        if (box && removed.has(box.dataset.id)) row.remove();
+        if (box && removed.has(videoLocationKey(box.dataset))) row.remove();
       });
-      if ((groups[gi].items || []).length < 2) {
+      if ((groups[gi].items || []).length < (cleanupType === "dup" ? 2 : 1)) {
         groups.splice(gi, 1);
         panel.remove();
       }
@@ -8942,27 +9423,39 @@
         node.dataset.gi = String(i);
         node.querySelectorAll("[data-gi]").forEach((el) => { el.dataset.gi = String(i); });
         const head = node.querySelector(".cleanup-group-head");
-        const items = (groups[i] && groups[i].items) || [];
         if (head && groups[i]) {
-          head.innerHTML = `<strong>${escapeHtml(groups[i].reason || "")}</strong> · ${items.length} 项 · 勾选=删除`;
+          head.innerHTML = cleanupGroupHeadHtml(groups[i], i);
         }
       });
       body.dataset.groups = JSON.stringify(groups);
       if (!body.querySelector(".cleanup-group")) {
-        body.textContent = cleanupEmptyText();
+        body.innerHTML = workspaceEmptyHtml("当前范围已整理", cleanupEmptyText());
         body.dataset.groups = "[]";
       }
+      syncCleanupSelection();
     }
 
+    let cleanupReturnFocus = null;
+    function closeCleanupModal() {
+      $("cleanupModal").classList.remove("open");
+      cleanupReturnFocus?.focus();
+    }
     $("cleanupBtn").addEventListener("click", () => {
+      cleanupReturnFocus = document.activeElement;
       $("cleanupModal").classList.add("open");
+      $("cleanupModalClose").focus();
       cleanupLib = "";
       cleanupCat = "";
+      $("cleanupLib").value = "";
+      $("cleanupCat").value = "";
       loadCleanup("dup");
     });
-    $("cleanupModalClose").addEventListener("click", () => $("cleanupModal").classList.remove("open"));
+    $("cleanupModalClose").addEventListener("click", closeCleanupModal);
     $("cleanupModal").addEventListener("click", (e) => {
-      if (e.target === $("cleanupModal")) $("cleanupModal").classList.remove("open");
+      if (e.target === $("cleanupModal")) closeCleanupModal();
+    });
+    $("cleanupBody").addEventListener("change", (e) => {
+      if (e.target.matches(".cleanup-check")) syncCleanupSelection();
     });
     $("cleanupTabDup").addEventListener("click", () => loadCleanup("dup"));
     $("cleanupTabBad").addEventListener("click", () => loadCleanup("bad"));
@@ -8980,31 +9473,6 @@
         loadCleanup(cleanupType);
       });
     }
-    async function cleanupBatchConvert(kind) {
-      const items = Array.from(document.querySelectorAll(".cleanup-check:checked"))
-        .map((el) => ({ id: el.dataset.id, root: el.dataset.root || "", rel: el.dataset.rel || "" }))
-        .filter((it) => it.id);
-      if (!items.length) {
-        alert("请先勾选要处理的条目");
-        return;
-      }
-      const label = kind === "fix_audio" ? "修声音" : "转 MP4";
-      if (!confirm(`将 ${items.length} 项加入「${label}」队列？\n默认同时只跑 1 个，避免打满 CPU。`)) return;
-      try {
-        const r = await fetch("/api/convert/batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items, kind }),
-        });
-        const data = await r.json();
-        alert(data.msg || (data.ok ? "已加入队列" : "失败"));
-        if (data.ok) openQueueModal();
-      } catch (err) {
-        alert("失败: " + err);
-      }
-    }
-    if ($("cleanupBatchFix")) $("cleanupBatchFix").addEventListener("click", () => cleanupBatchConvert("fix_audio"));
-    if ($("cleanupBatchMp4")) $("cleanupBatchMp4").addEventListener("click", () => cleanupBatchConvert("mp4"));
     $("cleanupBody").addEventListener("click", async (e) => {
       const reveal = e.target.closest(".cleanup-reveal");
       if (reveal) {
@@ -9032,6 +9500,7 @@
         panel.querySelectorAll(".cleanup-check").forEach((c) => {
           c.checked = c.dataset.id !== keepId;
         });
+        syncCleanupSelection();
         return;
       }
       const keepMode = e.target.closest(".cleanup-keep-mode");
@@ -9042,10 +9511,11 @@
         let groups = [];
         try { groups = JSON.parse($("cleanupBody").dataset.groups || "[]"); } catch (_) {}
         const items = (groups[gi] && groups[gi].items) || [];
-        const keepId = pickKeepId(items, keepMode.dataset.mode || "newest");
+        const keepId = pickKeepId(items, keepMode.dataset.mode || "oldest");
         panel.querySelectorAll(".cleanup-check").forEach((c) => {
           c.checked = c.dataset.id !== keepId;
         });
+        syncCleanupSelection();
         return;
       }
       const del = e.target.closest(".cleanup-del-group");
@@ -9066,7 +9536,9 @@
           if (!confirm("未保留任何一份，确定继续？")) return;
         }
       }
-      if (!confirm(`将 ${items.length} 个文件移到回收站，并从片库移除。继续？`)) return;
+      if (panel.dataset.deleting === "true" || !confirm(`将 ${items.length} 个文件移到回收站，并从片库移除。继续？`)) return;
+      panel.dataset.deleting = "true";
+      syncCleanupSelection();
       try {
         const r = await fetch("/api/delete", {
           method: "POST",
@@ -9075,14 +9547,18 @@
         });
         const data = await r.json();
         const failed = !data.ok || (data.errors && data.errors.length);
-        const removedIds = Array.isArray(data.removed) && data.removed.length
-          ? data.removed
-          : (data.ok ? items.map((it) => it.id) : []);
-        if (removedIds.length) dropCleanupItems(panel, removedIds);
+        const removedItems = Array.isArray(data.removed_items) ? data.removed_items : [];
+        if (removedItems.length) {
+          pruneDeletedVideos(removedItems);
+          dropCleanupItems(panel, removedItems);
+        }
         showToast(data.msg || (failed ? "删除失败" : "已移到回收站"), failed ? { error: true } : undefined);
         refresh({ soft: true }).catch(() => {});
       } catch (err) {
         showToast("删除失败: " + err, { error: true });
+      } finally {
+        delete panel.dataset.deleting;
+        syncCleanupSelection();
       }
     });
 
@@ -9190,87 +9666,154 @@
 
     // —— 观看历史 ——
     let histKind = "resume";
+    let historyLoadVersion = 0;
+    let historyReturnFocus = null;
+
+    function historyDayLabel(updated) {
+      const date = new Date(Number(updated) || 0);
+      if (!Number(updated) || !Number.isFinite(date.getTime())) return "更早的记录";
+      const today = new Date();
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      if (date.toDateString() === today.toDateString()) return "今天";
+      if (date.toDateString() === yesterday.toDateString()) return "昨天";
+      return date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });
+    }
+
     async function loadHistory(kind) {
       histKind = kind || "resume";
-      $("histTabResume").classList.toggle("primary", histKind === "resume");
-      $("histTabRecent").classList.toggle("primary", histKind === "recent");
-      $("histTabDone").classList.toggle("primary", histKind === "done");
+      const version = ++historyLoadVersion;
+      for (const [id, value] of [["histTabResume", "resume"], ["histTabRecent", "recent"], ["histTabDone", "done"]]) {
+        $(id).classList.toggle("primary", histKind === value);
+        $(id).setAttribute("aria-pressed", String(histKind === value));
+      }
+      const allRows = historyEntries("recent");
+      const entries = historyEntries(histKind);
+      const rows = entries.slice(0, 80);
+      $("histResumeCount").textContent = String(allRows.filter((r) => !r.done && r.t > 5).length);
+      $("histDoneCount").textContent = String(allRows.filter((r) => r.done).length);
+      $("histTotalCount").textContent = String(allRows.length);
+      $("histVisibleCount").textContent = String(rows.length);
+      $("histClearBtn").disabled = !allRows.length;
+      $("historyHint").textContent = entries.length > rows.length
+        ? `按最近播放时间排序，显示最新 ${rows.length} 条 / 共 ${entries.length} 条。`
+        : "按最近播放时间排序，点击条目继续播放；已看完的视频会从头播放。";
       const body = $("historyBody");
-      const rows = historyEntries(histKind).slice(0, 80);
+      body.scrollTop = 0;
+      body.setAttribute("aria-busy", "false");
       if (!rows.length) {
-        body.textContent = histKind === "done" ? "还没有已看完的记录" : (histKind === "recent" ? "暂无观看记录" : "没有未看完的片");
+        const empty = histKind === "done" ? ["还没有看完的视频", "看完的视频会自动收纳到这里。"]
+          : histKind === "recent" ? ["暂无播放记录", "开始播放后，可以在这里找到最近看过的视频。"]
+          : ["没有待续播的视频", "观看到一半的视频会保留进度，方便下次接着看。"];
+        body.innerHTML = workspaceEmptyHtml(...empty);
         return;
       }
-      body.innerHTML = "加载中…";
+      body.setAttribute("aria-busy", "true");
+      body.innerHTML = workspaceEmptyHtml("正在加载播放历史", "正在核对视频信息与所在磁盘。", "loading");
       try {
-        const data = await fetch("/api/videos-by-ids", {
+        const response = await fetch("/api/videos-by-ids", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ids: rows.map((r) => r.id), hints: historyHints(rows) }),
-        }).then((r) => r.json());
-        const byId = {};
-        (data.videos || []).forEach((v) => { byId[v.id] = v; });
-        const offlineRoots = new Set(data.offline_roots || []);
-        body.innerHTML = rows.map((r) => {
-          const v = byId[r.id];
-          const title = escapeHtml((v && v.name) || r.name || r.id);
-          let meta;
-          if (v) {
-            const disk = (v.root || r.root || "").replace(/\\/g, "/");
-            const diskHint = disk ? disk.split("/").filter(Boolean)[0] || disk : "";
-            meta = `${escapeHtml(v.size_h || "")} · ${escapeHtml(v.folder || "")}` +
-              (diskHint ? ` · ${escapeHtml(diskHint)}` : "");
-          } else if (r.root && offlineRoots.has(r.root)) {
-            meta = escapeHtml("磁盘未连接：" + r.root);
-          } else if (r.root) {
-            meta = escapeHtml(r.folder || r.root || "（其他磁盘）");
-          } else {
-            meta = escapeHtml(r.folder || "（不在当前片库）");
-          }
-          const dur = Number(r.duration) || 0;
-          const pct = (!r.done && dur > 0) ? Math.min(99, Math.round((r.t / dur) * 100)) + "%" : (r.done ? "已看完" : "");
-          const thumbRoot = (v && v.root) || r.root || "";
-          const thumb = thumbHtml(r.id, v && v.thumb_v, v && v.has_thumb, thumbRoot);
-          return `<button type="button" class="media-row-btn" data-hist-id="${escapeAttr(r.id)}" data-hist-root="${escapeAttr(r.root || (v && v.root) || "")}">
-            ${thumb}
-            <span class="media-row-body">
-              <strong>${title} ${pct ? `<span style="opacity:.7;font-weight:400">${pct}</span>` : ""}</strong>
-              <span class="media-row-meta">${meta}</span>
+        });
+        const data = await response.json();
+        if (version !== historyLoadVersion) return;
+        if (!response.ok || data.ok === false) throw new Error(data.msg || "读取播放历史失败");
+        const byId = new Map((data.videos || []).map((v) => [v.id, v]));
+        const days = new Map();
+        for (const r of rows) {
+          const candidate = byId.get(r.id);
+          const matched = candidate && (!r.root || sameLibPath(candidate.root, r.root)) ? candidate : null;
+          const root = r.root || (matched && matched.root) || "";
+          const offline = root && (data.offline_roots || []).some((path) => sameLibPath(path, root));
+          const v = offline ? null : matched;
+          const name = (v && v.name) || r.name || r.id;
+          const meta = offline ? "磁盘未连接：" + root
+            : [(v && v.size_h), (v && (v.lib_label || v.root)) || root, (v && v.folder) || r.folder].filter(Boolean).join(" · ");
+          const duration = Math.max(0, Number(r.duration) || 0);
+          const position = Math.max(0, Number(r.t) || 0);
+          const percent = r.done ? 100 : duration > 0 ? Math.min(99, Math.round(position / duration * 100)) : 0;
+          const progress = r.done ? "已看完" + (duration ? ` · ${formatResumeTime(duration)}` : "")
+            : duration > 0 ? `${formatResumeTime(position)} / ${formatResumeTime(duration)} · ${percent}%`
+            : `上次看到 ${formatResumeTime(position)}`;
+          const status = offline ? "磁盘未连接" : !v ? "暂未找到视频" : r.done ? "已看完" : "待续播";
+          const statusClass = offline ? "offline" : !v ? "missing" : r.done ? "done" : "";
+          const date = new Date(Number(r.updated) || 0);
+          const time = Number(r.updated) && Number.isFinite(date.getTime())
+            ? date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }) : "";
+          const day = historyDayLabel(r.updated);
+          if (!days.has(day)) days.set(day, []);
+          days.get(day).push(`<button type="button" class="history-entry${r.done ? " done" : ""}" data-hist-id="${escapeAttr(r.id)}" data-hist-root="${escapeAttr(root)}" aria-label="${escapeAttr((r.done ? "重新播放 " : "继续播放 ") + name)}">
+            ${thumbHtml(v ? (v.thumb_id || v.id) : "", v && v.thumb_v, v && v.has_thumb, root, v)}
+            <span class="history-entry-main">
+              <strong class="history-entry-title" title="${escapeAttr(name)}">${escapeHtml(name)}</strong>
+              <span class="history-entry-meta" title="${escapeAttr(meta)}">${escapeHtml(meta || "不在当前片库")}</span>
+              <span class="history-entry-progress">
+                ${duration > 0 || r.done ? `<span class="history-progress-track" aria-hidden="true"><i style="width:${percent}%"></i></span>` : ""}
+                <span class="history-progress-text">${escapeHtml(progress)}</span>
+              </span>
             </span>
-          </button>`;
-        }).join("");
+            <span class="history-entry-side">
+              <span class="history-status ${statusClass}">${status}</span>
+              <span class="history-play-action">${offline ? "连接后播放" : r.done ? "重新播放" : "继续播放"}</span>
+              <span class="history-time">${escapeHtml(time)}</span>
+            </span>
+          </button>`);
+        }
+        body.innerHTML = [...days].map(([day, items]) => `<section class="history-day">
+          <div class="history-day-heading"><h3>${escapeHtml(day)}</h3><span>${items.length} 条</span></div>
+          ${items.join("")}
+        </section>`).join("");
         watchThumbs(body);
       } catch (err) {
-        body.textContent = "加载失败: " + err;
+        if (version !== historyLoadVersion) return;
+        body.innerHTML = workspaceEmptyHtml("播放历史加载失败", String(err.message || err) + "，请点击刷新重试。", "error");
+      } finally {
+        if (version === historyLoadVersion) body.setAttribute("aria-busy", "false");
       }
     }
+
+    function closeHistoryModal() {
+      historyLoadVersion += 1;
+      $("historyModal").classList.remove("open");
+      $("historyBody").setAttribute("aria-busy", "false");
+      historyReturnFocus?.focus();
+    }
+
     $("historyBtn").addEventListener("click", () => {
+      historyReturnFocus = document.activeElement;
       $("historyModal").classList.add("open");
+      $("historyModalClose").focus();
       loadHistory("resume");
     });
-    $("historyModalClose").addEventListener("click", () => $("historyModal").classList.remove("open"));
+    $("historyModalClose").addEventListener("click", closeHistoryModal);
     $("historyModal").addEventListener("click", (e) => {
-      if (e.target === $("historyModal")) $("historyModal").classList.remove("open");
+      if (e.target === $("historyModal")) closeHistoryModal();
     });
     $("histTabResume").addEventListener("click", () => loadHistory("resume"));
     $("histTabRecent").addEventListener("click", () => loadHistory("recent"));
     $("histTabDone").addEventListener("click", () => loadHistory("done"));
+    $("histRefreshBtn").addEventListener("click", () => loadHistory(histKind));
     $("histClearBtn").addEventListener("click", () => {
-      if (!confirm("清除本机全部观看进度/历史？")) return;
-      try { localStorage.removeItem(PLAY_PROG_KEY); } catch (_) {}
+      if (!confirm("清空当前浏览器的全部观看进度和播放历史？\n视频文件不会被删除。")) return;
+      try { localStorage.removeItem(PLAY_PROG_KEY); } catch (err) {
+        showToast("清空失败: " + err, { error: true });
+        return;
+      }
       renderContinueBar();
       loadHistory(histKind);
+      showToast("已清空播放历史，视频文件未改动");
     });
     $("historyBody").addEventListener("click", async (e) => {
       const btn = e.target.closest("[data-hist-id]");
       if (!btn) return;
       const id = btn.dataset.histId;
       const root = btn.dataset.histRoot || "";
-      $("historyModal").classList.remove("open");
+      closeHistoryModal();
       try {
         await openFromHistory(id, root);
       } catch (err) {
-        alert(err.message || "无法打开（可能已移出片库）");
+        showToast(err.message || "无法打开（可能已移出片库）", { error: true });
       }
     });
     $("continueBar").addEventListener("click", async (e) => {
@@ -9278,7 +9821,7 @@
       if (!chip) return;
       const id = chip.dataset.playId;
       try {
-        await openFromHistory(id);
+        await openFromHistory(id, chip.dataset.playRoot || "");
       } catch (err) {
         alert(err.message || "无法打开该条目");
       }
@@ -9369,6 +9912,27 @@
       if (e.target === $("modal")) closePlayer();
     });
     document.addEventListener("keydown", (e) => {
+      const workspace = $("queueModal").classList.contains("open") ? $("queueModal")
+        : $("historyModal").classList.contains("open") ? $("historyModal")
+        : $("cleanupModal").classList.contains("open") ? $("cleanupModal") : null;
+      if (workspace && e.key === "Escape") {
+        e.preventDefault();
+        if (workspace.id === "queueModal") closeQueueModal();
+        else if (workspace.id === "historyModal") closeHistoryModal();
+        else closeCleanupModal();
+        return;
+      }
+      if (workspace && e.key === "Tab") {
+        const controls = [...workspace.querySelectorAll('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]')]
+          .filter((el) => el.getClientRects().length);
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (e.shiftKey && (document.activeElement === first || !workspace.contains(document.activeElement))) {
+          e.preventDefault(); last?.focus();
+        } else if (!e.shiftKey && (document.activeElement === last || !workspace.contains(document.activeElement))) {
+          e.preventDefault(); first?.focus();
+        }
+      }
       if (e.key === "Escape") {
         const menu = $("scopeOptions");
         if (menu) menu.open = false;
@@ -9433,6 +9997,171 @@
     let queuePollTimer = 0;
     let queueBadgeTimer = 0;
     let queueBadgeInflight = null;
+    let queueModalInflight = null;
+    let queueJobs = [];
+    let queueFilter = "all";
+    let queueReturnFocus = null;
+    const queueCancelling = new Set();
+    let queueBatchKind = "mp4";
+    let queueCandidates = [];
+    let queueCandidateOffset = 0;
+    let queueCandidateMore = false;
+    let queueCandidateLoading = false;
+    let queueCandidateVersion = 0;
+    let queueBatchBusy = false;
+    let queueBatchFeedback = "";
+    const queueSelectedFiles = new Map();
+
+    function queueCandidateKey(item) {
+      return JSON.stringify([item.root || "", item.id]);
+    }
+
+    function showQueuePicker(visible) {
+      $("queueTaskToolbar").hidden = visible;
+      $("queueBody").hidden = visible;
+      $("queueLiveHint").hidden = visible;
+      $("queueBatchActions").hidden = visible;
+      $("queuePickerToolbar").hidden = !visible;
+      $("queuePicker").hidden = !visible;
+      $("queueBatchHint").hidden = !visible;
+      $("queuePickerActions").hidden = !visible;
+      if (!visible) {
+        queueCandidateVersion++;
+        queueCandidateLoading = false;
+      }
+    }
+
+    function syncQueueFileSelection() {
+      const count = queueSelectedFiles.size;
+      $("queueBatchHint").textContent = `已选 ${count} 个文件 · 每批最多 80 个 · 按当前并发设置执行${queueBatchFeedback ? `。${queueBatchFeedback}` : ""}`;
+      $("queueBatchFix").disabled = queueBatchBusy;
+      $("queueBatchMp4").disabled = queueBatchBusy;
+      $("queueBatchSubmit").textContent = queueBatchBusy ? "正在加入…" : `加入队列${count ? `（${count}）` : ""}`;
+      $("queueBatchSubmit").disabled = !count || queueCandidateLoading || queueBatchBusy;
+      $("queuePickerPrev").disabled = !queueCandidateOffset || queueCandidateLoading || queueBatchBusy;
+      $("queuePickerNext").disabled = !queueCandidateMore || queueCandidateLoading || queueBatchBusy;
+      $("queuePickerBack").disabled = queueBatchBusy;
+      $("queuePickerLib").disabled = queueBatchBusy;
+      $("queuePickerQuery").disabled = queueBatchBusy;
+      $("queuePickerSearch").querySelector("button").disabled = queueBatchBusy;
+      const allSelected = queueCandidates.length > 0 && queueCandidates.every((item) => queueSelectedFiles.has(queueCandidateKey(item)));
+      $("queuePickerSelectAll").textContent = allSelected ? "取消本页选择" : "全选本页";
+      $("queuePickerSelectAll").disabled = !queueCandidates.length || queueCandidateLoading || queueBatchBusy;
+      $("queuePickerList").querySelectorAll(".queue-file-check").forEach((box) => {
+        box.checked = queueSelectedFiles.has(box.dataset.key);
+        box.disabled = queueBatchBusy || (!box.checked && count >= 80);
+        box.closest(".queue-candidate").classList.toggle("is-selected", box.checked);
+      });
+    }
+
+    async function loadQueueCandidates(offset = 0) {
+      const version = ++queueCandidateVersion;
+      const list = $("queuePickerList");
+      queueCandidateOffset = offset;
+      queueCandidateMore = false;
+      queueCandidates = [];
+      queueCandidateLoading = true;
+      $("queuePicker").setAttribute("aria-busy", "true");
+      $("queuePickerPageInfo").textContent = "";
+      list.innerHTML = workspaceEmptyHtml("正在查找待处理文件", "只读取片库中符合此任务条件的文件。", "loading");
+      syncQueueFileSelection();
+      try {
+        const params = new URLSearchParams({ kind: queueBatchKind, offset: String(offset) });
+        const lib = $("queuePickerLib").value;
+        const query = $("queuePickerQuery").value.trim();
+        if (lib) params.set("lib", lib);
+        if (query) params.set("q", query);
+        const response = await fetch("/api/convert/candidates?" + params);
+        const data = await response.json();
+        if (version !== queueCandidateVersion) return;
+        if (!response.ok || !data.ok) {
+          list.innerHTML = workspaceEmptyHtml("文件列表加载失败", data.msg || "请点击搜索重试。", "error");
+          return;
+        }
+        const libSelect = $("queuePickerLib");
+        libSelect.innerHTML = `<option value="">全部盘</option>` + (data.roots || []).map((root) => `<option value="${escapeAttr(root.path)}">${escapeHtml(root.label || root.path)}</option>`).join("");
+        libSelect.value = lib;
+        queueCandidates = data.items || [];
+        queueCandidateMore = !!data.has_more;
+        $("queuePickerPageInfo").textContent = queueCandidates.length ? `${offset + 1}–${offset + queueCandidates.length} / 共 ${data.count} 个` : "共 0 个";
+        list.innerHTML = queueCandidates.length ? queueCandidates.map((item) => {
+          const key = queueCandidateKey(item);
+          const path = [item.root, item.rel].filter(Boolean).join(" / ");
+          const meta = [item.size_h, item.lib_label, item.folder].filter(Boolean).join(" · ");
+          const format = item.kind === "ts_set" ? "TS 合集" : (item.ext || item.kind || "视频").replace(/^\./, "").toUpperCase();
+          return `<label class="queue-candidate"><input type="checkbox" class="queue-file-check" data-key="${escapeAttr(key)}" aria-label="${escapeAttr(`选择 ${item.name}`)}" />
+            <span class="queue-candidate-main"><strong title="${escapeAttr(item.name)}">${escapeHtml(item.name || "未命名文件")}</strong><small>${escapeHtml(meta)}</small><span class="cleanup-path" title="${escapeAttr(path)}">${escapeHtml(path)}</span></span>
+            <span class="queue-kind">${escapeHtml(format)}</span></label>`;
+        }).join("") : workspaceEmptyHtml("没有符合条件的文件", queueBatchKind === "fix_audio"
+          ? "当前范围没有标记为需要修声音的文件，可更换磁盘或搜索条件。"
+          : "当前范围没有 m3u8 / TS 合集，可更换磁盘或搜索条件。");
+      } catch (err) {
+        if (version !== queueCandidateVersion) return;
+        list.innerHTML = workspaceEmptyHtml("文件列表加载失败", String(err), "error");
+      } finally {
+        if (version === queueCandidateVersion) {
+          queueCandidateLoading = false;
+          $("queuePicker").setAttribute("aria-busy", "false");
+          syncQueueFileSelection();
+        }
+      }
+    }
+
+    function openQueueBatchPicker(kind) {
+      if (queueBatchBusy) return;
+      queueBatchKind = kind;
+      queueBatchFeedback = "";
+      queueSelectedFiles.clear();
+      $("queuePickerLib").value = "";
+      $("queuePickerQuery").value = "";
+      $("queuePickerTitle").textContent = kind === "fix_audio" ? "批量修声音 · 选择文件" : "批量转 MP4 · 选择文件";
+      $("queuePickerRules").textContent = kind === "fix_audio"
+        ? "仅显示片库已标记为音轨不兼容的普通视频，转换为 AAC 音轨。"
+        : "仅显示 m3u8 / TS 合集，合并为同目录 MP4；普通视频请在播放页转换。";
+      showQueuePicker(true);
+      $("queuePickerBack").focus();
+      loadQueueCandidates();
+    }
+
+    async function submitQueueBatch() {
+      if (queueBatchBusy || queueCandidateLoading || !queueSelectedFiles.size) return;
+      const kind = queueBatchKind;
+      const items = [...queueSelectedFiles.values()].map((item) => ({ id: item.id, root: item.root || "", rel: item.rel || "" }));
+      const label = kind === "fix_audio" ? "修声音" : "转 MP4";
+      if (!confirm(`将 ${items.length} 个文件加入「${label}」队列？\n按队列当前并发设置执行。`)) return;
+      queueBatchBusy = true;
+      queueBatchFeedback = "";
+      syncQueueFileSelection();
+      try {
+        const response = await fetch("/api/convert/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items, kind }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          showToast(data.msg || "加入队列失败", { error: true });
+          return;
+        }
+        const skipped = data.skipped || [];
+        showToast(data.msg || "已加入队列", skipped.length ? { error: true } : undefined);
+        if ((data.queued || []).length) {
+          queueSelectedFiles.clear();
+          queueFilter = "all";
+          showQueuePicker(false);
+          $("queueBody").scrollTop = 0;
+          if ($("queueModal").classList.contains("open")) $("queueBatchActions").querySelector("button").focus();
+          await loadQueueModal();
+        } else if (skipped.length) {
+          queueBatchFeedback = skipped.slice(0, 3).map((item) => item.msg).join("；");
+        }
+      } catch (err) {
+        showToast("加入队列失败: " + err, { error: true });
+      } finally {
+        queueBatchBusy = false;
+        syncQueueFileSelection();
+      }
+    }
 
     function stopQueueBadgePoll() {
       if (queueBadgeTimer) {
@@ -9449,7 +10178,7 @@
     function syncQueueBadgeFromJobs(jobs) {
       const qbtn = $("queueBtn");
       const list = Array.isArray(jobs) ? jobs : [];
-      const active = list.filter((j) => j && (j.status === "queued" || j.status === "running"));
+      const active = list.filter((j) => j && ["queued", "running", "cancelling"].includes(j.status));
       if (!qbtn) return active.length;
       if (!active.length) {
         qbtn.textContent = "转换队列";
@@ -9498,79 +10227,120 @@
       return "转封装";
     }
 
-    async function loadQueueModal() {
+    function renderQueueJobs() {
       const body = $("queueBody");
-      if (!body) return;
+      const isActive = (j) => ["running", "queued", "cancelling"].includes(j.status);
+      const active = queueJobs.filter(isActive);
+      $("queueRunningCount").textContent = queueJobs.filter((j) => ["running", "cancelling"].includes(j.status)).length;
+      $("queueWaitingCount").textContent = queueJobs.filter((j) => j.status === "queued").length;
+      $("queueDoneCount").textContent = queueJobs.filter((j) => j.status === "done").length;
+      $("queueErrorCount").textContent = queueJobs.filter((j) => j.status === "error").length;
+      $("queueLiveHint").textContent = active.length
+        ? `${active.length} 个任务处理中 · 每 1.5 秒自动更新`
+        : "当前无进行中的任务 · 关闭面板不会中断转换";
+      $("queueFilters").querySelectorAll("[data-filter]").forEach((button) => {
+        const selected = button.dataset.filter === queueFilter;
+        button.classList.toggle("primary", selected);
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      const priority = { running: 0, cancelling: 1, queued: 2 };
+      const jobs = queueJobs.filter((j) => queueFilter === "all"
+        || (queueFilter === "active" && isActive(j))
+        || (queueFilter === "finished" && !isActive(j))
+        || (queueFilter === "error" && j.status === "error"))
+        .slice().sort((a, b) => (priority[a.status] ?? 3) - (priority[b.status] ?? 3));
+      if (!jobs.length) {
+        body.innerHTML = workspaceEmptyHtml(queueJobs.length ? "此分类暂无任务" : "队列空闲中", queueJobs.length
+          ? "可以切换到「全部」查看其他任务。"
+          : "在播放页转换视频、制作 GIF 或截取片段，也可以点击下方批量操作选择文件加入队列。");
+        return;
+      }
+      const statusLabel = { queued: "排队中", running: "进行中", done: "已完成", error: "失败", cancelled: "已取消", cancelling: "取消中" };
+      const html = jobs.map((j, i) => {
+        const st = j.status || "";
+        const canCancel = st === "queued" || st === "running";
+        const pct = Math.max(0, Math.min(100, Number(j.percent) || 0));
+        const progress = isActive(j)
+          ? `<div class="queue-progress-row"><div class="queue-progress" role="progressbar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div><span>${pct}%</span></div>`
+          : "";
+        return `<article class="queue-task" data-status="${escapeAttr(st)}">
+          <div class="queue-task-index" aria-hidden="true">${String(i + 1).padStart(2, "0")}</div>
+          <div class="queue-task-main">
+            <div class="queue-task-heading"><strong>${escapeHtml(j.name || j.vid || "未命名任务")}</strong><span class="queue-status ${escapeAttr(st)}">${escapeHtml(statusLabel[st] || st)}</span></div>
+            <div class="queue-task-detail"><span class="queue-kind">${escapeHtml(convertJobKindLabel(j))}</span></div>
+            ${j.msg ? `<div class="queue-message">${escapeHtml(j.msg)}</div>` : ""}${progress}
+          </div>
+          ${canCancel ? `<div class="queue-task-actions"><button type="button" class="btn queue-cancel" data-jid="${escapeAttr(j.id)}" ${queueCancelling.has(j.id) ? "disabled" : ""}>${queueCancelling.has(j.id) ? "取消中…" : "取消任务"}</button></div>` : ""}
+        </article>`;
+      }).join("");
+      if (body.innerHTML !== html) {
+        const focusedJob = body.contains(document.activeElement) ? document.activeElement.dataset.jid : null;
+        body.innerHTML = html;
+        if (focusedJob) {
+          const button = [...body.querySelectorAll(".queue-cancel")].find((el) => el.dataset.jid === focusedJob);
+          if (button && !button.disabled) button.focus({ preventScroll: true });
+          else $("queueFilters").querySelector(`[data-filter="${queueFilter}"]`).focus({ preventScroll: true });
+        }
+      }
+    }
+
+    async function loadQueueModal() {
+      if (queueModalInflight) return queueModalInflight;
+      const body = $("queueBody");
+      body.setAttribute("aria-busy", "true");
+      $("queueRefreshBtn").disabled = true;
+      queueModalInflight = (async () => {
+        try {
+          const r = await fetch("/api/convert/queue");
+          const data = await r.json();
+          if (!r.ok || !data.ok) {
+            body.innerHTML = workspaceEmptyHtml("队列加载失败", (data && data.msg) || ("HTTP " + r.status), "error");
+            $("queueLiveHint").textContent = "自动更新未成功，可点击刷新重试。";
+            clientLog("queue_load_failed", { http_ok: r.ok, status: r.status, msg: (data && data.msg) || "" }, "ERROR");
+            return;
+          }
+          const par = $("queueParallel");
+          if (!par.disabled && data.parallel) par.value = String(data.parallel);
+          queueJobs = data.jobs || [];
+          const activeN = syncQueueBadgeFromJobs(queueJobs);
+          if (activeN > 0 && $("queueModal").classList.contains("open")) {
+            if (!queuePollTimer) queuePollTimer = setInterval(loadQueueModal, QUEUE_MODAL_POLL_MS);
+          } else if (queuePollTimer) {
+            clearInterval(queuePollTimer);
+            queuePollTimer = 0;
+          }
+          renderQueueJobs();
+        } catch (err) {
+          body.innerHTML = workspaceEmptyHtml("队列加载失败", String(err), "error");
+          $("queueLiveHint").textContent = "自动更新未成功，可点击刷新重试。";
+          clientLog("queue_load_exception", { error: String(err) }, "ERROR");
+        }
+      })();
       try {
-        const r = await fetch("/api/convert/queue");
-        const data = await r.json();
-        if (!r.ok || !data.ok) {
-          body.textContent = "加载失败: " + ((data && data.msg) || ("HTTP " + r.status));
-          clientLog("queue_load_failed", {
-            http_ok: r.ok,
-            status: r.status,
-            msg: (data && data.msg) || "",
-          }, "ERROR");
-          return;
-        }
-        const par = $("queueParallel");
-        if (par && data.parallel) par.value = String(data.parallel);
-        const jobs = data.jobs || [];
-        const activeN = syncQueueBadgeFromJobs(jobs);
-        // Modal open: keep refreshing only while work is in flight.
-        if (activeN > 0) {
-          if (!queuePollTimer) queuePollTimer = setInterval(loadQueueModal, QUEUE_MODAL_POLL_MS);
-        } else if (queuePollTimer) {
-          clearInterval(queuePollTimer);
-          queuePollTimer = 0;
-        }
-        if (!jobs.length) {
-          body.textContent = "队列为空。播放页可转换、制作 GIF、截取片段；清理页可批量加入。";
-          return;
-        }
-        const statusLabel = {
-          queued: "排队中",
-          running: "进行中",
-          done: "已完成",
-          error: "失败",
-          cancelled: "已取消",
-          cancelling: "取消中",
-        };
-        body.innerHTML = jobs.map((j) => {
-          const st = j.status || "";
-          const canCancel = st === "queued" || st === "running";
-          const kind = convertJobKindLabel(j);
-          const pct = j.percent != null ? Number(j.percent) : 0;
-          const stText = statusLabel[st] || st;
-          const pctText = (st === "running" || st === "queued" || pct > 0)
-            ? `${pct}%`
-            : "";
-          const bar = (st === "running" || st === "queued")
-            ? `<div class="queue-progress" title="${pct}%"><i style="width:${Math.max(2, Math.min(100, pct))}%"></i></div>`
-            : "";
-          return `<div class="media-row">
-            <div class="media-row-body">
-              <strong>${escapeHtml(j.name || j.vid)} <span style="opacity:.7;font-weight:400">${kind} · ${escapeHtml(stText)} ${pctText}</span></strong>
-              <div class="media-row-meta">${escapeHtml(j.msg || "")}</div>
-              ${bar}
-              <div class="media-row-actions">
-                ${canCancel ? `<button type="button" class="btn queue-cancel" data-jid="${escapeAttr(j.id)}">取消</button>` : ""}
-              </div>
-            </div>
-          </div>`;
-        }).join("");
-      } catch (err) {
-        body.textContent = "加载失败: " + err;
-        clientLog("queue_load_exception", { error: String(err) }, "ERROR");
+        await queueModalInflight;
+      } finally {
+        queueModalInflight = null;
+        body.setAttribute("aria-busy", "false");
+        $("queueRefreshBtn").disabled = false;
       }
     }
     function openQueueModal() {
+      if (!$("queueModal").classList.contains("open")) queueReturnFocus = document.activeElement;
       $("queueModal").classList.add("open");
+      showQueuePicker(false);
+      $("queueModalClose").focus();
+      queueFilter = "all";
+      $("queueFilters").querySelectorAll("[data-filter]").forEach((button) => {
+        button.classList.toggle("primary", button.dataset.filter === "all");
+        button.setAttribute("aria-pressed", String(button.dataset.filter === "all"));
+      });
+      $("queueBody").innerHTML = workspaceEmptyHtml("正在读取队列", "获取任务的最新状态与进度。", "loading");
       loadQueueModal();
     }
     function closeQueueModal() {
       $("queueModal").classList.remove("open");
       if (queuePollTimer) { clearInterval(queuePollTimer); queuePollTimer = 0; }
+      queueReturnFocus?.focus();
     }
     if ($("queueBtn")) $("queueBtn").addEventListener("click", openQueueModal);
     // One shot on load (catch leftover jobs). Share the in-flight fetch if
@@ -9583,27 +10353,96 @@
     if ($("queueModal")) $("queueModal").addEventListener("click", (e) => {
       if (e.target === $("queueModal")) closeQueueModal();
     });
+    $("queueBatchFix").addEventListener("click", () => openQueueBatchPicker("fix_audio"));
+    $("queueBatchMp4").addEventListener("click", () => openQueueBatchPicker("mp4"));
+    $("queueBatchSubmit").addEventListener("click", submitQueueBatch);
+    $("queuePickerBack").addEventListener("click", () => {
+      showQueuePicker(false);
+      $("queueBatchActions").querySelector("button").focus();
+    });
+    $("queuePickerLib").addEventListener("change", () => {
+      queueSelectedFiles.clear();
+      queueBatchFeedback = "";
+      loadQueueCandidates();
+    });
+    $("queuePickerSearch").addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (queueBatchBusy) return;
+      queueSelectedFiles.clear();
+      queueBatchFeedback = "";
+      loadQueueCandidates();
+    });
+    $("queuePickerPrev").addEventListener("click", () => loadQueueCandidates(Math.max(0, queueCandidateOffset - 80)));
+    $("queuePickerNext").addEventListener("click", () => loadQueueCandidates(queueCandidateOffset + 80));
+    $("queuePickerSelectAll").addEventListener("click", () => {
+      const allSelected = queueCandidates.every((item) => queueSelectedFiles.has(queueCandidateKey(item)));
+      queueCandidates.forEach((item) => {
+        const key = queueCandidateKey(item);
+        if (allSelected) queueSelectedFiles.delete(key);
+        else if (queueSelectedFiles.size < 80) queueSelectedFiles.set(key, item);
+      });
+      if (!allSelected && !queueCandidates.every((item) => queueSelectedFiles.has(queueCandidateKey(item)))) showToast("每批最多选择 80 个文件，请先加入队列再继续选择。");
+      queueBatchFeedback = "";
+      syncQueueFileSelection();
+    });
+    $("queuePickerList").addEventListener("change", (e) => {
+      const box = e.target.closest(".queue-file-check");
+      if (!box || queueBatchBusy) return;
+      const item = queueCandidates.find((candidate) => queueCandidateKey(candidate) === box.dataset.key);
+      if (!item) return;
+      if (box.checked && queueSelectedFiles.size < 80) queueSelectedFiles.set(box.dataset.key, item);
+      else queueSelectedFiles.delete(box.dataset.key);
+      queueBatchFeedback = "";
+      syncQueueFileSelection();
+    });
     if ($("queueRefreshBtn")) $("queueRefreshBtn").addEventListener("click", loadQueueModal);
+    $("queueFilters").addEventListener("click", (e) => {
+      const button = e.target.closest("[data-filter]");
+      if (!button || $("queueBody").getAttribute("aria-busy") === "true") return;
+      queueFilter = button.dataset.filter;
+      renderQueueJobs();
+    });
     if ($("queueParallel")) {
       $("queueParallel").addEventListener("change", async () => {
-        const parallel = Number($("queueParallel").value) || 1;
-        await fetch("/api/convert/batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: [], kind: "mp4", parallel }),
-        }).catch(() => {});
-        loadQueueModal();
+        const select = $("queueParallel");
+        const parallel = Number(select.value) || 1;
+        select.disabled = true;
+        try {
+          const response = await fetch("/api/convert/batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: [], kind: "mp4", parallel }),
+          });
+          const data = await response.json();
+          showToast(data.msg || (data.ok ? "并发设置已更新" : "并发设置失败"), response.ok && data.ok ? undefined : { error: true });
+        } catch (err) {
+          showToast("并发设置失败: " + err, { error: true });
+        } finally {
+          select.disabled = false;
+          loadQueueModal();
+        }
       });
     }
     if ($("queueBody")) {
       $("queueBody").addEventListener("click", async (e) => {
         const btn = e.target.closest(".queue-cancel");
-        if (!btn) return;
+        if (!btn || btn.disabled) return;
         const jid = btn.dataset.jid;
-        await fetch("/api/convert-mp4/job/" + encodeURIComponent(jid) + "/cancel", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-        });
-        loadQueueModal();
+        queueCancelling.add(jid);
+        renderQueueJobs();
+        try {
+          const response = await fetch("/api/convert-mp4/job/" + encodeURIComponent(jid) + "/cancel", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+          });
+          const data = await response.json();
+          if (!response.ok || !data.ok) showToast(data.msg || "取消失败", { error: true });
+          await loadQueueModal();
+        } catch (err) {
+          showToast("取消失败: " + err, { error: true });
+        } finally {
+          queueCancelling.delete(jid);
+          renderQueueJobs();
+        }
       });
     }
 

@@ -95,6 +95,7 @@ from vg.media import (
     is_2k_or_4k,
     scale_choices,
     make_thumbnail,
+    make_item_thumbnail,
     player_video_meta_pending,
     probe_media_info,
     save_thumbnail_jpeg,
@@ -112,7 +113,7 @@ from vg.roots import (
 from vg.scan import start_scan
 from vg.search import parse_search_query, video_matches_query
 from vg.series import collapse_to_series_cards, series_episodes
-from vg.state import STATE, video_query_cache_get, video_query_cache_put
+from vg.state import STATE, catalog_writer_busy as is_catalog_writer_busy, video_query_cache_get, video_query_cache_put
 from vg.taxonomy import ensure_video_taxonomy, taxonomy_facets, taxonomy_facets_pair
 from vg.thumb_jobs import (
     THUMB_PRIORITY_VISIBLE,
@@ -763,18 +764,6 @@ def _serve_cached_videos_response():
             offset=_off,
             limit=_lim,
         )
-        diagnostic_emit(
-            "INFO",
-            "api_videos_cache_resolution",
-            force=diagnostic_full_logging_enabled(),
-            request_id=getattr(g, "_diag_request_id", ""),
-            layer="L3_server_query",
-            offset=_off,
-            limit=_lim,
-            lib_gen=int(STATE.get("lib_gen") or 0),
-            response_cache_entries=len(_video_response_cache),
-            response_cache_bytes=_video_response_cache_bytes,
-        )
         return None
     diagnostic_aggregate("api_videos_response_cache_hit")
     _set_request_cache_layer(
@@ -794,19 +783,14 @@ def _serve_cached_videos_response():
         if isinstance(sample.get("types"), list)
         else -1
     )
-    # 正常命中不刷屏（force=False INFO）；但 offset=0 的首屏命中必须强制留痕，
-    # 以及"请求的 offset/limit 与响应体落盘时记录的不一致"也是 cache key
-    # 错乱的硬证据，打 WARN 级别告警。
     mismatch = (
         (res_offset is not None and res_offset != _off)
         or (_off == 0 and res_types_len == 0)
     )
-    emit_force = bool(mismatch or diagnostic_full_logging_enabled())
-    emit_level = "WARN" if mismatch else "INFO"
     diagnostic_emit(
-        emit_level,
+        "WARN" if mismatch else "INFO",
         "api_videos_response_cache_hit_detail",
-        force=emit_force,
+        force=mismatch,
         request_id=getattr(g, "_diag_request_id", ""),
         offset=_off,
         limit=_lim,
@@ -819,16 +803,6 @@ def _serve_cached_videos_response():
         offset_match=(res_offset is None or res_offset == _off),
         zero_types_ok=(not _off == 0 or res_types_len > 0),
         cached_body_bytes=len(body),
-    )
-    diagnostic_emit(
-        "INFO",
-        "api_videos_cache_resolution",
-        force=diagnostic_full_logging_enabled(),
-        request_id=getattr(g, "_diag_request_id", ""),
-        layer="L1_server_response_memory",
-        offset=_off,
-        limit=_lim,
-        response_rows=len(sample.get("videos") or []) if isinstance(sample.get("videos"), list) else -1,
     )
     return Response(body, status=status, mimetype=mimetype)
 
@@ -883,8 +857,7 @@ def _log_request_diagnostics(resp):
             "INFO",
             "http_cache_resolution",
             force=(
-                diagnostic_full_logging_enabled()
-                or elapsed_ms >= 200.0
+                elapsed_ms >= 200.0
                 or (resp.status_code >= 400 and not expected_deferred_thumb)
             ),
             request_id=rid,
@@ -947,16 +920,6 @@ def _log_request_diagnostics(resp):
             method=request.method,
             path=path,
             status=resp.status_code,
-        )
-    else:
-        diagnostic_call(
-            "http_request",
-            request_id=rid,
-            operation_id=operation_id,
-            verb=request.method,
-            path=path,
-            status=resp.status_code,
-            elapsed_ms=f"{elapsed_ms:.1f}",
         )
     return resp
 
@@ -1727,6 +1690,7 @@ def api_videos_by_ids():
     # already prefers STATE.by_id / videos (enriched in place); only load a
     # catalog when memory misses and the writer is idle.
     t0 = time.perf_counter()
+    request_gen = int(STATE.get("lib_gen") or 0)
     roots_needed = []
     seen_roots: set[str] = set()
     for vid in ids[:100]:
@@ -1738,29 +1702,11 @@ def api_videos_by_ids():
                 roots_needed.append(r)
     collect_ms = (time.perf_counter() - t0) * 1000.0
 
-    catalog_writer_busy = bool(
-        STATE.get("scanning")
-        or STATE.get("updating")
-        or STATE.get("meta_progress")
-    )
+    catalog_writer_busy = is_catalog_writer_busy()
     ensure_skipped = False
     t_ensure = time.perf_counter()
     if catalog_writer_busy:
         ensure_skipped = True
-        diagnostic_emit_rate_limited(
-            "WARN",
-            "api_videos_by_ids_skip_ensure_writer_busy",
-            key="by-ids-writer-busy",
-            interval=5.0,
-            force=True,
-            requested=min(len(ids), 100),
-            roots=len(roots_needed),
-            scanning=bool(STATE.get("scanning")),
-            updating=bool(STATE.get("updating")),
-            meta_progress=str(STATE.get("meta_progress") or "")[:120],
-            reason="avoid_catalog_lock_deadlock",
-            request_id=getattr(g, "_diag_request_id", ""),
-        )
     else:
         for root in roots_needed:
             if memory_catalog_ready(root):
@@ -1821,9 +1767,31 @@ def api_videos_by_ids():
         elif STATE.get("root"):
             row["root"] = str(STATE["root"])
         _ensure_duration_h(row)
-        if row.get("bad"):
+        row["bad"] = bool(row.get("bad"))
+        row["bad_reason"] = str(row.get("bad_reason") or "") if row["bad"] else ""
+        row["audio_hard"] = bool(row.get("audio_hard"))
+        if row["bad"]:
             with_bad += 1
         out.append(row)
+    loaded_roots = {
+        os.path.normcase(os.path.normpath(str(root)))
+        for root, lib in list((STATE.get("disk_libs") or {}).items())
+        if isinstance(lib, dict) and isinstance(lib.get("by_id"), dict)
+        and lib.get("index_mtime") and not lib.get("live")
+    }
+    offline_keys = {os.path.normcase(os.path.normpath(root)) for root in offline}
+    response_gen = int(STATE.get("lib_gen") or 0)
+    catalog_stable = (
+        not catalog_writer_busy and not is_catalog_writer_busy()
+        and request_gen == response_gen
+    )
+    for miss in missing:
+        root_key = os.path.normcase(os.path.normpath(miss["root"])) if miss.get("root") else ""
+        if root_key in offline_keys:
+            miss["offline"] = True
+        miss["confirmed"] = bool(
+            catalog_stable and root_key in loaded_roots and root_key not in offline_keys
+        )
     total_ms = (time.perf_counter() - t0) * 1000.0
     try:
         from vg import state as runtime_state
@@ -1839,10 +1807,13 @@ def api_videos_by_ids():
             f"|busy={int(catalog_writer_busy)}"
         ),
         interval=4.0,
-        force=True,
+        force=bool(missing) or total_ms >= 200.0,
         requested=len(ids),
         returned=len(out),
         missing=len(missing),
+        confirmed_missing=sum(bool(miss["confirmed"]) for miss in missing),
+        catalog_stable=catalog_stable,
+        lib_gen=response_gen,
         matched_runtime_duplicate_rows=matched_runtime_duplicate_rows,
         with_dup=matched_runtime_duplicate_rows,
         with_bad=with_bad,
@@ -1880,6 +1851,8 @@ def api_videos_by_ids():
         "videos": out,
         "count": len(out),
         "missing": missing,
+        "catalog_stable": catalog_stable,
+        "lib_gen": response_gen,
         "offline_roots": sorted(offline),
     })
 
@@ -2934,6 +2907,15 @@ def _catalog_caches_for_roots(roots: list[str]) -> list[Path]:
 def _serve_thumb_jpeg(cache: Path | None, file_id: str):
     if not cache or not file_id:
         return None
+    cache_key = os.path.normcase(os.path.normpath(str(cache)))
+    for lib in (STATE.get("disk_libs") or {}).values():
+        if not isinstance(lib, dict):
+            continue
+        if os.path.normcase(os.path.normpath(str(lib.get("cache_dir") or ""))) != cache_key:
+            continue
+        item = (lib.get("by_id") or {}).get(file_id)
+        if item and item.get("has_thumb") is False:
+            return None
     raw = read_thumb_jpeg(cache, file_id)
     if not raw:
         return None
@@ -3110,45 +3092,14 @@ def thumb(vid: str):
                 diagnostic_aggregate("thumbnail_placeholder")
                 return _deferred_placeholder(temporary=False, reason="no_video_stream")
             if src:
-                def generate_requested_thumb() -> bool:
-                    ok = make_thumbnail(ffmpeg, src, out, background=True)
-                    if not ok:
-                        mark_thumbnail_failure(
-                            item,
-                            reason=item.get("bad_reason") or "thumbnail_generation_failed",
-                        )
-                        try:
-                            save_library_item(item)
-                            diagnostic_emit_rate_limited(
-                                "INFO",
-                                "thumbnail_failure_marker_saved",
-                                key=f"{cache}|{file_id}",
-                                interval=30.0,
-                                force=True,
-                                video_id=file_id,
-                                cache=cache,
-                                reason=item.get("thumb_failed_reason"),
-                            )
-                        except Exception as exc:
-                            diagnostic_error(
-                                "thumbnail_failure_marker_save_failed",
-                                exc,
-                                video_id=file_id,
-                                cache=cache,
-                            )
-                        return False
-                    thumb_cache_invalidate(file_id, cache)
-                    clear_thumbnail_failure(item)
-                    item["has_thumb"] = True
-                    item["thumb_v"] = thumb_version(cache, file_id)
-                    try:
-                        save_library_item(item)
-                    except Exception as e:
-                        log(f"[预览图] 单条索引保存失败: {e}")
+                def generate_requested_thumb() -> bool | None:
+                    ok = make_item_thumbnail(item, ffmpeg, cache)
+                    if ok is not True:
+                        return ok
                     return True
 
                 submit_thumbnail_job(
-                    thumbnail_job_key(cache, file_id),
+                    thumbnail_job_key(cache, file_id, item=item),
                     generate_requested_thumb,
                     priority=THUMB_PRIORITY_VISIBLE,
                 )
@@ -3245,41 +3196,10 @@ def thumb(vid: str):
                 diagnostic_aggregate("thumbnail_generation_skipped_no_video_stream")
                 src = None
             if src:
-                def generate_requested_thumb() -> bool:
-                    ok = make_thumbnail(ffmpeg, src, out, background=True)
-                    if not ok:
-                        mark_thumbnail_failure(
-                            item,
-                            reason=item.get("bad_reason") or "thumbnail_generation_failed",
-                        )
-                        try:
-                            save_library_item(item)
-                            diagnostic_emit_rate_limited(
-                                "INFO",
-                                "thumbnail_failure_marker_saved",
-                                key=f"{cache}|{file_id}",
-                                interval=30.0,
-                                force=True,
-                                video_id=file_id,
-                                cache=cache,
-                                reason=item.get("thumb_failed_reason"),
-                            )
-                        except Exception as exc:
-                            diagnostic_error(
-                                "thumbnail_failure_marker_save_failed",
-                                exc,
-                                video_id=file_id,
-                                cache=cache,
-                            )
-                        return False
-                    thumb_cache_invalidate(file_id, cache)
-                    clear_thumbnail_failure(item)
-                    item["has_thumb"] = True
-                    item["thumb_v"] = thumb_version(cache, file_id)
-                    try:
-                        save_library_item(item)
-                    except Exception as e:
-                        log(f"[预览图] 单条索引保存失败: {e}")
+                def generate_requested_thumb() -> bool | None:
+                    ok = make_item_thumbnail(item, ffmpeg, cache)
+                    if ok is not True:
+                        return ok
                     if not STATE.get("scanning") and not STATE.get("updating"):
                         STATE["thumb_progress"] = (
                             f"已后台补全预览图：{item.get('name') or file_id}"
@@ -3287,7 +3207,7 @@ def thumb(vid: str):
                     return True
 
                 future = submit_thumbnail_job(
-                    thumbnail_job_key(cache, file_id),
+                    thumbnail_job_key(cache, file_id, item=item),
                     generate_requested_thumb,
                     priority=THUMB_PRIORITY_VISIBLE,
                 )
@@ -4058,6 +3978,7 @@ def api_delete():
 
     started = time.perf_counter()
     removed = []
+    removed_items = []
     errors = []
     t_catalog = time.perf_counter()
     catalog = list(videos_for_scope(None))
@@ -4095,6 +4016,11 @@ def api_delete():
 
     def _remember_removed(item: dict, item_root: str, vid: str) -> None:
         root_l = item_root.lower()
+        removed_items.append({
+            "id": str(item.get("id") or vid),
+            "root": item_root,
+            "rel": str(item.get("rel") or ""),
+        })
         removed_keys.add((root_l, _rel_key(item)))
         affected_roots.add(item_root)
         for ident in (
@@ -4108,7 +4034,11 @@ def api_delete():
     def _note_resolve(elapsed_ms: float, **fields) -> None:
         nonlocal resolve_ms
         resolve_ms += elapsed_ms
-        _safe_perf("delete_resolve", elapsed_ms, **fields)
+        _safe_perf(
+            "delete_resolve", elapsed_ms,
+            force=fields.get("found") is False,
+            root=prefer_root, rel=prefer_rel, **fields,
+        )
 
     def _root_s(item: dict) -> str:
         raw = (item.get("_lib_root") or item.get("root") or "").strip()
@@ -4183,6 +4113,15 @@ def api_delete():
                 found=False,
             )
             errors.append({"id": vid, "msg": "未找到"})
+            continue
+        if prefer_rel and _rel_key(item) != prefer_rel:
+            _note_resolve(
+                match_ms + find_ms,
+                video_id=vid,
+                found=False,
+                reason="relative_path_mismatch",
+            )
+            errors.append({"id": vid, "msg": "文件路径不匹配，未删除"})
             continue
         item_root = _root_s(item)
         if prefer_root and item_root:
@@ -4268,7 +4207,8 @@ def api_delete():
         kept=len(remaining),
         removed=len(removed_keys),
     )
-    STATE["videos"] = remaining
+    if removed_keys:
+        STATE["videos"] = remaining
     for root_s in affected_roots:
         t_save = time.perf_counter()
         rows_before = 0
@@ -4313,7 +4253,7 @@ def api_delete():
             save_ms += root_save_ms
             _safe_perf(
                 "delete_index_save", root_save_ms,
-                force=bool(save_error) or extra_rows != 0 or stale_rows != 0,
+                force=bool(save_error) or absent_keys != 0 or extra_rows != 0 or stale_rows != 0,
                 root=root_s,
                 rows_before=rows_before,
                 rows_after=rows_after,
@@ -4342,12 +4282,13 @@ def api_delete():
                     ids=",".join(stale_ids),
                 )
 
-    t_publish = time.perf_counter()
-    if get_mounted_roots():
-        publish_unified_library()
-    else:
-        rebuild_indexes(remaining)
-    publish_ms = (time.perf_counter() - t_publish) * 1000.0
+    if removed_keys:
+        t_publish = time.perf_counter()
+        if get_mounted_roots():
+            publish_unified_library()
+        else:
+            rebuild_indexes(remaining)
+        publish_ms = (time.perf_counter() - t_publish) * 1000.0
 
     total_ms = (time.perf_counter() - started) * 1000.0
     _safe_perf(
@@ -4387,6 +4328,7 @@ def api_delete():
     return jsonify({
         "ok": True,
         "removed": removed,
+        "removed_items": removed_items,
         "errors": errors,
         "msg": f"已移除 {len(removed)} 项" + (f"，{len(errors)} 项失败" if errors else ""),
     })

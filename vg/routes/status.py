@@ -22,6 +22,9 @@ def register(app) -> None:
         return jsonify({
             "app": "video-gallery",
             "scanning": bool(STATE.get("scanning")),
+            "scan_busy": bool(
+                STATE.get("scanning") or runtime_state.scan_lock_status()["held"]
+            ),
             "updating": bool(STATE.get("updating")),
             "exporting": bool(STATE.get("exporting")),
             "export_msg": STATE.get("export_msg") or "",

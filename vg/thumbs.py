@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -106,14 +107,48 @@ def _iter_preview_cache_index_videos() -> list[tuple[dict, Path]]:
     """Yield (video, cache_dir) from all known SQLite catalogs."""
     from vg.catalog_db import iter_catalog_cache_dirs, load_catalog_videos
 
+    started = time.perf_counter()
+    cpu_started = time.thread_time()
     rows: list[tuple[dict, Path]] = []
+    cache = None
+    enumerate_ms = 0.0
+    cache_details: list[dict] = []
+    failed = False
     try:
-        for cache in iter_catalog_cache_dirs():
-            for video in load_catalog_videos(cache):
+        caches = iter_catalog_cache_dirs()
+        enumerate_ms = (time.perf_counter() - started) * 1000.0
+        for cache in caches:
+            load_started = time.perf_counter()
+            load_cpu_started = time.thread_time()
+            videos = load_catalog_videos(cache)
+            load_ms = (time.perf_counter() - load_started) * 1000.0
+            load_cpu_ms = (time.thread_time() - load_cpu_started) * 1000.0
+            cache_details.append({
+                "cache": str(cache),
+                "rows": len(videos),
+                "load_ms": round(load_ms, 1),
+                "cpu_ms": round(load_cpu_ms, 1),
+            })
+            for video in videos:
                 if isinstance(video, dict):
                     rows.append((video, cache))
-    except OSError:
-        pass
+    except OSError as exc:
+        failed = True
+        from vg.diagnostics import error
+
+        error("thumbnail_source_catalog_failed", exc, cache=cache)
+    from vg.diagnostics import perf
+
+    perf(
+        "thumbnail_source_catalogs",
+        (time.perf_counter() - started) * 1000.0,
+        force=failed,
+        cpu_ms=round((time.thread_time() - cpu_started) * 1000.0, 1),
+        enumerate_ms=round(enumerate_ms, 1),
+        rows=len(rows),
+        catalogs=len(cache_details),
+        cache_details=sorted(cache_details, key=lambda detail: detail["load_ms"], reverse=True)[:10],
+    )
     return rows
 
 
@@ -123,29 +158,145 @@ def _cache_for_item(item: dict) -> Path | None:
     return cache_dir_for_item(item)
 
 
-def build_thumb_source_index() -> dict[str, Path]:
-    """Map content identity -> existing .vgt path across all known caches."""
+def build_thumb_source_index(wanted_keys: set[str] | None = None) -> dict[str, Path]:
+    """Map content identity -> existing .vgt path, optionally only wanted keys."""
+    started = time.perf_counter()
+    cpu_started = time.thread_time()
     index: dict[str, Path] = {}
+    candidate_rows = 0
+    filtered_rows = 0
+    checked_paths = 0
+    ready_paths = 0
+    stat_errors = 0
+    duplicate_paths = 0
+    path_cache_hits = 0
+    stat_calls = 0
+    cache_resolve_calls = 0
+    cache_resolve_ms = 0.0
+    file_check_ms = 0.0
+    key_build_ms = 0.0
+    caches: set[str] = set()
+    # Scope the memo to this build; a later build must recheck changed files.
+    path_stats: dict[Path, os.stat_result | None] = {}
 
-    def register(video: dict, cache: Path | None) -> None:
-        if not cache:
+    def register(video: dict, cache: Path | None = None) -> None:
+        nonlocal candidate_rows, filtered_rows, checked_paths, ready_paths
+        nonlocal stat_errors, duplicate_paths, path_cache_hits, stat_calls
+        nonlocal cache_resolve_calls, cache_resolve_ms, file_check_ms, key_build_ms
+        key_started = time.perf_counter()
+        keys = thumb_content_keys(video)
+        if wanted_keys is not None:
+            keys = [key for key in keys if key in wanted_keys]
+        key_build_ms += (time.perf_counter() - key_started) * 1000.0
+        if wanted_keys is not None and not keys:
+            filtered_rows += 1
+            return
+        candidate_rows += 1
+        if video.get("has_thumb") is False:
             return
         vid = (video.get("id") or "").strip()
         if not vid:
             return
-        path = thumb_path(cache, vid)
-        try:
-            if not path.is_file() or path.stat().st_size <= 24:
-                return
-        except OSError:
+        if cache is None:
+            cache_started = time.perf_counter()
+            cache_resolve_calls += 1
+            cache = _cache_for_item(video)
+            cache_resolve_ms += (time.perf_counter() - cache_started) * 1000.0
+        if not cache:
             return
-        for key in thumb_content_keys(video):
-            index.setdefault(key, path)
+        path = thumb_path(cache, vid)
+        checked_paths += 1
+        caches.add(str(cache))
+        file_started = time.perf_counter()
+        try:
+            if path in path_stats:
+                duplicate_paths += 1
+                path_cache_hits += 1
+                source_stat = path_stats[path]
+            else:
+                stat_calls += 1
+                try:
+                    source_stat = path.stat()
+                except (FileNotFoundError, NotADirectoryError):
+                    # These were ordinary misses in Path.is_file(), not failures.
+                    source_stat = None
+                except OSError as exc:
+                    source_stat = None
+                    stat_errors += 1
+                    from vg.diagnostics import error
 
-    for video in _iter_memory_videos():
-        register(video, _cache_for_item(video))
-    for video, cache in _iter_preview_cache_index_videos():
+                    error("thumbnail_source_stat_failed", exc, cache=cache, video_id=vid)
+                path_stats[path] = source_stat
+            if source_stat is None or not stat.S_ISREG(source_stat.st_mode) or source_stat.st_size <= 24:
+                return
+        finally:
+            file_check_ms += (time.perf_counter() - file_started) * 1000.0
+        ready_paths += 1
+        key_started = time.perf_counter()
+        for key in keys:
+            index.setdefault(key, path)
+        key_build_ms += (time.perf_counter() - key_started) * 1000.0
+
+    memory_videos = _iter_memory_videos()
+    memory_collect_ms = (time.perf_counter() - started) * 1000.0
+    stage_started = time.perf_counter()
+    stage_cpu_started = time.thread_time()
+    for video in memory_videos:
+        register(video)
+    memory_register_ms = (time.perf_counter() - stage_started) * 1000.0
+    memory_register_cpu_ms = (time.thread_time() - stage_cpu_started) * 1000.0
+    stage_started = time.perf_counter()
+    catalog_lookup_skipped = wanted_keys is not None and wanted_keys.issubset(index)
+    catalog_videos = [] if catalog_lookup_skipped else _iter_preview_cache_index_videos()
+    catalog_load_ms = (time.perf_counter() - stage_started) * 1000.0
+    stage_started = time.perf_counter()
+    stage_cpu_started = time.thread_time()
+    for video, cache in catalog_videos:
         register(video, cache)
+    disk_register_ms = (time.perf_counter() - stage_started) * 1000.0
+    disk_register_cpu_ms = (time.thread_time() - stage_cpu_started) * 1000.0
+    from vg.diagnostics import perf
+
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    cpu_ms = (time.thread_time() - cpu_started) * 1000.0
+    register_other_ms = max(
+        0.0,
+        memory_register_ms + disk_register_ms - cache_resolve_ms - file_check_ms - key_build_ms,
+    )
+    perf(
+        "thumbnail_source_index",
+        elapsed_ms,
+        force=bool(stat_errors),
+        memory_rows=len(memory_videos),
+        catalog_rows=len(catalog_videos),
+        catalog_lookup_skipped=catalog_lookup_skipped,
+        candidate_rows=candidate_rows,
+        filtered_rows=filtered_rows,
+        keys=len(index),
+        caches=len(caches),
+        checked_paths=checked_paths,
+        unique_paths=len(path_stats),
+        duplicate_paths=duplicate_paths,
+        path_cache_hits=path_cache_hits,
+        stat_calls=stat_calls,
+        is_file_calls=0,
+        size_stat_calls=stat_calls,
+        cache_resolve_calls=cache_resolve_calls,
+        ready_paths=ready_paths,
+        stat_errors=stat_errors,
+        cpu_ms=round(cpu_ms, 1),
+        non_cpu_ms=round(max(0.0, elapsed_ms - cpu_ms), 1),
+        memory_collect_ms=round(memory_collect_ms, 1),
+        memory_register_ms=round(memory_register_ms, 1),
+        memory_register_cpu_ms=round(memory_register_cpu_ms, 1),
+        catalog_load_ms=round(catalog_load_ms, 1),
+        disk_register_ms=round(disk_register_ms, 1),
+        disk_register_cpu_ms=round(disk_register_cpu_ms, 1),
+        cache_resolve_ms=round(cache_resolve_ms, 1),
+        file_check_ms=round(file_check_ms, 1),
+        key_build_ms=round(key_build_ms, 1),
+        register_other_ms=round(register_other_ms, 1),
+    )
     return index
 
 
@@ -155,7 +306,7 @@ def reuse_existing_thumb(item: dict, cache: Path, sources: dict[str, Path] | Non
     if not vid:
         return False
     dest = thumb_path(cache, vid)
-    if thumb_file_ready(cache, vid):
+    if item.get("has_thumb") is not False and thumb_file_ready(cache, vid):
         return True
     mapping = sources if sources is not None else build_thumb_source_index()
     src: Path | None = None
@@ -164,13 +315,30 @@ def reuse_existing_thumb(item: dict, cache: Path, sources: dict[str, Path] | Non
         if hit is not None:
             src = hit
             break
-    if src is None:
+    if src is None or (item.get("has_thumb") is False and src == dest):
         return False
-    if link_or_copy_thumb(src, dest):
+    pending = None
+    if item.get("_media_source_path"):
+        from uuid import uuid4
+        pending = dest.with_name(f".{dest.stem}.{uuid4().hex}.pending")
+    try:
+        if not link_or_copy_thumb(src, pending or dest):
+            return False
         item["has_thumb"] = True
         item["thumb"] = f"{vid}{THUMB_EXT}"
+        if pending:
+            from vg.disk_libs import patch_library_media_items
+            from vg.schema import THUMB_RESULT_FIELDS
+            clear_thumbnail_failure(item)
+            item["_thumb_pending_path"] = str(pending)
+            item["_thumb_target_path"] = str(dest)
+            return bool(patch_library_media_items([item], fields=THUMB_RESULT_FIELDS))
         return True
-    return False
+    finally:
+        if pending:
+            pending.unlink(missing_ok=True)
+            item.pop("_thumb_pending_path", None)
+            item.pop("_thumb_target_path", None)
 
 
 def thumbnail_failure_is_current(item: dict) -> bool:
@@ -232,7 +400,7 @@ def missing_thumb_items(videos: list[dict], cache: Path | None) -> list[dict]:
         vid = (video.get("id") or "").strip()
         if not vid:
             continue
-        if vid in have:
+        if vid in have and video.get("has_thumb") is not False:
             video["has_thumb"] = True
             continue
         if thumbnail_failure_is_current(video):
@@ -259,7 +427,11 @@ def adopt_thumbs_from_caches(missing: list[dict], cache: Path) -> tuple[list[dic
     """Reuse cross-disk thumbs. Returns (still_missing, reused_count)."""
     if not missing:
         return [], 0
-    sources = build_thumb_source_index()
+    started = time.perf_counter()
+    wanted_keys = {key for item in missing for key in thumb_content_keys(item)}
+    sources = build_thumb_source_index(wanted_keys=wanted_keys)
+    index_ms = (time.perf_counter() - started) * 1000.0
+    stage_started = time.perf_counter()
     leftover: list[dict] = []
     reused = 0
     for item in missing:
@@ -267,6 +439,19 @@ def adopt_thumbs_from_caches(missing: list[dict], cache: Path) -> tuple[list[dic
             reused += 1
         else:
             leftover.append(item)
+    match_copy_ms = (time.perf_counter() - stage_started) * 1000.0
+    from vg.diagnostics import perf
+
+    perf(
+        "thumbnail_reuse_stages",
+        (time.perf_counter() - started) * 1000.0,
+        cache=cache,
+        candidates=len(missing),
+        reused=reused,
+        remaining=len(leftover),
+        index_ms=round(index_ms, 1),
+        match_copy_ms=round(match_copy_ms, 1),
+    )
     if reused:
         log(f"[预览图] 跨盘复用 {reused} 个，无需重新截帧")
     return leftover, reused

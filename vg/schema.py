@@ -15,6 +15,40 @@ INDEX_SCHEMA_VERSION = 3
 
 VideoKind = Literal["m3u8", "ts_set", "series"]
 
+PROBE_RESULT_FIELDS = (
+    "duration", "duration_h", "has_audio", "audio_codec", "audio_channels",
+    "sample_rate", "audio_hard", "width", "height", "fps", "bitrate",
+    "video_codec", "probe_ver", "probe_duration_done", "probe_audio_done",
+    "probe_video_meta_done", "bad", "bad_reason",
+)
+THUMB_RESULT_FIELDS = (
+    "thumb", "has_thumb", "thumb_v", "thumb_failed", "thumb_failed_reason",
+    "thumb_failed_at", "thumb_failed_size", "thumb_failed_mtime",
+)
+
+
+def media_item_signature(item: dict) -> tuple:
+    return (
+        str(item.get("_lib_root") or item.get("root") or "").replace("/", "\\").rstrip("\\").casefold(),
+        str(item.get("_thumb_id") or item.get("id") or ""),
+        str(item.get("rel") or "").replace("\\", "/").strip("/").casefold(),
+        int(item.get("size") or 0),
+        float(item.get("mtime") or 0),
+        str(item.get("kind") or ""),
+        tuple(item.get("segments") or ()),
+    )
+
+
+def media_source_unchanged(item: dict) -> bool:
+    path = item.get("_media_source_path")
+    if not path:
+        return True
+    try:
+        stat = Path(path).stat()
+        return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) == item.get("_media_source_stat")
+    except OSError:
+        return False
+
 
 class VideoItem(TypedDict, total=False):
     """Canonical video record shared by scan, browse, cleanup and conversion."""
@@ -87,6 +121,10 @@ class VideoItem(TypedDict, total=False):
 
 # This is the single source of truth for fields that must never enter the catalog.
 RUNTIME_ONLY_FIELDS = frozenset({
+    "_media_source_path",
+    "_media_source_stat",
+    "_thumb_pending_path",
+    "_thumb_target_path",
     "_q",
     "_q_sig",
     "_thumb_id",

@@ -193,6 +193,94 @@ class MultiDiskPersistenceTests(unittest.TestCase):
         self.assertEqual(len(self.read_index(self.root_a)["videos"]), 1)
         self.assertEqual(len(self.read_index(self.root_b)["videos"]), 0)
 
+    def test_failed_delete_does_not_publish_or_rewrite_membership(self):
+        a = self.item(self.root_a)
+        save_root_library(self.root_a, [a])
+        STATE["videos"] = [a]
+        rebuild_indexes(STATE["videos"])
+        before = STATE["videos"]
+        with (
+            patch.object(web, "move_to_trash", return_value=(False, "denied")),
+            patch.object(web, "publish_unified_library") as publish,
+            patch.object(web, "rebuild_indexes") as rebuild,
+        ):
+            response = web.app.test_client().post("/api/delete", json={
+                "items": [{"id": a["id"], "root": a["root"], "rel": a["rel"]}],
+                "trash": True,
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["removed"], [])
+        self.assertIs(STATE["videos"], before)
+        publish.assert_not_called()
+        rebuild.assert_not_called()
+        self.assertEqual(len(self.read_index(self.root_a)["videos"]), 1)
+
+    def test_by_ids_confirms_missing_only_for_stable_online_loaded_catalog(self):
+        root = str(self.root_a.resolve())
+        cases = [
+            ("stable", False, False, False, True, False, False, True),
+            ("busy_start", True, False, False, True, False, False, False),
+            ("busy_end", False, True, False, True, False, False, False),
+            ("offline", False, False, True, True, False, False, False),
+            ("unloaded", False, False, False, False, False, False, False),
+            ("live", False, False, False, True, True, False, False),
+            ("generation_changed", False, False, False, True, False, True, False),
+        ]
+        for name, busy_start, busy_end, offline, loaded, live, changed, confirmed in cases:
+            with self.subTest(name=name):
+                libs = {root: {"by_id": {}, "index_mtime": 1, "live": live}} if loaded else {}
+
+                def missing(_vid, **_kwargs):
+                    if changed:
+                        STATE["lib_gen"] += 1
+                    return None
+
+                with (
+                    patch.dict(STATE, {"lib_gen": 23, "disk_libs": libs}),
+                    patch.object(web, "is_catalog_writer_busy", side_effect=[busy_start, busy_end]),
+                    patch.object(web, "memory_catalog_ready", return_value=True),
+                    patch.object(web, "offline_roots", return_value=[root.upper()] if offline else []),
+                    patch.object(web, "find_video_by_id", side_effect=missing),
+                ):
+                    response = web.app.test_client().post("/api/videos-by-ids", json={
+                        "ids": ["old-id"], "hints": {"old-id": {"root": root}},
+                    })
+                data = response.get_json()
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(data["missing"][0]["confirmed"], confirmed)
+                self.assertEqual(data["missing"][0].get("offline", False), offline and not busy_start)
+                self.assertEqual(data["lib_gen"], 24 if changed else 23)
+
+    def test_by_ids_confirmed_missing_keeps_current_catalog_rows(self):
+        a = self.item(self.root_a)
+        save_root_library(self.root_a, [a])
+        STATE["videos"] = [a]
+        rebuild_indexes(STATE["videos"])
+        with patch.object(web, "is_catalog_writer_busy", return_value=False):
+            response = web.app.test_client().post("/api/videos-by-ids", json={
+                "ids": [a["id"], "old-id"],
+                "hints": {vid: {"root": a["root"]} for vid in [a["id"], "old-id"]},
+            })
+        data = response.get_json()
+        self.assertEqual([row["id"] for row in data["videos"]], [a["id"]])
+        self.assertEqual(data["missing"], [{"id": "old-id", "root": a["root"], "confirmed": True}])
+
+    def test_finished_scan_publishes_new_members_instead_of_old_unified_snapshot(self):
+        from vg import roots
+        from vg.cache import save_index
+        a = self.item(self.root_a)
+        b = self.item(self.root_b, runtime_id="f" * 16)
+        save_libraries_by_root([a, b])
+        STATE["videos"] = [a, b]
+        rebuild_indexes(STATE["videos"])
+        new = dict(a, id="new-id", rel="new.mp4", name="new", filename="new.mp4")
+        self.assertTrue(save_index(ensure_cache_dir(self.root_a), self.root_a, [a, new]))
+        with patch.object(roots, "archive_current_library") as archive:
+            roots.on_scan_finished(self.root_a, [a, new])
+        archive.assert_not_called()
+        self.assertIn("new-id", STATE["disk_libs"][str(self.root_a.resolve())]["by_id"])
+        self.assertEqual(len(STATE["videos"]), 3)
+
     def test_thumbnail_memory_cache_is_isolated_by_disk_cache(self):
         vid = video_id("same.mp4")
         cache_a = ensure_cache_dir(self.root_a)

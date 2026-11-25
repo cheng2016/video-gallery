@@ -302,7 +302,7 @@ class MetadataSettingsTests(unittest.TestCase):
             "video_codec": "hevc",
             "probe_video_meta_done": True,
         }
-        same = {"id": "v", "size": 1000, "mtime": 10.2}
+        same = {"id": "v", "size": 1000, "mtime": 10.0}
         self.assertTrue(_inherit_probe_fields_if_same_file(same, prev))
         self.assertEqual(same["bitrate"], 800_000)
         self.assertEqual(same["video_codec"], "hevc")
@@ -311,6 +311,24 @@ class MetadataSettingsTests(unittest.TestCase):
         self.assertFalse(_inherit_probe_fields_if_same_file(replaced, prev))
         self.assertNotIn("bitrate", replaced)
         self.assertNotIn("width", replaced)
+        changed_mtime = {"id": "v", "size": 1000, "mtime": 10.2}
+        self.assertFalse(_inherit_probe_fields_if_same_file(changed_mtime, prev))
+        self.assertNotIn("bitrate", changed_mtime)
+
+    def test_media_snapshot_rejects_stale_file_size_and_exact_mtime(self) -> None:
+        with TemporaryDirectory() as td:
+            path = Path(td) / "movie.mp4"
+            path.write_bytes(b"video")
+            stat = path.stat()
+            item = {"id": "movie", "root": td, "rel": path.name,
+                    "size": stat.st_size, "mtime": stat.st_mtime}
+            snapshot = media.media_job_snapshot(item, path)
+            self.assertIsNotNone(snapshot)
+            self.assertIsNot(snapshot, item)
+            self.assertIsNone(media.media_job_snapshot(dict(item, size=stat.st_size + 1), path))
+            self.assertIsNone(media.media_job_snapshot(dict(item, mtime=stat.st_mtime + 0.2), path))
+            path.write_bytes(b"replacement")
+            self.assertIsNone(media.media_job_snapshot(snapshot, path))
 
     def test_existing_duration_is_not_probed_again(self) -> None:
         self.assertFalse(
@@ -453,6 +471,8 @@ class MetadataSettingsTests(unittest.TestCase):
         ]
         with (
             mock.patch.object(media, "_persist_probed_items") as persist,
+            mock.patch.object(media, "_wait_metadata_slot", return_value=True),
+            mock.patch.object(media, "media_job_snapshot", side_effect=lambda item, _path: dict(item)),
             mock.patch.object(
                 media,
                 "build_metadata_source_index",
@@ -472,9 +492,12 @@ class MetadataSettingsTests(unittest.TestCase):
             )
         self.assertEqual(reused_n, 1)
         self.assertEqual(leftover, [])
-        self.assertEqual(need[0]["duration"], 100.0)
-        self.assertTrue(need[0]["probe_duration_done"])
+        self.assertIsNone(need[0]["duration"])
         persist.assert_called_once()
+        result = persist.call_args.args[0][0]
+        self.assertEqual(result["duration"], 100.0)
+        self.assertTrue(result["probe_duration_done"])
+        self.assertIsNot(result, need[0])
 
     def test_adopt_metadata_does_not_query_sqlite_for_each_unmatched_item(self) -> None:
         need = [
@@ -489,6 +512,8 @@ class MetadataSettingsTests(unittest.TestCase):
         ]
         with (
             mock.patch.object(media, "build_metadata_source_index", return_value={}),
+            mock.patch.object(media, "_wait_metadata_slot", return_value=True),
+            mock.patch.object(media, "media_job_snapshot", side_effect=lambda item, _path: dict(item)),
             mock.patch(
                 "vg.catalog_db.find_probe_donor",
                 side_effect=AssertionError("batch lookup must not issue N+1 queries"),
@@ -533,7 +558,7 @@ class MetadataSettingsTests(unittest.TestCase):
             ):
                 media._bg_enrich_metadata()
             enrich.assert_not_called()
-            rebuild.assert_called_once()
+            rebuild.assert_not_called()
             self.assertIn("复用", STATE.get("meta_progress") or "")
         finally:
             STATE["ffmpeg"] = old_ffmpeg
@@ -551,6 +576,8 @@ class MetadataSettingsTests(unittest.TestCase):
                     "rel": path.name,
                     "root": td,
                     "_lib_root": td,
+                    "size": path.stat().st_size,
+                    "mtime": path.stat().st_mtime,
                 }
             ]
             old_ffmpeg = STATE.get("ffmpeg")
@@ -573,7 +600,7 @@ class MetadataSettingsTests(unittest.TestCase):
             finally:
                 STATE["ffmpeg"] = old_ffmpeg
 
-    def test_persist_probed_items_does_not_bump_lib_gen(self) -> None:
+    def test_persist_probed_items_uses_source_guarded_field_patch(self) -> None:
         item = {
             "id": "v1",
             "rel": "v1.mp4",
@@ -581,9 +608,10 @@ class MetadataSettingsTests(unittest.TestCase):
             "_lib_root": "D:/lib",
             "duration": 9.0,
         }
-        with mock.patch("vg.disk_libs.save_library_items") as save:
+        from vg.schema import PROBE_RESULT_FIELDS
+        with mock.patch("vg.disk_libs.patch_library_media_items", return_value=1) as save:
             media._persist_probed_items([item])
-        save.assert_called_once_with([item], bump_gen=False)
+        save.assert_called_once_with([item], fields=PROBE_RESULT_FIELDS)
 
     def test_probe_progress_is_saved_incrementally(self) -> None:
         with TemporaryDirectory() as td:
@@ -598,6 +626,8 @@ class MetadataSettingsTests(unittest.TestCase):
                         "rel": path.name,
                         "root": td,
                         "_lib_root": td,
+                        "size": path.stat().st_size,
+                        "mtime": path.stat().st_mtime,
                     }
                 )
 
@@ -631,7 +661,7 @@ class MetadataSettingsTests(unittest.TestCase):
     def test_partial_probe_is_kept_when_later_persist_fails(self) -> None:
         with TemporaryDirectory() as td:
             items = []
-            for i in range(30):
+            for i in range(60):
                 path = Path(td) / f"v{i}.mp4"
                 path.write_bytes(b"video")
                 items.append(
@@ -641,14 +671,16 @@ class MetadataSettingsTests(unittest.TestCase):
                         "rel": path.name,
                         "root": td,
                         "_lib_root": td,
+                        "size": path.stat().st_size,
+                        "mtime": path.stat().st_mtime,
                     }
                 )
             saved: list[str] = []
 
             def fake_persist(batch):
-                saved.extend(it["id"] for it in batch)
-                if len(saved) >= 25:
+                if len(saved) >= 40:
                     raise RuntimeError("disk full after first flush")
+                saved.extend(it["id"] for it in batch)
 
             old_ffmpeg = STATE.get("ffmpeg")
             STATE["ffmpeg"] = "ffmpeg"
@@ -667,7 +699,7 @@ class MetadataSettingsTests(unittest.TestCase):
                 ):
                     with self.assertRaises(RuntimeError):
                         media.enrich_metadata_parallel(items, label="测试")
-                self.assertGreaterEqual(len(saved), 25)
+                self.assertEqual(len(saved), 40)
             finally:
                 STATE["ffmpeg"] = old_ffmpeg
 

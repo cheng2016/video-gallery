@@ -84,15 +84,19 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("[CALL] api_videos", text)
         self.assertIn("folder=电影", text)
 
-    def test_full_logging_emits_instrumented_perf_spans(self) -> None:
+    def test_full_logging_keeps_only_slow_or_forced_perf_spans(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stdout(output), mock.patch("vg.bootlog.write"):
             diagnostics.set_full_logging(True)
-            diagnostics.perf("format_facets", 1.25, source_rows=12)
+            diagnostics.perf("fast_facets", 1.25, source_rows=12)
+            self.assertEqual(output.getvalue(), "")
+            diagnostics.perf("slow_facets", 250.0, source_rows=12)
+            diagnostics.perf("failed_facets", 1.25, force=True)
         text = output.getvalue()
-        self.assertIn("[PERF] format_facets", text)
-        self.assertIn("elapsed_ms=1.2", text)
+        self.assertIn("[PERF] slow_facets", text)
+        self.assertIn("elapsed_ms=250.0", text)
         self.assertIn("source_rows=12", text)
+        self.assertIn("[PERF] failed_facets", text)
 
     def test_bootlog_batches_normal_lines_and_syncs_urgent_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,13 +126,25 @@ class DiagnosticsTests(unittest.TestCase):
     def test_aggregate_summary_includes_p50_and_p95(self) -> None:
         diagnostics._aggregates.clear()
         for elapsed in range(1, 101):
-            diagnostics.aggregate("api_videos_test", float(elapsed))
+            diagnostics.aggregate("api_videos_test", float(elapsed) * 10)
         output = io.StringIO()
         with contextlib.redirect_stdout(output), mock.patch("vg.bootlog.write"):
             diagnostics.flush_aggregates()
         text = output.getvalue()
-        self.assertIn("p50_ms=50.0", text)
-        self.assertIn("p95_ms=95.0", text)
+        self.assertIn("p50_ms=500.0", text)
+        self.assertIn("p95_ms=950.0", text)
+
+    def test_fast_success_aggregates_are_silent_but_failures_remain(self) -> None:
+        diagnostics._aggregates.clear()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch("vg.bootlog.write"):
+            diagnostics.aggregate("fast_success", 1.0)
+            diagnostics.flush_aggregates()
+            self.assertEqual(output.getvalue(), "")
+            diagnostics.aggregate("fast_failure", 1.0, failed=True)
+            diagnostics.flush_aggregates()
+        self.assertIn("fast_failure", output.getvalue())
+        self.assertIn("errors=1", output.getvalue())
 
     def test_timed_lock_reports_waiting_and_acquisition(self) -> None:
         lock = threading.Lock()

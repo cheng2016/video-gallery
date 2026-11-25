@@ -345,6 +345,49 @@ def register(
             "parallel": convert_parallel_limit(),
         })
 
+    @app.route("/api/convert/candidates")
+    def api_convert_candidates():
+        kind = (request.args.get("kind") or "mp4").strip().lower()
+        if kind not in ("mp4", "fix_audio"):
+            return jsonify({"ok": False, "msg": "未知任务类型"}), 400
+        lib = (request.args.get("lib") or "").strip()
+        query = (request.args.get("q") or "").strip().casefold()
+        try:
+            offset = max(0, int(request.args.get("offset") or 0))
+        except ValueError:
+            return jsonify({"ok": False, "msg": "分页参数无效"}), 400
+        candidates = []
+        for video in repository.videos_for_scope(lib or None):
+            stream = video.get("kind") in ("m3u8", "ts_set") or (
+                video.get("ext") or ""
+            ).lower() == ".m3u8"
+            if not (stream if kind == "mp4" else not stream and video.get("audio_hard")):
+                continue
+            if query and query not in (
+                f"{video.get('name') or ''} {video.get('rel') or ''}"
+            ).casefold():
+                continue
+            candidates.append(video)
+        page = candidates[offset:offset + 80]
+        return jsonify({
+            "ok": True,
+            "items": [{
+                "id": video.get("id"),
+                "name": video.get("name") or "",
+                "root": video.get("root") or video.get("_lib_root") or lib,
+                "rel": video.get("rel") or "",
+                "size_h": video.get("size_h") or "",
+                "folder": video.get("folder") or "",
+                "lib_label": video.get("lib_label") or video.get("_lib_label") or "",
+                "ext": video.get("ext") or "",
+                "kind": video.get("kind") or "",
+            } for video in page],
+            "count": len(candidates),
+            "offset": offset,
+            "has_more": offset + len(page) < len(candidates),
+            "roots": repository.roots_summary(),
+        })
+
     @app.route("/api/convert/batch", methods=["POST"])
     def api_convert_batch():
         """批量加入转换队列，支持 items: [{id, root}] 精确定位磁盘。"""

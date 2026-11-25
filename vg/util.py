@@ -63,9 +63,9 @@ def thumb_worker_count(total: int = 0, *, burst: bool = False) -> int:
 
 
 def meta_worker_count(total: int = 0) -> int:
-    """ffprobe pool: logical CPUs minus 2."""
+    """Keep bulk ffprobe below directory walks and frame extraction."""
     cpus = max(1, os.cpu_count() or 4)
-    n = max(1, cpus - 2)
+    n = max(1, min(4, cpus // 4))
     if total > 0:
         n = max(1, min(n, total))
     return n

@@ -31,6 +31,7 @@ from vg.config import (
 )
 from vg import state as _state
 from vg.state import STATE, _meta_lock
+from vg.schema import PROBE_RESULT_FIELDS, THUMB_RESULT_FIELDS, media_item_signature, media_source_unchanged
 from vg.util import (
     _clear_path_attrs_windows,
     format_duration,
@@ -859,16 +860,19 @@ def schedule_player_video_meta_probe(vid: str, root: str | None, ffmpeg: str) ->
 
 def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str) -> None:
     from vg.catalog_repository import find_video_by_id
-    from vg.disk_libs import save_library_item
+    from vg.disk_libs import patch_library_media_items
 
     try:
-        item = find_video_by_id(vid, prefer_root=root)
-        if not item:
+        current = find_video_by_id(vid, prefer_root=root)
+        if not current:
             log(f"[帧率探测] 后台跳过：未找到视频 vid={vid}")
+            return
+        item = media_job_snapshot(current, _item_probe_path(current))
+        if item is None:
             return
         if remember_cached_bitrate(item):
             try:
-                save_library_item(item, bump_gen=False)
+                patch_library_media_items([item], fields=PROBE_RESULT_FIELDS)
             except Exception as exc:
                 log(f"[帧率探测] 后台写入推算码率失败 vid={vid}: {exc}")
         path = _item_probe_path(item)
@@ -903,7 +907,7 @@ def _player_video_meta_worker(vid: str, root: str | None, ffmpeg: str, key: str)
         )
         saved = False
         try:
-            saved = bool(save_library_item(item, bump_gen=False))
+            saved = bool(patch_library_media_items([item], fields=PROBE_RESULT_FIELDS))
         except Exception as exc:
             log(f"[帧率探测] 后台写入片库失败 vid={vid}: {exc}")
         log(
@@ -987,20 +991,81 @@ def _probe_cpu_label(workers: int) -> str:
     return f"{workers} 线程 / {cpus} 逻辑核"
 
 
-def _persist_probed_items(items: list[dict]) -> None:
-    """UPSERT probed rows into SQLite so a mid-run exit keeps progress.
+def media_job_snapshot(item: dict, path: Path | None) -> dict | None:
+    if not media_source_unchanged(item):
+        return None
+    if not path:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if item.get("kind") not in ("m3u8", "ts_set"):
+        if stat.st_size != int(item.get("size") or 0) or stat.st_mtime != float(item.get("mtime") or 0):
+            return None
+    snapshot = dict(item)
+    snapshot["_media_source_path"] = str(path)
+    snapshot["_media_source_stat"] = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    return snapshot
 
-    Batches by disk (one transaction each). Does not bump lib_gen — callers bump
-    once via rebuild_indexes when the whole enrichment finishes.
-    """
+
+def make_item_thumbnail(item: dict, ffmpeg: str, cache: Path, *, burst: bool = False) -> bool | None:
+    from uuid import uuid4
+    from vg.disk_libs import patch_library_media_items
+    from vg.thumbs import clear_thumbnail_failure, mark_thumbnail_failure
+
+    snapshot = media_job_snapshot(item, _video_file_for_thumb(item))
+    if snapshot is None:
+        return None
+    file_id = str(item.get("_thumb_id") or item.get("id") or "")
+    out = thumb_path(cache, file_id)
+    pending = out.with_name(f".{out.stem}.{uuid4().hex}.pending")
+    try:
+        ok = make_thumbnail(ffmpeg, Path(snapshot["_media_source_path"]), pending, background=True, burst=burst)
+        if not media_source_unchanged(snapshot):
+            return None
+        if ok:
+            clear_thumbnail_failure(snapshot)
+            snapshot.update(has_thumb=True, thumb=f"{file_id}{out.suffix}")
+            snapshot["_thumb_pending_path"] = str(pending)
+            snapshot["_thumb_target_path"] = str(out)
+        else:
+            mark_thumbnail_failure(snapshot, reason=snapshot.get("bad_reason") or "thumbnail_generation_failed")
+        saved = patch_library_media_items([snapshot], fields=THUMB_RESULT_FIELDS)
+        if saved and media_item_signature(item) == media_item_signature(snapshot) and media_source_unchanged(snapshot):
+            for field in THUMB_RESULT_FIELDS:
+                if field in snapshot:
+                    item[field] = snapshot[field]
+                else:
+                    item.pop(field, None)
+        return bool(ok) if saved else None
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def _persist_probed_items(items: list[dict]) -> None:
     if not items:
         return
-    from vg.disk_libs import save_library_items
+    from vg.disk_libs import patch_library_media_items
 
     try:
-        save_library_items(items, bump_gen=False)
+        saved = patch_library_media_items(items, fields=PROBE_RESULT_FIELDS)
+        if saved < len(items):
+            from vg.diagnostics import emit
+            emit("INFO", "metadata_results_not_applied", force=True,
+                 requested=len(items), saved=saved, discarded=len(items) - saved)
     except Exception as e:
         log(f"[元数据] 中途保存失败: {e}")
+
+
+def _wait_metadata_slot() -> bool:
+    from vg.thumb_jobs import pending_thumbnail_jobs
+
+    while _state._scan_lock.locked() or STATE.get("scanning") or STATE.get("updating") or _state.thumb_bulk_running() or pending_thumbnail_jobs():
+        if not probe_duration_enabled() and not probe_audio_enabled():
+            return False
+        time.sleep(0.2)
+    return probe_duration_enabled() or probe_audio_enabled()
 
 
 def _needs_metadata_probe(
@@ -1100,7 +1165,6 @@ def build_metadata_source_index(
 
         for cache in iter_catalog_cache_dirs():
             cache_rows = load_catalog_videos(cache)
-            cache_snapshots = 0
             for video in cache_rows:
                 if not isinstance(video, dict):
                     continue
@@ -1111,12 +1175,7 @@ def build_metadata_source_index(
                 )
                 if snap:
                     persisted += 1
-                    cache_snapshots += 1
                     register(video)
-            log(
-                f"[元数据] 复用源诊断 cache={cache} rows={len(cache_rows)} "
-                f"完整探测条目={cache_snapshots}"
-            )
     except Exception as exc:
         log(f"[元数据] 读取 SQLite 持久化复用索引失败: {exc}")
     log(
@@ -1210,6 +1269,11 @@ def adopt_metadata_from_catalog(
     leftover: list[dict] = []
     reused: list[dict] = []
     for index, item in enumerate(need, 1):
+        if not _wait_metadata_slot():
+            break
+        item = media_job_snapshot(item, _item_probe_path(item))
+        if item is None:
+            continue
         if reuse_existing_metadata(
             item,
             sources,
@@ -1265,23 +1329,19 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
         label=label,
     )
     ok_n = fail_n = done = 0
+    skipped_n = 0
     lock = threading.Lock()
 
-    def one(item: dict) -> tuple[dict, bool, str]:
+    def one(item: dict) -> tuple[dict | None, bool, str]:
         name = item.get("name") or item.get("rel") or item.get("id") or "?"
+        if not _wait_metadata_slot():
+            return None, False, name
         kind = item.get("kind") or ""
         is_stream = kind in ("m3u8", "ts_set") or (item.get("ext") or "").lower() == ".m3u8"
         path = _item_probe_path(item)
-        if not path or not path.is_file():
-            item["probe_ver"] = PROBE_META_VER
-            if include_duration:
-                item["probe_duration_done"] = True
-            if include_audio:
-                item["probe_audio_done"] = True
-            if not is_stream:
-                item["bad"] = True
-                item["bad_reason"] = "文件不存在"
-            return item, False, f"{name} (无实体文件)"
+        item = media_job_snapshot(item, path)
+        if item is None:
+            return None, False, name
         # 播放列表：只对真实媒体分片探测；若落到 .m3u8 本身则只记 probe，不标坏
         if is_stream and path.suffix.lower() == ".m3u8":
             item["probe_ver"] = PROBE_META_VER
@@ -1318,17 +1378,20 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
                 flush_now: list[dict] = []
                 with lock:
                     done += 1
-                    if ok:
+                    if item is None:
+                        skipped_n += 1
+                    elif ok:
                         ok_n += 1
                     else:
                         fail_n += 1
-                    dirty.append(item)
+                    if item is not None:
+                        dirty.append(item)
                     if len(dirty) >= flush_every or done == total:
                         flush_now = dirty
                         dirty = []
                     STATE["meta_progress"] = (
                         f"{label}探测{scope} {done}/{total}"
-                        f"（可读 {ok_n}，异常 {fail_n}，{cpu}）…"
+                        f"（可读 {ok_n}，异常 {fail_n}，跳过 {skipped_n}，{cpu}）…"
                     )
                     if done % 40 == 0 or done == total:
                         log(
@@ -1340,6 +1403,10 @@ def enrich_metadata_parallel(items: list[dict], label: str = "元数据") -> tup
     finally:
         if dirty:
             _persist_probed_items(dirty)
+    if skipped_n:
+        from vg.diagnostics import emit
+        emit("INFO", "metadata_jobs_discarded", force=True,
+             total=total, skipped=skipped_n, readable=ok_n, failed=fail_n)
     return ok_n, fail_n
 
 
@@ -1350,27 +1417,26 @@ def start_metadata_enrichment() -> None:
         return
     if not STATE.get("ffmpeg") or not STATE.get("videos"):
         return
-    if not _meta_lock.acquire(blocking=False):
-        return
-    if _state._meta_running:
-        _meta_lock.release()
-        return
-    _state._meta_running = True
-    _state._meta_root = str(STATE.get("root") or "")
-    _meta_lock.release()
+    with _meta_lock:
+        if _state._meta_running:
+            _state._meta_pending = True
+            return
+        _state._meta_running = True
+        _state._meta_pending = False
+        _state._meta_root = str(STATE.get("root") or "")
     threading.Thread(target=_bg_enrich_metadata, daemon=True, name="meta-enrich").start()
 
 
 def _bg_enrich_metadata() -> None:
-    from vg.catalog import rebuild_indexes
-
     started = time.perf_counter()
     try:
-        videos = STATE.get("videos") or []
+        if not _wait_metadata_slot():
+            return
+        videos = list(STATE.get("videos") or [])
         want_duration = probe_duration_enabled()
         want_audio = probe_audio_enabled()
         need = [
-            v
+            dict(v)
             for v in videos
             if _needs_metadata_probe(
                 v,
@@ -1403,32 +1469,8 @@ def _bg_enrich_metadata() -> None:
             want_audio=want_audio,
         )
 
-        def _safe_rebuild() -> None:
-            # Probe fields are already on the live video dicts / SQLite. A heavy
-            # mid-scan rebuild raced ``_publish_live`` (bench: 4000←4500). Use a
-            # light rebuild while scanning so duration facets still advance.
-            scanning = bool(STATE.get("scanning"))
-            if scanning:
-                try:
-                    from vg.diagnostics import emit
-
-                    emit(
-                        "INFO",
-                        "metadata_enrichment_light_rebuild_scanning",
-                        force=True,
-                        videos=len(STATE.get("videos") or []),
-                        thread=threading.current_thread().name,
-                    )
-                except Exception:
-                    pass
-            rebuild_indexes(
-                list(STATE.get("videos") or []),
-                heavy=not scanning,
-            )
-
         if not need:
             if reused_n:
-                _safe_rebuild()
                 scope = _probe_scope_label(
                     want_duration=want_duration,
                     want_audio=want_audio,
@@ -1445,10 +1487,6 @@ def _bg_enrich_metadata() -> None:
             f"（本盘已缓存的会跳过{tip}）…"
         )
         ok_n, fail_n = enrich_metadata_parallel(need, label="后台")
-        # Incremental batches already UPSERTed; one catalog rebuild
-        # advances lib_gen. Do NOT re-save every probed row here — that used to
-        # rewrite the whole catalog thousands of times after "完成".
-        _safe_rebuild()
         reuse_tip = f"，复用 {reused_n}" if reused_n else ""
         STATE["meta_progress"] = (
             f"元数据完成（{scope}）：可读 {ok_n}，异常 {fail_n}{reuse_tip}"
@@ -1482,6 +1520,18 @@ def _bg_enrich_metadata() -> None:
 
         log_error("metadata_enrichment_failed", e)
     finally:
-        _state._meta_running = False
-        _state._meta_root = ""
-        threading.Timer(4.0, lambda: STATE.update(meta_progress="")).start()
+        with _meta_lock:
+            rerun = _state._meta_pending
+            _state._meta_pending = False
+            _state._meta_running = False
+            _state._meta_root = ""
+        if rerun:
+            start_metadata_enrichment()
+        else:
+            def clear_progress() -> None:
+                with _meta_lock:
+                    if not _state._meta_running:
+                        STATE["meta_progress"] = ""
+            timer = threading.Timer(4.0, clear_progress)
+            timer.daemon = True
+            timer.start()

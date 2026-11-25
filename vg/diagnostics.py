@@ -399,11 +399,11 @@ def warn(event: str, *, force: bool = True, **fields) -> None:
 
 
 def perf(event: str, elapsed_ms: float, *, force: bool = False, **fields) -> None:
-    """Print slow stages by default; full logging prints every instrumented span."""
+    """Print slow or explicitly forced stages."""
     emit(
         "PERF",
         event,
-        force=force or _full_logging or elapsed_ms >= _slow_ms,
+        force=force or elapsed_ms >= _slow_ms,
         elapsed_ms=f"{elapsed_ms:.1f}",
         **fields,
     )
@@ -560,40 +560,6 @@ def begin_request_trace(
             "thread": threading.current_thread().name,
             "started": now,
         }
-        inflight_n = len(_inflight_requests)
-    # Always leave a begin breadcrumb for UI/API paths.  If the server later
-    # wedges, this is the last proof a waitress thread accepted the request.
-    hot_skip = path.startswith(("/thumb/", "/stream/", "/hls/")) or path in (
-        "/api/status",
-        "/api/client-log",
-        "/favicon.ico",
-        "/robots.txt",
-    )
-    if not hot_skip:
-        emit(
-            "INFO",
-            "http_request_begin",
-            force=True,
-            request_id=rid,
-            operation_id=operation_id,
-            method=method,
-            path=path,
-            thread=threading.current_thread().name,
-            inflight=inflight_n,
-        )
-    elif path == "/api/status":
-        # Status polls every couple seconds — keep inflight tracking, log rarely.
-        emit_rate_limited(
-            "INFO",
-            "http_request_begin",
-            key="api_status",
-            interval=10.0,
-            force=True,
-            request_id=rid,
-            path=path,
-            thread=threading.current_thread().name,
-            inflight=inflight_n,
-        )
 
 
 def end_request_trace(request_id: str, *, status: int | None = None) -> None:
@@ -608,9 +574,9 @@ def end_request_trace(request_id: str, *, status: int | None = None) -> None:
         return
     elapsed_ms = (now - float(row.get("started") or now)) * 1000.0
     path = str(row.get("path") or "")
-    if elapsed_ms >= _STALL_WARN_MS or path in ("/", "/api/videos", "/api/tree"):
+    if elapsed_ms >= _STALL_WARN_MS:
         emit(
-            "INFO" if elapsed_ms < _STALL_WARN_MS else "WARN",
+            "WARN",
             "http_request_end",
             force=True,
             request_id=rid,
@@ -744,22 +710,24 @@ def aggregate(event: str, elapsed_ms: float = 0.0, *, failed: bool = False) -> N
 
 
 def _emit_aggregate(name: str, values: dict) -> None:
-        count = int(values["count"])
-        avg = values["total_ms"] / count if count else 0.0
-        samples = sorted(values["samples"])
-        p50 = samples[int((len(samples) - 1) * 0.50)] if samples else 0.0
-        p95 = samples[int((len(samples) - 1) * 0.95)] if samples else 0.0
-        emit(
-            "PERF",
-            name,
-            force=True,
-            count=count,
-            errors=int(values["errors"]),
-            avg_ms=f"{avg:.1f}",
-            p50_ms=f"{p50:.1f}",
-            p95_ms=f"{p95:.1f}",
-            max_ms=f"{values['max_ms']:.1f}",
-        )
+    if not values["errors"] and values["max_ms"] < _slow_ms:
+        return
+    count = int(values["count"])
+    avg = values["total_ms"] / count if count else 0.0
+    samples = sorted(values["samples"])
+    p50 = samples[int((len(samples) - 1) * 0.50)] if samples else 0.0
+    p95 = samples[int((len(samples) - 1) * 0.95)] if samples else 0.0
+    emit(
+        "PERF",
+        name,
+        force=True,
+        count=count,
+        errors=int(values["errors"]),
+        avg_ms=f"{avg:.1f}",
+        p50_ms=f"{p50:.1f}",
+        p95_ms=f"{p95:.1f}",
+        max_ms=f"{values['max_ms']:.1f}",
+    )
 
 
 def flush_aggregates() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -11,7 +12,14 @@ from pathlib import Path
 
 from vg.config import VGDATA_DIR
 from vg.duplicates import duplicate_name_key
-from vg.schema import INDEX_SCHEMA_VERSION, serialize_video_item
+from vg.schema import (
+    INDEX_SCHEMA_VERSION,
+    PROBE_RESULT_FIELDS,
+    THUMB_RESULT_FIELDS,
+    media_item_signature,
+    media_source_unchanged,
+    serialize_video_item,
+)
 from vg.util import _clear_path_attrs_windows, log
 
 CATALOG_DB_NAME = "catalog.sqlite"
@@ -578,9 +586,29 @@ def load_catalog_videos(
                                 requested_root=want,
                                 action="return_rows_for_caller_filter",
                             )
-                rows = conn.execute(
-                    "SELECT data, search_text FROM videos"
-                ).fetchall()
+                facet_mtime = catalog_mtime(cache) if restore_search_cache else 0.0
+                columns = "data, search_text"
+                if restore_search_cache:
+                    columns += ", folder, ext, genres_text, themes_text, backgrounds_text"
+                rows = conn.execute(f"SELECT {columns} FROM videos").fetchall()
+                if restore_search_cache and facet_mtime == catalog_mtime(cache):
+                    facet_rows = [{
+                        "folder": _norm_rel(row["folder"]),
+                        "ext": str(row["ext"] or "").strip().lower(),
+                        "genres_text": row["genres_text"],
+                        "themes_text": row["themes_text"],
+                        "backgrounds_text": row["backgrounds_text"],
+                    } for row in rows]
+                    try:
+                        cache_key = str(Path(cache).resolve()).casefold()
+                    except OSError:
+                        cache_key = str(cache).casefold()
+                    with _facet_rows_memo_lock:
+                        _facet_rows_memo[(cache_key, "", "")] = (facet_mtime, facet_rows)
+                        if len(_facet_rows_memo) > _FACET_ROWS_MEMO_MAX:
+                            _facet_rows_memo.pop(next(iter(_facet_rows_memo)), None)
+                else:
+                    facet_rows = []
                 out: list[dict] = []
                 restored_search_text = 0
                 for row in rows:
@@ -601,12 +629,12 @@ def load_catalog_videos(
                 perf(
                     "catalog_load_all",
                     built_ms,
-                    force=True,
                     cache=cache,
                     rows=len(out),
                     requested_root=root,
                     search_text_restored=restored_search_text,
                     search_text_missing=max(0, len(out) - restored_search_text),
+                    facet_rows_warmed=len(facet_rows),
                 )
                 emit_ms = (time.perf_counter() - emit_started) * 1000.0
                 if emit_ms >= 20.0:
@@ -917,25 +945,51 @@ def load_catalog_facet_rows(
         clauses.append("search_text LIKE ?")
         params.append("%" + search_n.casefold() + "%")
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    started = time.perf_counter()
     from vg.diagnostics import timed_lock
+    from vg.state import scan_lock_status
+
+    scan_before = scan_lock_status()
+    started = time.perf_counter()
+    cpu_started = time.thread_time()
+    process_cpu_started = time.process_time()
 
     with timed_lock(_lock_for(cache), "sqlite_query_facets", cache=cache):
+        lock_wait_ms = (time.perf_counter() - started) * 1000.0
+        stage_started = time.perf_counter()
+        stage = "connect"
         try:
             conn = _connect(cache)
+            connect_ms = (time.perf_counter() - stage_started) * 1000.0
+            query_started = time.perf_counter()
+            query_cpu_started = time.thread_time()
+            stage = "execute"
             try:
-                fetched = conn.execute(
+                cursor = conn.execute(
                     "SELECT folder, ext, genres_text, themes_text, backgrounds_text "
                     f"FROM videos{where}",
                     params,
-                ).fetchall()
+                )
+                execute_ms = (time.perf_counter() - query_started) * 1000.0
+                execute_cpu_ms = (time.thread_time() - query_cpu_started) * 1000.0
+                fetch_started = time.perf_counter()
+                fetch_cpu_started = time.thread_time()
+                stage = "fetch"
+                fetched = cursor.fetchall()
+                fetch_ms = (time.perf_counter() - fetch_started) * 1000.0
+                fetch_cpu_ms = (time.thread_time() - fetch_cpu_started) * 1000.0
+                query_ms = (time.perf_counter() - query_started) * 1000.0
+                query_cpu_ms = (time.thread_time() - query_cpu_started) * 1000.0
             finally:
+                stage_started = time.perf_counter()
                 conn.close()
+                close_ms = (time.perf_counter() - stage_started) * 1000.0
         except sqlite3.Error as exc:
             from vg.diagnostics import error
 
-            error("sqlite_facets_failed", exc, cache=cache)
+            error("sqlite_facets_failed", exc, cache=cache, stage=stage,
+                  elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1))
             return []
+    stage_started = time.perf_counter()
     try:
         rows = [
             {
@@ -960,11 +1014,36 @@ def load_catalog_facet_rows(
         raise
     from vg.diagnostics import perf
 
+    decode_ms = (time.perf_counter() - stage_started) * 1000.0
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    cpu_ms = (time.thread_time() - cpu_started) * 1000.0
     perf(
         "sqlite_query_facets",
-        (time.perf_counter() - started) * 1000.0,
+        elapsed_ms,
         cache=cache,
         source_rows=len(rows),
+        category=category_n or "all",
+        has_search=bool(search_n),
+        memo_reason="cold" if hit is None else "catalog_mtime_changed",
+        cached_mtime=hit[0] if hit is not None else None,
+        catalog_mtime=mtime,
+        thread=threading.current_thread().name,
+        scan_before=scan_before,
+        scan_after=scan_lock_status(),
+        cpu_ms=round(cpu_ms, 1),
+        process_cpu_ms=round((time.process_time() - process_cpu_started) * 1000.0, 1),
+        non_cpu_ms=round(max(0.0, elapsed_ms - cpu_ms), 1),
+        lock_wait_ms=round(lock_wait_ms, 1),
+        connect_ms=round(connect_ms, 1),
+        query_ms=round(query_ms, 1),
+        query_cpu_ms=round(query_cpu_ms, 1),
+        query_non_cpu_ms=round(max(0.0, query_ms - query_cpu_ms), 1),
+        execute_ms=round(execute_ms, 1),
+        execute_cpu_ms=round(execute_cpu_ms, 1),
+        fetch_ms=round(fetch_ms, 1),
+        fetch_cpu_ms=round(fetch_cpu_ms, 1),
+        close_ms=round(close_ms, 1),
+        decode_ms=round(decode_ms, 1),
     )
     with _facet_rows_memo_lock:
         _facet_rows_memo[memo_key] = (mtime, rows)
@@ -1200,6 +1279,12 @@ def save_catalog(
 
                 now = time.time()
                 conn.execute("BEGIN IMMEDIATE")
+                # Preserve media results committed after the scan's initial snapshot.
+                previous: dict[str, dict] = {}
+                for row in conn.execute("SELECT id, data FROM videos").fetchall():
+                    old = _decode_row(row)
+                    if old is not None:
+                        previous[row["id"]] = old
                 conn.execute("DELETE FROM videos")
                 for raw in videos:
                     if not isinstance(raw, dict) or not raw.get("id"):
@@ -1208,6 +1293,16 @@ def save_catalog(
                     vid = (item.get("id") or "").strip()
                     if not vid:
                         continue
+                    old = previous.get(vid)
+                    signature_item = raw if raw.get("_lib_root") or raw.get("root") else item
+                    if old is not None and media_item_signature(old) == media_item_signature(signature_item):
+                        for field in (*PROBE_RESULT_FIELDS, *THUMB_RESULT_FIELDS):
+                            if field in old:
+                                raw[field] = old[field]
+                                item[field] = old[field]
+                            else:
+                                raw.pop(field, None)
+                                item.pop(field, None)
                     rel = _norm_rel(item.get("rel"))
                     query_values = _query_columns(item, root_s)
                     conn.execute(
@@ -1273,6 +1368,133 @@ def save_catalog(
 
             error("sqlite_save_catalog_failed", e, cache=cache)
             return False
+
+
+def patch_catalog_video_fields(
+    cache: Path,
+    root: Path | str,
+    items: list[dict],
+    *,
+    fields: tuple,
+) -> list[dict]:
+    """Patch matching rows; staged thumbnails publish only after source validation."""
+    if not items:
+        return []
+    started = time.perf_counter()
+    with _db_guard(cache, "catalog_patch_fields"):
+        try:
+            if any(field not in (*PROBE_RESULT_FIELDS, *THUMB_RESULT_FIELDS) for field in fields):
+                raise ValueError("catalog media patch contains non-result fields")
+            if not catalog_exists(cache):
+                return []
+            try:
+                root_s = str(Path(root).expanduser().resolve())
+            except OSError:
+                root_s = str(root).strip()
+            conn = _connect(cache)
+            try:
+                committed: list[dict] = []
+                changed = 0
+                now = time.time()
+                conn.execute("BEGIN IMMEDIATE")
+                stored_root = _meta_get(conn, "root")
+                if stored_root and media_item_signature({"root": stored_root})[0] != media_item_signature({"root": root_s})[0]:
+                    conn.execute("ROLLBACK")
+                    return []
+                for raw in items:
+                    if not isinstance(raw, dict) or not raw.get("id"):
+                        continue
+                    signature_item = serialize_video_item(raw, root=root_s, cache=cache)
+                    source_id = str(signature_item.get("id") or "").strip()
+                    if not source_id:
+                        continue
+                    row = conn.execute(
+                        "SELECT data FROM videos WHERE id=?",
+                        (source_id,),
+                    ).fetchone()
+                    current = _decode_row(row) if row is not None else None
+                    if current is None:
+                        continue
+                    current_signature = dict(current, root=root_s, _lib_root=root_s)
+                    if media_item_signature(current_signature) != media_item_signature(signature_item):
+                        continue
+                    if not media_source_unchanged(raw):
+                        continue
+                    pending_s = raw.get("_thumb_pending_path")
+                    if pending_s and any(field in THUMB_RESULT_FIELDS for field in fields):
+                        pending = Path(pending_s)
+                        target_s = raw.get("_thumb_target_path")
+                        if pending.suffix.lower() != ".pending" or not target_s:
+                            raise ValueError("invalid pending thumbnail paths")
+                        target = Path(target_s)
+                        if target == pending:
+                            raise ValueError("pending thumbnail cannot be its own target")
+                        if not media_source_unchanged(raw):
+                            continue
+                        os.replace(pending, target)
+                        from vg.cache import thumb_cache_invalidate, thumb_version
+
+                        thumb_cache_invalidate(target.stem, target.parent)
+                        raw["thumb_v"] = thumb_version(target.parent, target.stem)
+                    row_changed = False
+                    for field in fields:
+                        if field in raw:
+                            if field not in current or current[field] != raw[field]:
+                                current[field] = raw[field]
+                                row_changed = True
+                        elif field in current:
+                            current.pop(field)
+                            row_changed = True
+                    if row_changed:
+                        try:
+                            duration = float(current.get("duration") or 0)
+                        except (TypeError, ValueError):
+                            duration = 0.0
+                        conn.execute(
+                            "UPDATE videos SET data=?, duration=?, updated_at=? WHERE id=?",
+                            (
+                                json.dumps(current, ensure_ascii=False, separators=(",", ":")),
+                                duration,
+                                now,
+                                source_id,
+                            ),
+                        )
+                        changed += 1
+                    committed.append(raw)
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+            finally:
+                conn.close()
+        except Exception as exc:
+            from vg.diagnostics import error
+
+            error("sqlite_patch_fields_failed", exc, cache=cache, rows=len(items))
+            return []
+    try:
+        from vg.diagnostics import note_catalog_db_op, perf
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        perf(
+            "sqlite_patch_fields",
+            elapsed_ms,
+            rows=changed,
+            matched=len(committed),
+            cache=cache,
+        )
+        note_catalog_db_op(
+            "patch_fields",
+            cache=cache,
+            rows=changed,
+            elapsed_ms=elapsed_ms,
+        )
+    except Exception:
+        pass
+    return committed
 
 
 def upsert_catalog_videos(

@@ -44,6 +44,7 @@ _scan_lock_since = 0.0
 _convert_lock = threading.Lock()
 _meta_lock = threading.Lock()
 _meta_running = False
+_meta_pending = False
 _meta_root = ""
 _thumb_bulk_lock = threading.RLock()
 _thumb_bulk_roots: set[str] = set()
@@ -136,6 +137,16 @@ def thumb_bulk_running(root=None) -> bool:
         if root is None:
             return bool(_thumb_bulk_roots)
         return _runtime_root_key(root) in _thumb_bulk_roots
+
+
+def catalog_writer_busy() -> bool:
+    return bool(
+        STATE.get("scanning")
+        or STATE.get("updating")
+        or _scan_lock_holder
+        or _meta_running
+        or thumb_bulk_running()
+    )
 
 
 def thumb_bulk_roots() -> list[str]:

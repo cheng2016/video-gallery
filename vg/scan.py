@@ -17,9 +17,7 @@ from vg.cache import (
     list_thumb_ids,
     read_index_counts,
     save_index,
-    thumb_cache_invalidate,
     thumb_path,
-    thumb_version,
 )
 from vg.catalog import (
     build_tree,
@@ -53,7 +51,6 @@ from vg.thumb_jobs import (
 )
 from vg.thumbs import (
     adopt_thumbs_from_caches,
-    clear_thumbnail_failure,
     folder_key,
     item_folder_key,
     mark_thumbnail_failure,
@@ -71,7 +68,8 @@ from vg.util import (
 
 from vg.media import (
     _video_file_for_thumb,
-    make_thumbnail,
+    make_item_thumbnail,
+    media_job_snapshot,
     start_metadata_enrichment,
 )
 from vg.signatures import file_fingerprint
@@ -452,23 +450,6 @@ def start_scan(
     """
     requested_at = time.perf_counter()
     root = root.expanduser()
-    if (
-        runtime_state.thumb_bulk_running(root)
-        or runtime_state.metadata_running_for(root)
-    ):
-        from vg.diagnostics import emit
-
-        emit(
-            "WARN",
-            "scan_start_rejected",
-            force=True,
-            reason="same_root_background_media_busy",
-            requested_root=root,
-            meta_running=runtime_state.metadata_running_for(root),
-            thumb_bulk_running=runtime_state.thumb_bulk_running(root),
-            thread=threading.current_thread().name,
-        )
-        return False, "该盘缩略图/元数据后台处理中，请稍后再重新扫描"
     if STATE["scanning"]:
         from vg.diagnostics import emit
 
@@ -615,59 +596,10 @@ def start_scan(
             if force:
                 STATE["scan_progress"] = f"正在增量扫描 {root} …"
                 STATE["thumb_progress"] = ""
-                # 多盘时不要把其它盘的片从内存清空到「整库变空」；
-                # 其它盘频道仍可从各盘 index 读出；扫完 on_scan_finished 会再合并。
                 try:
                     archive_current_library()
                 except Exception:
                     pass
-                try:
-                    from vg.roots import get_mounted_roots, tree_for_scope
-                    from vg.disk_libs import _norm_root_str
-
-                    mounts = get_mounted_roots()
-                    root_s = str(root.resolve())
-                    if len(mounts) > 1:
-                        keep = []
-                        for v in list(STATE.get("videos") or []):
-                            lr = (v.get("_lib_root") or "").strip()
-                            if not lr:
-                                continue
-                            try:
-                                if _norm_root_str(lr).lower() == root_s.lower():
-                                    continue
-                            except Exception:
-                                continue
-                            keep.append(v)
-                        rebuild_indexes(keep)
-                        try:
-                            STATE["tree"] = tree_for_scope(None)
-                        except Exception:
-                            STATE["tree"] = {
-                                "name": "全部盘",
-                                "path": "",
-                                "count": len(keep),
-                                "children": [],
-                                "videos": [],
-                            }
-                    else:
-                        STATE["videos"] = []
-                        STATE["tree"] = {
-                            "name": root.name or str(root),
-                            "path": "",
-                            "count": 0,
-                            "children": [],
-                            "videos": [],
-                        }
-                except Exception:
-                    STATE["videos"] = []
-                    STATE["tree"] = {
-                        "name": root.name or str(root),
-                        "path": "",
-                        "count": 0,
-                        "children": [],
-                        "videos": [],
-                    }
                 scan_videos(root, do_thumbs=do_thumbs, incremental=True, quiet=False, burst_thumbs=True)
             else:
                 STATE["scan_progress"] = f"正在加载 {root}（优先缓存）…"
@@ -1541,7 +1473,7 @@ def _probe_cache_still_valid(prev: dict, item: dict) -> bool:
         item_mtime = float(item.get("mtime") or 0)
     except (TypeError, ValueError):
         prev_mtime, item_mtime = 0.0, 0.0
-    if prev_mtime and item_mtime and abs(prev_mtime - item_mtime) >= 1.0:
+    if prev_mtime and item_mtime and prev_mtime != item_mtime:
         return False
     prev_sig = str(prev.get("file_sig") or "").strip()
     item_sig = str(item.get("file_sig") or "").strip()
@@ -1580,105 +1512,18 @@ def _inherit_probe_fields_if_same_file(item: dict, prev: dict) -> bool:
     return changed
 
 
-_PROBE_FIELDS_PRESERVED_BY_THUMB_SAVE = (
-    "duration",
-    "duration_h",
-    "has_audio",
-    "audio_codec",
-    "audio_channels",
-    "sample_rate",
-    "audio_hard",
-    "width",
-    "height",
-    "fps",
-    "bitrate",
-    "video_codec",
-    "probe_ver",
-    "probe_duration_done",
-    "probe_audio_done",
-    "probe_video_meta_done",
-    "bad",
-    "bad_reason",
-)
-
-
-def _preserve_catalog_probe_fields_for_thumb_save(
-    videos: list[dict],
-    *,
-    cache: Path,
-    root: Path,
-) -> int:
-    """Keep metadata already written by ffprobe when thumbnails save the catalog."""
-    if not videos or not cache or not root:
-        return 0
-    try:
-        from vg.catalog_db import load_catalog_videos
-
-        persisted = load_catalog_videos(cache, root)
-    except Exception as exc:
-        log(f"[预览图] 保存前读取目录库元数据失败: {exc}")
-        return 0
-    by_id = {
-        str(row.get("id") or "").strip(): row
-        for row in persisted
-        if isinstance(row, dict) and str(row.get("id") or "").strip()
-    }
-    by_rel = {
-        str(row.get("rel") or "").replace("\\", "/").strip("/").casefold(): row
-        for row in persisted
-        if isinstance(row, dict) and str(row.get("rel") or "").strip()
-    }
-    merged_rows = 0
-    for item in videos:
-        if not isinstance(item, dict):
-            continue
-        old = by_id.get(str(item.get("id") or "").strip())
-        if old is None:
-            rel = str(item.get("rel") or "").replace("\\", "/").strip("/").casefold()
-            old = by_rel.get(rel)
-        if old is None:
-            continue
-        old_sig = str(old.get("file_sig") or "").strip()
-        item_sig = str(item.get("file_sig") or "").strip()
-        same_file = bool(old_sig and item_sig and old_sig == item_sig)
-        if not same_file:
-            try:
-                same_file = (
-                    int(old.get("size") or -1) == int(item.get("size") or -2)
-                    and abs(float(old.get("mtime") or 0) - float(item.get("mtime") or 0)) < 1.0
-                )
-            except (TypeError, ValueError):
-                same_file = False
-        if not same_file:
-            continue
-        copied = False
-        for key in _PROBE_FIELDS_PRESERVED_BY_THUMB_SAVE:
-            if key not in old:
-                continue
-            if key not in item or item.get(key) in (None, "", []):
-                item[key] = old.get(key)
-                copied = True
-        if copied:
-            merged_rows += 1
-    if merged_rows:
-        log(
-            f"[预览图] 整库保存前合并已持久化元数据：{merged_rows}/{len(videos)} 条，"
-            "避免缩略图收尾覆盖 duration/audio"
-        )
-    return merged_rows
-
-
 def generate_thumbs_parallel(
     missing: list[dict],
     cached_n: int = 0,
     label: str = "新建",
     *,
     burst: bool = False,
+    cache: Path | None = None,
 ) -> tuple[int, int]:
     """通过共享队列生成预览图。返回 (成功数, 失败数)。"""
     started = time.perf_counter()
     ffmpeg = STATE.get("ffmpeg")
-    cache = STATE.get("cache_dir")
+    cache = cache or STATE.get("cache_dir")
     if not missing or not ffmpeg or not cache:
         from vg.diagnostics import perf as diagnostic_perf
 
@@ -1719,9 +1564,10 @@ def generate_thumbs_parallel(
     )
     ok_n = 0
     fail_n = 0
+    skipped_n = 0
     done = 0
     last_log_i = 0
-    def one(item: dict) -> bool:
+    def one(item: dict) -> bool | None:
         try:
             # ffprobe already proved that audio-only/corrupt containers cannot
             # yield a frame.  Do not enqueue another ffmpeg attempt during the
@@ -1729,18 +1575,13 @@ def generate_thumbs_parallel(
             bad_reason = str(item.get("bad_reason") or "").casefold()
             if item.get("bad") and ("无视频流" in bad_reason or "no video" in bad_reason):
                 return False
-            out = thumb_path(cache, item["id"])
-            src = _video_file_for_thumb(item)
-            ok = bool(src and make_thumbnail(ffmpeg, src, out, background=True, burst=burst))
-            if ok:
-                thumb_cache_invalidate(item["id"])
-            return ok
+            return make_item_thumbnail(item, ffmpeg, cache, burst=burst)
         except Exception:
             return False
 
     future_items: dict = {}
     for item in missing:
-        key = thumbnail_job_key(cache, item["id"])
+        key = thumbnail_job_key(cache, item.get("_thumb_id") or item["id"], item=item)
         future = submit_thumbnail_job(
             key,
             lambda item=item: one(item),
@@ -1750,8 +1591,10 @@ def generate_thumbs_parallel(
 
     for future in as_completed(future_items):
         try:
-            ok = bool(future.result())
+            result = future.result()
+            ok = bool(result)
         except Exception:
+            result = False
             ok = False
         for item in future_items[future]:
             name = item.get("name") or item.get("rel") or item.get("id") or "?"
@@ -1760,10 +1603,8 @@ def generate_thumbs_parallel(
                 i = done
                 if ok:
                     ok_n += 1
-                    clear_thumbnail_failure(item)
-                    item["has_thumb"] = True
-                    item["thumb"] = f"{item['id']}{THUMB_EXT}"
-                    item["thumb_v"] = thumb_version(cache, item["id"])
+                elif result is None:
+                    skipped_n += 1
                 else:
                     fail_n += 1
                     mark_thumbnail_failure(
@@ -1777,7 +1618,7 @@ def generate_thumbs_parallel(
                 if (i == total) or (i - last_log_i >= 40):
                     last_log_i = i
                     log(
-                        f"[预览图] 进度 {i}/{total}（成功 {ok_n}，失败 {fail_n}）"
+                        f"[预览图] 进度 {i}/{total}（成功 {ok_n}，失败 {fail_n}，跳过 {skipped_n}）"
                     )
                 STATE["thumb_progress"] = (
                     f"{label}加密预览图 {i}/{total}（已有缓存 {cached_n}，成功 {ok_n}）…"
@@ -1797,6 +1638,7 @@ def generate_thumbs_parallel(
         ok=ok_n,
         failed=fail_n,
         failure_markers_updated=fail_n,
+        discarded=skipped_n,
     )
     if fail_n:
         from vg.diagnostics import emit
@@ -1812,7 +1654,49 @@ def generate_thumbs_parallel(
     return ok_n, fail_n
 
 
+_thumb_bulk_requests: dict[str, dict] = {}
+
+
 def fill_thumbs_for_videos(
+    videos: list[dict],
+    *,
+    burst: bool,
+    cache: Path | None,
+    root: Path | None,
+    file_count: int | None = None,
+    folder_counts: dict[str, int] | None = None,
+) -> tuple[int, int]:
+    if not videos or not cache or not STATE.get("ffmpeg"):
+        return 0, 0
+    owner = root or cache
+    key = runtime_state._runtime_root_key(owner)
+    request = dict(videos=[dict(item) for item in videos], burst=burst, cache=cache, root=root,
+                   file_count=file_count, folder_counts=folder_counts)
+    with runtime_state._thumb_bulk_lock:
+        _thumb_bulk_requests[key] = request
+        if not runtime_state.register_thumb_bulk(owner):
+            return 0, 0
+    STATE["thumb_progress"] = "预览图已转后台补全，目录扫描无需等待"
+
+    def run() -> None:
+        while True:
+            with runtime_state._thumb_bulk_lock:
+                pending = _thumb_bulk_requests.pop(key, None)
+                if pending is None:
+                    runtime_state.unregister_thumb_bulk(owner)
+                    return
+            try:
+                _fill_thumbs_background(**pending)
+            except Exception as exc:
+                from vg.util import log_error
+                log_error("thumbnail_bulk_background_failed", exc, root=root)
+                STATE["thumb_progress"] = f"预览图后台生成失败: {exc}"
+
+    threading.Thread(target=run, daemon=True, name="thumb-bulk-background").start()
+    return 0, 0
+
+
+def _fill_thumbs_background(
     videos: list[dict],
     *,
     burst: bool,
@@ -1823,6 +1707,21 @@ def fill_thumbs_for_videos(
 ) -> tuple[int, int]:
     """Fill missing .vgt files only: reuse other caches, then ffmpeg the rest."""
     started = time.perf_counter()
+    from vg.disk_libs import _disk_lib_snapshot
+    from vg.schema import THUMB_RESULT_FIELDS, media_item_signature
+
+    current = _disk_lib_snapshot(str(Path(root).resolve())) if root else None
+    if current is not None:
+        by_signature = {media_item_signature(item): item for item in current}
+        for item in videos:
+            latest = by_signature.get(media_item_signature(item))
+            if latest is not None:
+                for field in THUMB_RESULT_FIELDS:
+                    if field in latest:
+                        item[field] = latest[field]
+                    else:
+                        item.pop(field, None)
+    snapshot_ms = (time.perf_counter() - started) * 1000.0
     ffmpeg = STATE.get("ffmpeg")
     if not videos or not cache:
         from vg.diagnostics import perf as diagnostic_perf
@@ -1848,7 +1747,13 @@ def fill_thumbs_for_videos(
             reason="no_ffmpeg",
         )
         return 0, 0
-    missing = missing_thumb_items(videos, cache)
+    stage_started = time.perf_counter()
+    candidates = missing_thumb_items(videos, cache)
+    missing_scan_ms = (time.perf_counter() - stage_started) * 1000.0
+    stage_started = time.perf_counter()
+    missing = [snapshot for item in candidates
+               if (snapshot := media_job_snapshot(item, _video_file_for_thumb(item))) is not None]
+    source_stat_ms = (time.perf_counter() - stage_started) * 1000.0
     # Never schedule known audio-only/corrupt files.  They are valid catalog
     # entries, but a thumbnail is impossible and ffmpeg would just fail.
     skipped_no_video = [
@@ -1878,7 +1783,9 @@ def fill_thumbs_for_videos(
         # or an ID migration). Capture enough state to identify which one on
         # the next occurrence without logging every thumbnail.
         cache_vgt_files = len(list_thumb_ids(cache))
+    stage_started = time.perf_counter()
     missing, reused = adopt_thumbs_from_caches(missing, cache)
+    reuse_ms = (time.perf_counter() - stage_started) * 1000.0
     if missing_before_reuse >= 50:
         from vg.diagnostics import emit
 
@@ -1898,67 +1805,14 @@ def fill_thumbs_for_videos(
         )
     cached_n = len(videos) - len(missing) - len(skipped_no_video)
     ok_n = fail_n = 0
-    if burst and len(missing) >= 200:
-        # Publish the catalog first; large ffmpeg batches must not hold the
-        # scan thread (and therefore the UI) for tens of seconds.
-        deferred_items = list(missing)
-        STATE["thumb_progress"] = (
-            f"预览图已转后台生成（待生成 {len(deferred_items)}，已有缓存 {cached_n}）"
-        )
-        log(
-            f"[预览图] 批量任务过多，扫描已先发布索引，转后台生成："
-            f"待生成 {len(deferred_items)}，已有缓存 {cached_n}"
-        )
-
-        if root is not None and not runtime_state.register_thumb_bulk(root):
-            log(f"[预览图] 跳过重复后台批量：{root} 已有任务运行")
-            return 0, 0
-
-        def run_deferred() -> None:
-            started = time.perf_counter()
-            log(f"[预览图] 后台批量生成开始：{len(deferred_items)} 个，扫描线程已释放")
-            try:
-                deferred_ok, deferred_failed = generate_thumbs_parallel(
-                    deferred_items,
-                    cached_n=cached_n,
-                    label="后台补全",
-                    burst=False,
-                )
-                STATE["thumb_progress"] = (
-                    f"预览图后台完成（缓存 {cached_n} + 新建 {deferred_ok}，失败 {deferred_failed}）"
-                )
-                if root is not None:
-                    _preserve_catalog_probe_fields_for_thumb_save(
-                        videos,
-                        cache=cache,
-                        root=Path(root),
-                    )
-                    save_index(cache, root, videos, file_count=file_count, folder_counts=folder_counts)
-                    try:
-                        from vg.disk_libs import sync_disk_lib_memory
-                        sync_disk_lib_memory(str(Path(root).resolve()), videos)
-                    except Exception:
-                        pass
-                elapsed = (time.perf_counter() - started) * 1000.0
-                log(f"[预览图] 后台批量生成完成：成功 {deferred_ok}，失败 {deferred_failed}，耗时 {elapsed:.1f}ms")
-                from vg.diagnostics import perf
-                perf("thumbnail_bulk_background", elapsed, force=True, videos=len(deferred_items), cached=cached_n, ok=deferred_ok, failed=deferred_failed)
-            except Exception as exc:
-                STATE["thumb_progress"] = f"预览图后台生成失败: {exc}"
-                log(f"[预览图] 后台批量生成失败: {exc}")
-            finally:
-                if root is not None:
-                    runtime_state.unregister_thumb_bulk(root)
-
-        threading.Thread(target=run_deferred, daemon=True, name="thumb-bulk-background").start()
-        from vg.diagnostics import perf
-        perf("thumbnail_bulk_background_started", 0.0, force=True, videos=len(videos), missing=len(deferred_items), cached=cached_n, burst=burst)
-        return 0, 0
+    generate_ms = 0.0
     if missing:
+        stage_started = time.perf_counter()
         label = "新建" if burst else "补全"
         ok_n, fail_n = generate_thumbs_parallel(
-            missing, cached_n=cached_n, label=label, burst=burst
+            missing, cached_n=cached_n, label=label, burst=burst, cache=cache
         )
+        generate_ms = (time.perf_counter() - stage_started) * 1000.0
         STATE["thumb_progress"] = (
             f"预览图完成（缓存 {cached_n} + 新建 {ok_n}，失败 {fail_n}）"
         )
@@ -1966,26 +1820,29 @@ def fill_thumbs_for_videos(
     else:
         STATE["thumb_progress"] = f"预览图全部来自缓存（{cached_n} 个），无需重建"
         log(f"[预览图] 全部命中缓存（{cached_n}），无需重建")
-    if root is not None and (missing or reused or failure_marked):
-        _preserve_catalog_probe_fields_for_thumb_save(
-            videos,
-            cache=cache,
-            root=Path(root),
-        )
-        save_index(cache, root, videos, file_count=file_count, folder_counts=folder_counts)
-        try:
-            root_s = str(Path(root).resolve())
-        except OSError:
-            root_s = str(root)
-        try:
-            sync_disk_lib_memory(root_s, videos)
-        except Exception:
-            pass
+    stage_started = time.perf_counter()
+    if failure_marked:
+        from vg.disk_libs import patch_library_media_items
+        from vg.schema import THUMB_RESULT_FIELDS
+
+        patch_library_media_items(skipped_no_video, fields=THUMB_RESULT_FIELDS)
+    patch_ms = (time.perf_counter() - stage_started) * 1000.0
     from vg.diagnostics import perf as diagnostic_perf
 
+    total_ms = (time.perf_counter() - started) * 1000.0
     diagnostic_perf(
         "fill_thumbs_for_videos",
-        (time.perf_counter() - started) * 1000.0,
+        total_ms,
+        force=bool(fail_n or skipped_no_video),
+        root=root,
+        cache=cache,
+        snapshot_ms=round(snapshot_ms, 1),
+        missing_scan_ms=round(missing_scan_ms, 1),
+        source_stat_ms=round(source_stat_ms, 1),
+        reuse_ms=round(reuse_ms, 1),
+        generate_ms=round(generate_ms, 1),
+        patch_ms=round(patch_ms, 1),
+        other_ms=round(max(0.0, total_ms - snapshot_ms - missing_scan_ms - source_stat_ms - reuse_ms - generate_ms - patch_ms), 1),
         videos=len(videos),
         missing_before_reuse=missing_before_reuse,
         skipped_no_video=len(skipped_no_video),
@@ -2058,9 +1915,7 @@ def _final_scan_change_counts(
         except (TypeError, ValueError):
             size_changed = item.get("size") != previous.get("size")
         try:
-            mtime_changed = abs(
-                float(item.get("mtime") or 0) - float(previous.get("mtime") or 0)
-            ) >= 1.0
+            mtime_changed = float(item.get("mtime") or 0) != float(previous.get("mtime") or 0)
         except (TypeError, ValueError):
             mtime_changed = item.get("mtime") != previous.get("mtime")
         previous_fingerprint = str(previous.get("file_sig") or "")
@@ -2351,7 +2206,7 @@ def scan_videos(
         metadata_match = bool(
             old
             and int(old.get("size") or -1) == st.st_size
-            and abs(float(old.get("mtime") or 0) - st.st_mtime) < 1.0
+            and float(old.get("mtime") or 0) == st.st_mtime
         )
         old_sig = str(old.get("file_sig") or "") if old else ""
         # Content samples are deferred to the final duplicate stage.  The
@@ -2382,7 +2237,7 @@ def scan_videos(
                     full,
                     f"old={old.get('size')} new={st.st_size}",
                 )
-            elif abs(float(old.get("mtime") or 0) - st.st_mtime) >= 1.0:
+            elif float(old.get("mtime") or 0) != st.st_mtime:
                 count_scan(
                     "video_mtime_changed",
                     full,
@@ -2394,8 +2249,6 @@ def scan_videos(
             # New or changed files get a signature only if the final
             # duplicate stage proves that they share an exact size.
             file_sig = ""
-            if not file_sig:
-                count_scan("video_fingerprint_failed", full)
             item = {
                 "id": vid,
                 "name": full.stem,
@@ -2845,7 +2698,7 @@ def scan_videos(
             if not prev:
                 continue
             changed_meta = _inherit_probe_fields_if_same_file(item, prev)
-            if prev.get("has_thumb") and not item.get("has_thumb"):
+            if prev.get("has_thumb") and not item.get("has_thumb") and _probe_cache_still_valid(prev, item):
                 item["has_thumb"] = True
                 item["thumb"] = prev.get("thumb") or item.get("thumb")
                 item["thumb_v"] = prev.get("thumb_v") or item.get("thumb_v") or 1
@@ -3035,15 +2888,11 @@ def scan_videos(
     if skip_republish:
         log("[扫描] 无变化，跳过统一片库发布")
     else:
-        try:
-            sync_disk_lib_memory(root_s, found)
-        except Exception as e:
-            log(f"[扫描] 同步内存索引失败: {e}")
         save_prefs(last_root=str(root))
         try:
             from vg.roots import on_scan_finished
 
-            on_scan_finished(root)
+            on_scan_finished(root, found)
             log(
                 f"[扫描] 目录索引已发布到网页：{root_s}，{len(found)} 个；"
                 "预览图和元数据后台处理不阻塞目录浏览"
@@ -3062,89 +2911,6 @@ def scan_videos(
             file_count=saved_n,
             folder_counts=saved_counts,
         )
-        try:
-            from vg.roots import get_mounted_roots, publish_unified_library
-
-            if len(get_mounted_roots()) > 1:
-                publish_unified_library(
-                    heavy=False,
-                    reason="thumbnail_finalize",
-                    refresh_tree=False,
-                )
-            else:
-                light_refresh_started = time.perf_counter()
-                from vg.diagnostics import emit
-
-                emit(
-                    "INFO",
-                    "thumbnail_finalize_light_refresh_start",
-                    force=True,
-                    root=root,
-                    videos=len(found),
-                    duplicate_rebuild_skipped=True,
-                    tree_rebuild=True,
-                )
-                rebuild_indexes(found, heavy=False)
-                # Same trap as multi-root light publish: if a prior step replaced
-                # ``found`` with unmarked copies, badges disappear. Remake when
-                # the light rebuild left zero dups despite same-size candidates.
-                try:
-                    from vg.duplicates import mark_duplicates
-
-                    if not any(v.get("dup") for v in found):
-                        size_counts: dict[int, int] = {}
-                        for video in found:
-                            try:
-                                size = int(video.get("size") or 0)
-                            except (TypeError, ValueError):
-                                size = 0
-                            if size > 0:
-                                size_counts[size] = size_counts.get(size, 0) + 1
-                        if any(count >= 2 for count in size_counts.values()):
-                            before_dups = 0
-                            mark_duplicates(found)
-                            emit(
-                                "INFO",
-                                "duplicate_badges_remade_after_light_publish",
-                                force=True,
-                                reason="thumbnail_finalize_single_root",
-                                merged_count=len(found),
-                                duplicate_rows_before=before_dups,
-                                duplicate_rows_after=sum(
-                                    1 for v in found if v.get("dup")
-                                ),
-                            )
-                except Exception as remake_exc:
-                    log(f"[扫描] 轻量收尾后补重复标签失败: {remake_exc}")
-                STATE["tree"] = build_tree(root, found)
-                emit(
-                    "PERF",
-                    "thumbnail_finalize_light_refresh",
-                    force=True,
-                    root=root,
-                    videos=len(found),
-                    duplicate_rebuild_skipped=True,
-                    elapsed_ms=(time.perf_counter() - light_refresh_started) * 1000.0,
-                )
-        except Exception as e:
-            log(f"[多根] 预览图完成后合并失败: {e}")
-            try:
-                from vg.roots import get_mounted_roots, publish_unified_library
-
-                if len(get_mounted_roots()) > 1:
-                    publish_unified_library(
-                        heavy=False,
-                        reason="thumbnail_finalize_retry",
-                        refresh_tree=False,
-                    )
-                else:
-                    rebuild_indexes(found, heavy=False)
-            except Exception as _exc2:
-                log(f"[扫描] 最终回退 rebuild_indexes 也失败: {_exc2}")
-                try:
-                    rebuild_indexes(found, heavy=False)
-                except Exception as _exc3:
-                    log(f"[扫描] rebuild_indexes 彻底失败: {_exc3}")
     elif not ffmpeg:
         STATE["thumb_progress"] = "未找到 ffmpeg，已跳过预览图（安装后重启可生成）"
         log("[预览图] 未找到 ffmpeg，已跳过")
@@ -3281,7 +3047,7 @@ def load_or_scan(root: Path, do_thumbs: bool, force: bool = False, background: b
                 try:
                     from vg.roots import on_scan_finished
 
-                    on_scan_finished(root)
+                    on_scan_finished(root, videos)
                 except Exception as e:
                     log(f"[多根] 缓存收尾失败: {e}")
                 missing = sum(1 for v in videos if not v.get("has_thumb"))
@@ -3317,26 +3083,7 @@ def _fill_missing_thumbs(missing: list[dict]) -> None:
 
 
 def _start_metadata_after_scan(root: Path) -> None:
-    """Avoid disk contention: defer ffprobe while a large thumb batch runs."""
-    if not runtime_state.thumb_bulk_running(root):
-        start_metadata_enrichment()
-        return
-
-    log(f"[元数据] 已延后：{root} 正在后台批量生成缩略图，避免 ffprobe 与 ffmpeg 抢盘")
-
-    def wait_then_start() -> None:
-        started = time.perf_counter()
-        while runtime_state.thumb_bulk_running(root):
-            time.sleep(0.5)
-        waited_ms = (time.perf_counter() - started) * 1000.0
-        log(f"[元数据] 缩略图批量完成，开始后台探测（等待 {waited_ms:.1f}ms）")
-        start_metadata_enrichment()
-
-    threading.Thread(
-        target=wait_then_start,
-        daemon=True,
-        name="meta-after-thumb-bulk",
-    ).start()
+    start_metadata_enrichment()
 
 
 def find_video_by_id(vid: str, prefer_root: str | None = None) -> dict | None:
