@@ -6,10 +6,13 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from vg import cache, config, disk_libs, drives
 from vg.cache import ensure_cache_dir, save_index
 from vg.catalog import rebuild_indexes
+from vg.catalog_db import load_catalog_videos, write_catalog_validation_time
+from vg.dir_snapshot import DirSnapshot
 from vg.disk_libs import _norm_root_str, archive_current_library, sync_disk_lib_memory
 from vg.roots import (
     get_mounted_roots,
@@ -19,7 +22,12 @@ from vg.roots import (
     tree_for_scope,
     videos_for_scope,
 )
-from vg.scan import _final_scan_change_counts, scan_videos
+from vg.scan import (
+    _bg_count_then_maybe_scan,
+    _final_scan_change_counts,
+    count_video_files_by_folder,
+    scan_videos,
+)
 from vg.state import STATE
 from vg.util import format_size, video_id
 
@@ -205,6 +213,57 @@ class MultiDiskRescanTests(unittest.TestCase):
         self.assertEqual(after_roots[str(self.root_b.resolve())], 1)
         self.assertEqual(after_rels, {"a1.mp4", "b1.mp4"})
         self.assertGreaterEqual(len(STATE.get("videos") or []), 2)
+
+    def test_background_rescan_excludes_benchmark_rows_from_legacy_catalog(self) -> None:
+        fixture = self.root_a / "vg_bench_fixture"
+        fixture.mkdir()
+        rows = [self._item(self.root_a, "a1.mp4")]
+        for idx in range(14):
+            clip = fixture / f"clip-{idx}.mp4"
+            clip.write_bytes(bytes([idx]) * 200_000)
+            rel = clip.relative_to(self.root_a).as_posix()
+            rows.append(dict(self._item(self.root_a, rel), folder=fixture.name))
+        cache_a = ensure_cache_dir(self.root_a)
+        self.assertTrue(save_index(cache_a, self.root_a, rows, file_count=15, folder_counts={"": 1, fixture.name: 14}))
+        self.assertTrue(write_catalog_validation_time(cache_a))
+        snapshot = DirSnapshot()
+        snapshot.observe(self.root_a, self.root_a, ["a1.mp4"], [fixture])
+        snapshot.save(cache_a, self.root_a)
+        sync_disk_lib_memory(self.root_a, rows)
+        publish_unified_library()
+
+        with patch.object(DirSnapshot, "volume_usn_unchanged", return_value=True):
+            _bg_count_then_maybe_scan(self.root_a, do_thumbs=False)
+
+        self.assertEqual([row["rel"] for row in load_catalog_videos(cache_a, self.root_a)], ["a1.mp4"])
+        self.assertEqual({row["rel"] for row in videos_for_scope(None)}, {"a1.mp4", "b1.mp4"})
+        self.assertEqual(cache.read_index_counts(cache_a), (1, {"": 1}))
+        self.assertEqual(count_video_files_by_folder(self.root_a), {"": 1})
+        self.assertEqual(count_video_files_by_folder(fixture), {"": 14})
+        self.assertEqual(len(list(fixture.glob("*.mp4"))), 14)
+
+    def test_unchanged_rescan_skips_catalog_checkpoint(self) -> None:
+        with patch("vg.catalog_db.checkpoint_catalog") as checkpoint:
+            scan_videos(self.root_a, do_thumbs=False, incremental=True, quiet=False)
+        checkpoint.assert_not_called()
+        self.assertIn("复用 1", STATE["scan_progress"])
+
+    def test_rescan_after_delete_prunes_only_the_emptied_disk(self) -> None:
+        (self.root_a / "a1.mp4").unlink()
+        from vg.catalog_db import checkpoint_catalog
+
+        with patch("vg.catalog_db.checkpoint_catalog", wraps=checkpoint_catalog) as checkpoint:
+            scan_videos(self.root_a, do_thumbs=False, incremental=True, quiet=False)
+        checkpoint.assert_called_once_with(ensure_cache_dir(self.root_a))
+
+        self.assertEqual({v["rel"] for v in STATE["videos"]}, {"b1.mp4"})
+        self.assertEqual({v["rel"] for v in STATE["by_id"].values()}, {"b1.mp4"})
+        self.assertEqual(STATE["facets"]["count"], 1)
+        self.assertEqual(load_catalog_videos(ensure_cache_dir(self.root_a), self.root_a), [])
+        self.assertEqual(
+            {r["path"]: r["count"] for r in roots_summary()},
+            {str(self.root_a.resolve()): 0, str(self.root_b.resolve()): 1},
+        )
 
     def test_activate_mount_does_not_drop_offline_sibling(self) -> None:
         from vg.roots import activate_mount, set_mounted_roots

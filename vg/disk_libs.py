@@ -153,11 +153,11 @@ def _disk_lib_entry(root: str | Path | None) -> dict | None:
         return None
     raw = str(root).strip()
     hit = libs.get(raw)
-    if hit and hit.get("by_id"):
+    if hit:
         return hit
     raw_l = raw.lower()
     for key, val in libs.items():
-        if val and val.get("by_id") and str(key).lower() == raw_l:
+        if val and str(key).lower() == raw_l:
             return val
     try:
         resolved = _norm_root_str(raw)
@@ -165,11 +165,11 @@ def _disk_lib_entry(root: str | Path | None) -> dict | None:
         return None
     if resolved and resolved != raw:
         hit = libs.get(resolved)
-        if hit and hit.get("by_id"):
+        if hit:
             return hit
         resolved_l = resolved.lower()
         for key, val in libs.items():
-            if val and val.get("by_id") and str(key).lower() == resolved_l:
+            if val and str(key).lower() == resolved_l:
                 return val
     return None
 
@@ -180,7 +180,8 @@ def memory_catalog_ready(root: str | Path | None) -> bool:
     ``ensure_library`` used to archive the whole active library (Path.resolve
     per row) on every /api/videos-by-ids even when disk_libs was populated.
     """
-    return bool(_disk_lib_entry(root))
+    entry = _disk_lib_entry(root)
+    return bool(entry and "by_id" in entry and (entry["by_id"] or not entry.get("loading")))
 
 
 def stamp_lib_meta(
@@ -293,7 +294,7 @@ def read_root_library(root: Path | str) -> list[dict] | None:
                 if str(k).lower() == root_s.lower():
                     existing = val
                     break
-        if existing and existing.get("by_id") and existing.get("live"):
+        if existing and "by_id" in existing and existing.get("live"):
             return list(existing["by_id"].values())
 
     if not catalog_exists(cache):
@@ -301,19 +302,20 @@ def read_root_library(root: Path | str) -> list[dict] | None:
 
     cache_s = str(cache)
     index_mtime = catalog_mtime(cache)
-    if _catalog_empty_cooled(cache_s, index_mtime):
-        return None
 
     with _libs_guard("disk_libs_read_cached"):
         existing = (STATE.get("disk_libs") or {}).get(root_s)
         if (
             existing
-            and existing.get("by_id")
+            and "by_id" in existing
+            and (existing["by_id"] or not existing.get("loading"))
             and not existing.get("live")
             and float(existing.get("index_mtime") or 0) == float(index_mtime or 0)
         ):
             return list(existing["by_id"].values())
 
+    if _catalog_empty_cooled(cache_s, index_mtime):
+        return None
     leader, flight, flight_key = _begin_catalog_flight(root_s)
     if not leader:
         _wait_catalog_flight(root_s, flight, caller="read_root_library")

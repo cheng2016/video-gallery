@@ -310,26 +310,20 @@ def apply_catalog_to_state(videos: list[dict], indexes: CatalogIndexes) -> None:
 
 
 def rebuild_indexes(videos: list[dict] | None = None, *, heavy: bool = True) -> None:
-    """Compatibility orchestrator for catalog computation and STATE update.
-
-    Concurrent mid-scan ``_publish_live`` may grow ``STATE["videos"]`` while a
-    background rebuild (meta-enrich) is still inside ``compute_catalog``. Applying
-    the older snapshot afterwards shrinks the visible library (bench log:
-    ``apply_catalog_to_state thread=meta-enrich videos_len=4000 prev_videos_len=4500``).
-    Always re-check live length before publishing.
-    """
+    """Explicit replacements may shrink; only live-state rebuilds follow growth."""
     import threading
 
     # Snapshot for the compute pass. Publish the caller's list afterwards so
     # holders of that object keep seeing the same STATE["videos"] identity.
     source = videos
+    follows_live = source is None or source is STATE.get("videos")
     selected = list(source) if source is not None else list(STATE.get("videos") or [])
     started = time.perf_counter()
     indexes = compute_catalog(selected, heavy=heavy)
     compute_ms = (time.perf_counter() - started) * 1000.0
     live = list(STATE.get("videos") or [])
     adopted_live = False
-    if len(live) > len(selected):
+    if follows_live and len(live) > len(selected):
         try:
             from vg.diagnostics import emit
 

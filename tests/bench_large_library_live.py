@@ -44,6 +44,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from vg import web
+from vg.config import BENCH_FIXTURE_DIR_NAME
 from vg.media import find_ffmpeg
 from vg.scan import scan_videos
 from vg.state import STATE
@@ -54,7 +55,7 @@ DEFAULT_TCL_SEED = Path(
     r"C:\Users\ex_zhenjia.cheng\Downloads\1210_TCL_HDR_60F(HDR10+).mp4"
 )
 # Fixture + cache live on D: — never materialize under AppData / C:.
-DEFAULT_FIXTURE_DIR = Path(r"D:\vg_bench_fixture")
+DEFAULT_FIXTURE_DIR = Path("D:/") / BENCH_FIXTURE_DIR_NAME
 _LARGE_SEED_BYTES = 10 * 1024 * 1024
 _MIN_UNIQUE_BODY = 100 * 1024
 # Per-leaf target size. ~413KB was too small for meaningful I/O/probe load;

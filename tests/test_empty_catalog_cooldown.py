@@ -66,6 +66,37 @@ class EmptyCatalogCooldownTests(unittest.TestCase):
             # First miss opens SQLite once; cooldown skips the rest.
             self.assertEqual(mocked.call_count, 1)
 
+    def test_synced_empty_catalog_is_ready_without_reviving_old_state(self) -> None:
+        old = {"id": "old", "rel": "deleted.mp4", "_lib_root": str(self.root)}
+        for cooled in (False, True):
+            with self.subTest(cooled=cooled), patch.dict(
+                STATE, {"videos": [old], "by_id": {"old": old}, "disk_libs": {}}
+            ):
+                if cooled:
+                    disk_libs._mark_catalog_empty(str(self.cache), catalog_db.catalog_mtime(self.cache))
+                disk_libs.sync_disk_lib_memory(self.root, [])
+                with patch("vg.disk_libs.archive_current_library") as archive, patch(
+                    "vg.catalog_db.load_catalog_videos", wraps=catalog_db.load_catalog_videos
+                ) as load:
+                    self.assertTrue(disk_libs.memory_catalog_ready(self.root))
+                    self.assertTrue(disk_libs.memory_catalog_ready(str(self.root).upper()))
+                    self.assertTrue(ensure_library(self.root))
+                    self.assertTrue(load_library_from_index(self.root))
+                    self.assertEqual(read_root_library(self.root), [])
+                    archive.assert_not_called()
+                    load.assert_not_called()
+
+    def test_empty_loading_slot_is_not_a_ready_catalog(self) -> None:
+        root_s = str(self.root.resolve())
+        with patch.dict(STATE, {"disk_libs": {root_s: {"by_id": {}, "loading": True}}}):
+            self.assertFalse(disk_libs.memory_catalog_ready(self.root))
+
+    def test_empty_live_scan_is_an_authoritative_snapshot(self) -> None:
+        with patch.dict(STATE, {"disk_libs": {}}):
+            disk_libs.store_live_library(self.root, [])
+            self.assertTrue(disk_libs.memory_catalog_ready(self.root))
+            self.assertEqual(read_root_library(self.root), [])
+
     def test_writing_rows_invalidates_empty_cooldown_via_mtime(self) -> None:
         self.assertFalse(load_library_from_index(self.root))
         item = {

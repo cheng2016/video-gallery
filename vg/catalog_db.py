@@ -676,6 +676,7 @@ _SORT_SQL = {
     "duration_desc": "duration DESC, id",
     "duration_asc": "duration ASC, id",
 }
+_SQL_NOCASE_TRANSLATION = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
 def query_catalog_page(
@@ -820,16 +821,18 @@ def query_catalogs_page(
             f"ms={(time.perf_counter() - cache_started) * 1000.0:.1f}"
         )
 
-    reverse = sort not in {"mtime_asc", "name", "size_asc", "duration_asc"}
+    # The per-disk prefix is only sufficient if ties use the same order as SQLite.
     if sort == "name":
-        key = lambda item: (str(item.get("name") or "").casefold(), item.get("id") or "")
-    elif sort.startswith("size_"):
-        key = lambda item: (int(item.get("size") or 0), item.get("id") or "")
-    elif sort.startswith("duration_"):
-        key = lambda item: (float(item.get("duration") or 0), item.get("id") or "")
+        key = lambda item: (
+            str(item.get("name") or Path(item.get("filename") or "").stem).translate(_SQL_NOCASE_TRANSLATION),
+            item.get("id") or "",
+        )
     else:
-        key = lambda item: (float(item.get("mtime") or 0), item.get("id") or "")
-    candidates.sort(key=key, reverse=reverse)
+        field, direction = (sort if sort in _SORT_SQL else "mtime_desc").split("_")
+        sign = -1 if direction == "desc" else 1
+        cast = int if field == "size" else float
+        key = lambda item: (sign * cast(item.get(field) or 0), item.get("id") or "")
+    candidates.sort(key=key)
     page = candidates[offset: offset + limit]
     from vg.diagnostics import perf
 

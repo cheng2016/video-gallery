@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from vg.catalog import (
     apply_catalog_to_state,
@@ -23,7 +24,7 @@ class CatalogContractTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_state = {
             key: STATE.get(key)
-            for key in ("root", "videos", "by_id", "by_category", "facets", "lib_gen")
+            for key in ("root", "videos", "by_id", "by_thumb_id", "by_category", "facets", "lib_gen")
         }
         STATE["root"] = Path("D:/library")
         STATE["videos"] = []
@@ -126,6 +127,47 @@ class CatalogContractTests(unittest.TestCase):
         rebuild_indexes(videos)
         self.assertIs(STATE["videos"], videos)
         self.assertEqual(STATE["by_category"]["电影"], videos)
+
+    def test_explicit_replacement_can_remove_rows_while_scanning(self) -> None:
+        old = [self.video("a", "电影/a.mp4"), self.video("b", "电影/b.mp4")]
+        for scanning in (False, True):
+            for remaining in ([old[1]], []):
+                with self.subTest(scanning=scanning, remaining=len(remaining)), patch.dict(
+                    STATE, {"videos": old, "scanning": scanning}
+                ), patch("vg.diagnostics.emit") as emit:
+                    rebuild_indexes(remaining, heavy=False)
+                    expected = {row["id"] for row in remaining}
+                    self.assertIs(STATE["videos"], remaining)
+                    self.assertEqual(set(STATE["by_id"]), expected)
+                    self.assertEqual(set(STATE["by_thumb_id"]), expected)
+                    self.assertEqual(STATE["facets"]["count"], len(remaining))
+                    self.assertFalse(any(
+                        call.args[1] == "catalog_rebuild_adopt_live_grown"
+                        for call in emit.call_args_list
+                    ))
+
+    def test_current_state_rebuild_follows_concurrent_live_growth(self) -> None:
+        for explicit_live in (False, True):
+            old = [self.video("a", "电影/a.mp4")]
+            grown = old + [self.video("b", "电影/b.mp4")]
+            calls = 0
+
+            def compute_and_grow(rows, *, heavy=True):
+                nonlocal calls
+                indexes = compute_catalog(rows, heavy=heavy)
+                calls += 1
+                if calls == 1:
+                    STATE["videos"] = grown
+                return indexes
+
+            with self.subTest(explicit_live=explicit_live), patch.dict(
+                STATE, {"videos": old, "scanning": True}
+            ), patch("vg.catalog.compute_catalog", side_effect=compute_and_grow):
+                rebuild_indexes(old if explicit_live else None, heavy=False)
+                self.assertEqual([row["id"] for row in STATE["videos"]], ["a", "b"])
+                self.assertEqual(set(STATE["by_id"]), {"a", "b"})
+                self.assertEqual(STATE["facets"]["count"], 2)
+                self.assertEqual(calls, 2)
 
     def test_category_order_matches_legacy_order(self) -> None:
         facets = build_category_facets({"其他": 4, "动漫": 1, "电影": 1, "自定义": 9, "": 2})

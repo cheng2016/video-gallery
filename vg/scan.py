@@ -26,6 +26,7 @@ from vg.catalog import (
     video_search_text as _video_search_text,
 )
 from vg.config import (
+    BENCH_FIXTURE_DIR_NAME,
     PLAYLIST_EXTS,
     SEGMENT_EXTS,
     THUMB_EXT,
@@ -381,6 +382,10 @@ def _catalog_item_on_disk(item: dict, root: Path) -> bool:
         return path.is_file() or path.is_dir()
     except OSError:
         return False
+
+
+def _is_benchmark_folder(folder: str) -> bool:
+    return BENCH_FIXTURE_DIR_NAME in folder_key(folder).lower().split("/")
 
 
 def _folder_hit_by_targets(folder: str, targets: set[str]) -> bool:
@@ -1053,7 +1058,9 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
         except Exception:
             last_validation = 0.0
         age_s = time.time() - last_validation if last_validation else None
-        if age_s is not None and 0.0 <= age_s < validation_cooldown_s:
+        stored_n, stored = read_index_counts(cache)
+        has_benchmark_rows = any(_is_benchmark_folder(folder) for folder in stored or {})
+        if not has_benchmark_rows and age_s is not None and 0.0 <= age_s < validation_cooldown_s:
             outcome = "skipped_recent_validation"
             emit(
                 "INFO",
@@ -1070,7 +1077,6 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
             if do_thumbs:
                 from vg.disk_libs import item_belongs_to_root
 
-                stored_n, stored_counts = read_index_counts(cache)
                 scoped = [
                     v
                     for v in (STATE.get("videos") or [])
@@ -1084,14 +1090,14 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
                     cache=cache,
                     root=root,
                     file_count=stored_n,
-                    folder_counts=stored_counts,
+                    folder_counts=stored,
                 )
             _start_metadata_after_scan(root)
             return
         from vg.dir_snapshot import DirSnapshot
 
         dir_snap = DirSnapshot.load(cache)
-        if dir_snap.dirs and dir_snap.volume_usn_unchanged(root):
+        if not has_benchmark_rows and dir_snap.dirs and dir_snap.volume_usn_unchanged(root):
             outcome = "usn_unchanged"
             emit(
                 "INFO",
@@ -1107,7 +1113,7 @@ def _bg_count_then_maybe_scan(root: Path, do_thumbs: bool) -> None:
             except Exception:
                 pass
             return
-        if dir_snap.dirs:
+        if dir_snap.dirs or has_benchmark_rows:
             # Cached directory mtimes already know which subtrees changed.
             # Verify on this low-priority thread instead of counting every file.
             if not try_acquire_scan_lock(f"bg_snapshot_verify:{root}"):
@@ -1985,6 +1991,22 @@ def scan_videos(
     previous_catalog_snapshot = (
         _load_index_videos(cache, root) if previous_catalog_n > 0 else []
     )
+    excluded_benchmark_rows = sum(
+        _is_benchmark_folder(item_folder_key(item)) for item in previous_catalog_snapshot
+    )
+    shrink_baseline = previous_catalog_n
+    if excluded_benchmark_rows:
+        shrink_baseline = len(previous_catalog_snapshot) - excluded_benchmark_rows
+        from vg.diagnostics import emit as _exclude_emit
+
+        _exclude_emit(
+            "INFO",
+            "scan_benchmark_rows_excluded",
+            force=True,
+            root=root,
+            excluded_rows=excluded_benchmark_rows,
+            previous_in_scope=shrink_baseline,
+        )
     old_by_id: dict[str, dict] = {}
     if old_map:
         log(f"[增量] 可复用旧条目 {len(old_map)} 个")
@@ -2017,9 +2039,12 @@ def scan_videos(
     if burst_thumbs is None:
         burst_thumbs = not quiet
 
-    target_folders = {folder_key(k) for k in only_folders} if only_folders is not None else None
+    target_folders = (
+        {folder_key(k) for k in only_folders if not _is_benchmark_folder(k)}
+        if only_folders is not None else None
+    )
     walk_counts: dict[str, int] = (
-        {folder_key(k): int(v) for k, v in folder_counts.items() if int(v) > 0}
+        {folder_key(k): int(v) for k, v in folder_counts.items() if int(v) > 0 and not _is_benchmark_folder(k)}
         if folder_counts is not None
         else {}
     )
@@ -2312,6 +2337,7 @@ def scan_videos(
             v
             for v in prior_index
             if not _folder_hit_by_targets(item_folder_key(v), target_folders)
+            and not _is_benchmark_folder(item_folder_key(v))
         ]
         log(
             f"[增量] 定向扫描 {len(target_folders)} 个目录："
@@ -2360,6 +2386,7 @@ def scan_videos(
         usn_hit = bool(
             incremental
             and previous_catalog_snapshot
+            and not excluded_benchmark_rows
             and dir_snap.volume_usn_unchanged(root)
         )
         if usn_hit:
@@ -2386,6 +2413,8 @@ def scan_videos(
             if reused_dir is None:
                 return None
             files, kids = reused_dir
+            if any(should_skip_dir(kid) for kid in kids):
+                return None
             count_scan("dir_snapshot_hit")
             return files, [Path(dirpath) / kid for kid in kids]
 
@@ -2674,8 +2703,8 @@ def scan_videos(
             target_folders is None
             and is_drive_root
             and dirs_scanned < 200
-            and previous_catalog_n >= 10
-            and len(found) < max(3, int(previous_catalog_n * 0.25))
+            and shrink_baseline >= 10
+            and len(found) < max(3, int(shrink_baseline * 0.25))
         ):
             _diag_emit(
                 "ERROR",
@@ -2833,8 +2862,8 @@ def scan_videos(
     STATE["scan_progress"] = f"扫描完成，共 {len(found)} 个视频{tip}{extra}"
     log(f"[扫描] 完成，共 {len(found)} 个{tip}{extra}")
     shrink_blocked = False
-    shrink_threshold = max(3, int(previous_catalog_n * 0.25)) if previous_catalog_n >= 10 else 0
-    if previous_catalog_n >= 10 and len(found) < shrink_threshold and previous_catalog_snapshot:
+    shrink_threshold = max(3, int(shrink_baseline * 0.25)) if shrink_baseline >= 10 else 0
+    if shrink_baseline >= 10 and len(found) < shrink_threshold and previous_catalog_snapshot:
         shrink_blocked = True
         from vg.diagnostics import emit as _diag_emit
 
@@ -2934,7 +2963,8 @@ def scan_videos(
         removed, freed = cleanup_thumb_files(cache, keep_ids)
         if removed:
             log(f"[缓存] 清理预览图 {removed} 个，释放 {format_size(freed)}")
-        checkpoint_catalog(cache)
+        if _save_ok and not (catalog_unchanged or shrink_blocked):
+            checkpoint_catalog(cache)
     except Exception as e:
         from vg.util import log_error
 

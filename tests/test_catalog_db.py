@@ -18,6 +18,7 @@ from vg.catalog_db import (
     catalog_structure_mtime,
     query_catalog_facets,
     query_catalog_page,
+    query_catalogs_page,
     read_catalog_counts,
     read_catalog_validation_time,
     save_catalog,
@@ -83,6 +84,36 @@ class CatalogDbTests(unittest.TestCase):
         count, folders = read_catalog_counts(cache)
         self.assertEqual(count, 1)
         self.assertEqual(folders, {"": 1})
+
+    def test_multidisk_page_boundaries_use_the_same_order_for_ties(self) -> None:
+        caches = []
+        all_rows = []
+        names = ("Z", "a", "Á", "á", "ß", "ss")
+        for disk in range(2):
+            root = self.base / f"disk-{disk}"
+            root.mkdir()
+            cache = self.base / f"cache-{disk}"
+            caches.append(cache)
+            rows = [
+                dict(self._item(vid=f"{i:016x}", rel=f"{i}/{names[i % len(names)]}.mp4", duration=12.0), mtime=1)
+                for i in range(disk, 38, 2)
+            ]
+            all_rows.extend(rows)
+            self.assertTrue(save_catalog(cache, root, rows))
+        root = self.base / "reference"
+        root.mkdir()
+        reference_cache = self.base / "reference-cache"
+        self.assertTrue(save_catalog(reference_cache, root, all_rows))
+
+        for sort in ("duration_desc", "size_desc", "mtime_desc", "duration_asc", "name"):
+            with self.subTest(sort=sort):
+                expected, _ = query_catalog_page(reference_cache, sort=sort, limit=len(all_rows))
+                ids = []
+                for offset in range(0, len(all_rows), 5):
+                    rows, count = query_catalogs_page(caches, sort=sort, offset=offset, limit=5)
+                    self.assertEqual(count, len(all_rows))
+                    ids.extend(row["id"] for row in rows)
+                self.assertEqual(ids, [row["id"] for row in expected])
 
     def test_validation_marker_does_not_touch_catalog_mtime(self) -> None:
         root = self.base / "validation-lib"

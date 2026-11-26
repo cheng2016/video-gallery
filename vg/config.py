@@ -134,7 +134,9 @@ THUMB_JPEG_CACHE_MAX_BYTES = 192 * 1024 * 1024
 # 转码/修声音同时跑的任务数（1=最稳，不打满 CPU；可在 prefs 覆盖）
 CONVERT_MAX_PARALLEL = 1
 
+BENCH_FIXTURE_DIR_NAME = "vg_bench_fixture"
 SKIP_DIR_NAMES = {
+    BENCH_FIXTURE_DIR_NAME,
     "$recycle.bin", "system volume information", "recovery",
     "windows", "program files", "program files (x86)", "programdata",
     "perflogs", "msocache", "documents and settings",
